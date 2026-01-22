@@ -1,5 +1,6 @@
 """Abstract base class for Braintrust resource migrators."""
 
+import dataclasses
 import json
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
@@ -715,32 +716,107 @@ class ResourceMigrator(ABC, Generic[T]):
         resource_type = type(resource).__name__
         resource_id = getattr(resource, "id", "unknown")
 
-        try:
-            # Try the full Braintrust API object serialization first
-            if hasattr(resource, "to_dict") and callable(resource.to_dict):
+        serialized: dict[str, Any] | None = None
+        first_error: Exception | None = None
+
+        def _as_dict(obj: Any) -> dict[str, Any] | None:
+            if isinstance(obj, dict):
+                return obj
+            return None
+
+        # 1) Prefer generated-client "to_dict" if available, but be defensive:
+        # some objects throw Pydantic-internal serialization errors for certain kwargs.
+        if hasattr(resource, "to_dict") and callable(resource.to_dict):
+            try:
+                maybe = resource.to_dict(  # type: ignore[misc]
+                    mode="json",
+                    exclude_unset=True,
+                    exclude_none=True,
+                    use_api_names=True,
+                )
+                serialized = _as_dict(maybe)
+            except TypeError:
+                # Older/alternate signature: try without kwargs.
                 try:
-                    serialized = resource.to_dict(
-                        mode="json",
-                        exclude_unset=True,
-                        exclude_none=True,
-                        use_api_names=True,
-                    )
-                except TypeError:
-                    # Fallback for objects that don't support these parameters
-                    serialized = resource.to_dict()
-            else:
-                # Fallback for objects without to_dict method
-                serialized = resource.__dict__.copy()
-        except Exception as e:
+                    maybe = resource.to_dict()  # type: ignore[misc]
+                    serialized = _as_dict(maybe)
+                except Exception as e:
+                    first_error = first_error or e
+            except Exception as e:
+                # E.g. "'MockValSer' object cannot be converted to 'SchemaSerializer'"
+                first_error = first_error or e
+                try:
+                    maybe = resource.to_dict()  # type: ignore[misc]
+                    serialized = _as_dict(maybe)
+                except Exception as e2:
+                    first_error = first_error or e2
+
+        # 2) Pydantic v2 models
+        if (
+            serialized is None
+            and hasattr(resource, "model_dump")
+            and callable(  # type: ignore[misc]
+                resource.model_dump
+            )
+        ):
+            try:
+                maybe = resource.model_dump(  # type: ignore[misc]
+                    mode="json",
+                    by_alias=True,
+                    exclude_unset=True,
+                    exclude_none=True,
+                )
+                serialized = _as_dict(maybe)
+            except Exception as e:
+                first_error = first_error or e
+
+        # 3) Pydantic v1 models
+        if (
+            serialized is None
+            and hasattr(resource, "dict")
+            and callable(  # type: ignore[misc]
+                resource.dict
+            )
+        ):
+            try:
+                maybe = resource.dict(  # type: ignore[misc]
+                    by_alias=True,
+                    exclude_unset=True,
+                    exclude_none=True,
+                )
+                serialized = _as_dict(maybe)
+            except Exception as e:
+                first_error = first_error or e
+
+        # 4) Dataclasses
+        if serialized is None and dataclasses.is_dataclass(resource):
+            try:
+                serialized = dataclasses.asdict(resource)
+            except Exception as e:
+                first_error = first_error or e
+
+        # 5) Best-effort: __dict__
+        if serialized is None:
+            try:
+                raw = getattr(resource, "__dict__", {}).copy()
+                # Drop private/internal keys which frequently contain unserializable objects
+                serialized = {
+                    k: v for k, v in raw.items() if not str(k).startswith("_")
+                }
+            except Exception as e:
+                first_error = first_error or e
+
+        if serialized is None:
+            err = first_error or ValueError("Unknown serialization failure")
             self._logger.error(
                 "Failed to serialize resource for insertion",
-                error=str(e),
+                error=str(err),
                 resource_type=resource_type,
                 resource_id=resource_id,
             )
             raise ValueError(
                 f"Failed to serialize resource {resource_type} with id {resource_id}"
-            ) from e
+            ) from err
 
         allowed_fields = self.allowed_fields_for_insert
         if allowed_fields is None:

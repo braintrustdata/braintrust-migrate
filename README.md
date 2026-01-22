@@ -1,6 +1,6 @@
 # Braintrust Migration Tool
 
-> **⚠️ WARNING: This tool is primarily intended for migrating a small amount of data (e.g., data used during POCs or initial testing). Large-scale migrations—especially of logs and experiments—have not been thoroughly tested and may not be reliable for production-scale data. Use with caution for anything beyond POC/test data.**
+> **⚠️ WARNING: Large-scale migrations (especially logs/experiments) can be extremely expensive and operationally risky. This tool includes streaming + resumable migration for high-volume event streams, but TB-scale migrations have not been fully soak-tested in production-like conditions. Use with caution and test on a subset first.**
 
 A Python CLI & library for migrating Braintrust organizations with maximum fidelity, leveraging the official `braintrust-api-py` SDK.
 
@@ -19,6 +19,8 @@ This tool provides migration capabilities for Braintrust organizations, handling
 - **Dependency Resolution**: Handles resource dependencies (e.g., functions referenced by prompts, datasets referenced by experiments)
 - **Organization vs Project Scope**: Org-level resources are migrated once, project-level resources per project
 - **Real-time Progress**: Live progress indicators and detailed migration reports
+- **High-volume Streaming**: Logs, experiment events, and dataset events are migrated via cursor-based pagination with bounded insert batches
+- **Resume + Idempotency**: Small checkpoints + a SQLite “seen ids” store enable safe resume and help avoid duplicate inserts/overwrites
 
 ## Features
 
@@ -28,7 +30,7 @@ This tool provides migration capabilities for Braintrust organizations, handling
 - **Batch Processing**: Configurable batch sizes for optimal performance
 
 ### Reliability Features
-- **Retry Logic**: Exponential backoff with configurable retry attempts
+- **Retry Logic**: Adaptive retries with exponential backoff + jitter; respects `Retry-After` when rate-limited (429)
 - **Validation**: Pre-flight connectivity and permission checks
 - **Error Recovery**: Detailed error reporting with actionable guidance
 
@@ -108,6 +110,12 @@ BT_DEST_URL=https://api.braintrust.dev
 LOG_LEVEL=INFO                    # DEBUG, INFO, WARNING, ERROR
 LOG_FORMAT=json                   # json, text
 
+# Optional CLI defaults (can also be passed as flags)
+# - MIGRATION_RESOURCES: comma-separated list (e.g. "logs,experiments")
+# - MIGRATION_PROJECTS: comma-separated list of project names
+MIGRATION_RESOURCES=all
+MIGRATION_PROJECTS=
+
 # Performance tuning
 MIGRATION_BATCH_SIZE=100          # Resources per batch
 MIGRATION_RETRY_ATTEMPTS=3        # Retry failed operations
@@ -117,6 +125,26 @@ MIGRATION_CHECKPOINT_INTERVAL=50  # Checkpoint frequency
 
 # Storage
 MIGRATION_STATE_DIR=./checkpoints # Checkpoint directory
+
+# (Advanced) Explicitly resume from a timestamped run directory.
+# Prefer passing MIGRATION_STATE_DIR as the run directory instead.
+MIGRATION_RESUME_RUN_DIR=
+
+# Streaming migration tuning (high-volume)
+MIGRATION_LOGS_FETCH_LIMIT=50
+MIGRATION_LOGS_INSERT_BATCH_SIZE=200
+MIGRATION_LOGS_USE_VERSION_SNAPSHOT=true
+MIGRATION_LOGS_USE_SEEN_DB=true
+
+MIGRATION_EXPERIMENT_EVENTS_FETCH_LIMIT=50
+MIGRATION_EXPERIMENT_EVENTS_INSERT_BATCH_SIZE=200
+MIGRATION_EXPERIMENT_EVENTS_USE_VERSION_SNAPSHOT=true
+MIGRATION_EXPERIMENT_EVENTS_USE_SEEN_DB=true
+
+MIGRATION_DATASET_EVENTS_FETCH_LIMIT=50
+MIGRATION_DATASET_EVENTS_INSERT_BATCH_SIZE=200
+MIGRATION_DATASET_EVENTS_USE_VERSION_SNAPSHOT=true
+MIGRATION_DATASET_EVENTS_USE_SEEN_DB=true
 ```
 
 ### Getting API Keys
@@ -160,7 +188,20 @@ braintrust-migrate migrate --projects "Project A","Project B"
 **Resume Migration:**
 ```bash
 # Resume from last checkpoint (automatic)
-braintrust-migrate migrate --state-dir ./my-migration
+#
+# `--state-dir` (or MIGRATION_STATE_DIR) can be:
+# - a root directory (creates a new timestamped run dir under it)
+# - a run directory (resumes that run)
+# - a project directory within a run (resumes that run and infers the project)
+#
+# Root checkpoints dir (new run):
+braintrust-migrate migrate --state-dir ./checkpoints
+#
+# Resume from a specific run:
+braintrust-migrate migrate --state-dir ./checkpoints/20260113_212530
+#
+# Resume just one project from a run:
+braintrust-migrate migrate --state-dir ./checkpoints/20260113_212530/langgraph-supervisor --resources logs
 ```
 
 ### Advanced Usage
@@ -208,8 +249,8 @@ The migration follows a dependency-aware order:
 7. **Functions** - Tools, scorers, tasks, and LLMs (migrated before prompts)
 8. **Prompts** - Template definitions that can use functions as tools
 9. **Project Scores** - Scoring configurations
-10. **Experiments** - Evaluation runs and results  
-11. **Logs** - Experiment execution traces
+10. **Experiments** - Experiment definitions + event stream (cursor-paginated)
+11. **Logs** - Project logs / traces (cursor-paginated)
 12. **Views** - Custom project views
 
 ### Smart Dependency Handling
@@ -217,7 +258,7 @@ The migration follows a dependency-aware order:
 - **Functions are migrated before prompts** to ensure all function references in prompts can be resolved.
 - **Experiments** handle dependencies on datasets and other experiments (via `base_exp_id`) in a single pass with dependency-aware ordering.
 - **ID mapping and dependency resolution** are used throughout to ensure references are updated to the new organization/project.
-- **No two-pass system**: Prompts and functions are migrated in a single pass each, in the order above.
+- **Prompts** are migrated in a single pass; prompt origins and tool/function references are remapped via ID mappings.
 - **ACLs**: Support is present in the codebase but may be experimental or disabled by default.
 - **Agents and users**: Not supported for migration (users are org-specific; agents are not present in the codebase).
 
@@ -273,7 +314,7 @@ curl -H "Authorization: Bearer $BT_SOURCE_API_KEY" \
 ```
 
 **2. Dependency Errors**
-- **Circular Dependencies**: Handled automatically by two-pass system
+- **Circular Dependencies**: If you hit a dependency loop, try migrating the involved resource types separately (or re-run; idempotent resources will skip)
 - **Missing Resources**: Check source organization for required dependencies
 - **Permission Issues**: Ensure API keys have read/write access
 
@@ -292,8 +333,10 @@ braintrust-migrate migrate --resources prompts,functions
 
 **4. Network Issues**
 - **Timeouts**: Increase retry attempts and delay
-- **Rate Limits**: Reduce batch size and concurrent operations
+- **Rate Limits**: Reduce batch size and concurrent operations; the client respects `Retry-After` when throttled (429)
 - **Connectivity**: Verify firewall and proxy settings
+
+> **Tip:** If you want rate-limit retries/backoff to actually happen, ensure `MIGRATION_RETRY_ATTEMPTS` is **greater than 0**. If it is set to `0`, the tool will fail fast on 429/5xx without retrying.
 
 ### Debug Mode
 
@@ -317,8 +360,11 @@ braintrust-migrate validate
 # Automatic resume (recommended)
 braintrust-migrate migrate
 
-# Manual checkpoint specification
+# Manual checkpoint specification (run directory)
 braintrust-migrate migrate --state-dir ./checkpoints/20240115_103045
+
+# Or point directly at a single project's checkpoint directory
+braintrust-migrate migrate --state-dir ./checkpoints/20240115_103045/ProjectA --resources logs
 ```
 
 **Partial Re-migration:**
@@ -344,17 +390,13 @@ braintrust_migrate/
 │   ├── base.py                   # Abstract base migrator class
 │   ├── ai_secrets.py             # AI provider credentials
 │   ├── datasets.py               # Training/evaluation data
-│   ├── prompts.py                # Prompt templates (two-pass)
+│   ├── prompts.py                # Prompt templates
 │   ├── functions.py              # Tools, scorers, tasks
-│   ├── agents.py                 # AI agent configurations
 │   ├── experiments.py            # Evaluation runs
 │   ├── logs.py                   # Execution traces
 │   ├── roles.py                  # Organization roles
 │   ├── groups.py                 # Organization groups
 │   └── views.py                  # Project views
-├── utils/                        # Utility modules
-│   ├── logging.py                # Structured logging setup
-│   └── retry.py                  # Retry logic helpers
 └── checkpoints/                  # Migration state (created at runtime)
     ├── organization/             # Org-scoped resource checkpoints
     └── project_name/            # Project-scoped checkpoints

@@ -8,13 +8,22 @@ from braintrust_api.types import Experiment
 from braintrust_migrate.resources.experiments import ExperimentMigrator
 
 
+async def _passthrough_with_retry(_operation_name: str, coro_func):
+    """Execute the callable passed to with_retry, like the real BraintrustClient does."""
+    result = coro_func()
+    if hasattr(result, "__await__"):
+        return await result
+    return result
+
+
 @pytest.fixture
 def mock_source_client():
     """Create a mock source client."""
     client = Mock()
     client.client.experiments.list = AsyncMock()
     client.client.experiments.fetch = AsyncMock()
-    client.with_retry = AsyncMock()
+    client.raw_request = AsyncMock(return_value={"events": [], "cursor": None})
+    client.with_retry = AsyncMock(side_effect=_passthrough_with_retry)
     return client
 
 
@@ -25,7 +34,8 @@ def mock_dest_client():
     client.client.experiments.list = AsyncMock()
     client.client.experiments.create = AsyncMock()
     client.client.experiments.insert = AsyncMock()
-    client.with_retry = AsyncMock()
+    client.raw_request = AsyncMock(return_value={"row_ids": []})
+    client.with_retry = AsyncMock(side_effect=_passthrough_with_retry)
     return client
 
 
@@ -240,10 +250,7 @@ class TestExperimentDependencies:
         # Mock successful experiment creation
         new_experiment = Mock(spec=Experiment)
         new_experiment.id = "new-exp-123"
-        mock_dest_client.with_retry.return_value = new_experiment
-
-        # Mock empty events response for _migrate_experiment_events
-        mock_source_client.with_retry.return_value = Mock(events=None)
+        mock_dest_client.client.experiments.create.return_value = new_experiment
 
         migrator = ExperimentMigrator(
             mock_source_client, mock_dest_client, temp_checkpoint_dir
@@ -272,10 +279,7 @@ class TestExperimentDependencies:
         # Mock successful experiment creation
         new_experiment = Mock(spec=Experiment)
         new_experiment.id = "new-exp-456"
-        mock_dest_client.with_retry.return_value = new_experiment
-
-        # Mock empty events response for _migrate_experiment_events
-        mock_source_client.with_retry.return_value = Mock(events=None)
+        mock_dest_client.client.experiments.create.return_value = new_experiment
 
         migrator = ExperimentMigrator(
             mock_source_client, mock_dest_client, temp_checkpoint_dir
@@ -304,10 +308,7 @@ class TestExperimentDependencies:
         # Mock successful experiment creation
         new_experiment = Mock(spec=Experiment)
         new_experiment.id = "new-exp-789"
-        mock_dest_client.with_retry.return_value = new_experiment
-
-        # Mock empty events response for _migrate_experiment_events
-        mock_source_client.with_retry.return_value = Mock(events=None)
+        mock_dest_client.client.experiments.create.return_value = new_experiment
 
         migrator = ExperimentMigrator(
             mock_source_client, mock_dest_client, temp_checkpoint_dir
@@ -335,10 +336,7 @@ class TestExperimentDependencies:
         # Mock successful experiment creation
         new_experiment = Mock(spec=Experiment)
         new_experiment.id = "new-exp-999"
-        mock_dest_client.with_retry.return_value = new_experiment
-
-        # Mock empty events response for _migrate_experiment_events
-        mock_source_client.with_retry.return_value = Mock(events=None)
+        mock_dest_client.client.experiments.create.return_value = new_experiment
 
         migrator = ExperimentMigrator(
             mock_source_client, mock_dest_client, temp_checkpoint_dir
