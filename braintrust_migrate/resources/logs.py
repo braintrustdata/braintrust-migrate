@@ -531,7 +531,7 @@ class LogsMigrator(ResourceMigrator[dict[str, Any]]):
                 self._stream_state.query_source = "btql_sorted_created_after"
                 self._save_stream_state()
 
-                progress_hook = self._progress_hook
+            progress_hook = self._progress_hook
             current_page_num: int | None = None
             current_page_events: int | None = None
 
@@ -566,24 +566,24 @@ class LogsMigrator(ResourceMigrator[dict[str, Any]]):
                 current_page_events = cast(int, info.get("page_events"))
                 if progress_hook is None:
                     return
-                    progress_hook(
-                        {
-                            "resource": "logs",
-                            "phase": "fetch",
-                            "source_project_id": source_project_id,
-                            "dest_project_id": dest_project_id,
-                            "page_num": current_page_num,
-                            "page_events": current_page_events,
-                            "configured_fetch_limit": self.page_limit,
-                            "configured_insert_batch_size": self.insert_batch_size,
-                            "fetched_total": self._stream_state.fetched_events,
-                            "inserted_total": self._stream_state.inserted_events,
-                            "inserted_bytes_total": self._stream_state.inserted_bytes,
-                            "skipped_seen_total": self._stream_state.skipped_seen,
-                            "attachments_copied_total": self._stream_state.attachments_copied,
-                            "cursor": _pk_cursor_prefix(),
-                        }
-                    )
+                progress_hook(
+                    {
+                        "resource": "logs",
+                        "phase": "fetch",
+                        "source_project_id": source_project_id,
+                        "dest_project_id": dest_project_id,
+                        "page_num": current_page_num,
+                        "page_events": current_page_events,
+                        "configured_fetch_limit": self.page_limit,
+                        "configured_insert_batch_size": self.insert_batch_size,
+                        "fetched_total": self._stream_state.fetched_events,
+                        "inserted_total": self._stream_state.inserted_events,
+                        "inserted_bytes_total": self._stream_state.inserted_bytes,
+                        "skipped_seen_total": self._stream_state.skipped_seen,
+                        "attachments_copied_total": self._stream_state.attachments_copied,
+                        "cursor": _pk_cursor_prefix(),
+                    }
+                )
 
             def _on_insert(insert_info: dict[str, Any]) -> None:
                 if progress_hook is None:
