@@ -141,22 +141,27 @@ class TestOpenAPIFieldInclusion:
         }
         assert allowed_fields == expected_allowed
 
-    async def test_logs_migrator_uses_openapi_fields(
+    async def test_logs_migrator_has_explicit_insert_allowlist(
         self,
         mock_source_client,
         mock_dest_client,
         temp_checkpoint_dir,
     ):
-        """Test that LogsMigrator uses OpenAPI-determined allowed fields."""
+        """Test that LogsMigrator has a stable allow-list for insert payloads."""
         migrator = LogsMigrator(
-            mock_source_client, mock_dest_client, temp_checkpoint_dir
+            mock_source_client,
+            mock_dest_client,
+            temp_checkpoint_dir,
+            page_limit=1,
+            insert_batch_size=1,
         )
 
-        # Should have allowed fields from OpenAPI spec for InsertProjectLogsEvent
-        allowed_fields = migrator.allowed_fields_for_insert
-        assert allowed_fields is not None
-        assert isinstance(allowed_fields, set)
-        assert len(allowed_fields) > 0
+        insert_fields = migrator._INSERT_FIELDS
+        assert isinstance(insert_fields, set)
+        assert "_is_merge" in insert_fields
+        assert "_merge_paths" in insert_fields
+        # Docs include this even though older specs may omit it
+        assert "_array_delete" in insert_fields
 
     async def test_all_migrators_use_consistent_approach(
         self,
@@ -174,8 +179,14 @@ class TestOpenAPIFieldInclusion:
         function_migrator = FunctionMigrator(
             mock_source_client, mock_dest_client, temp_checkpoint_dir
         )
+        # LogsMigrator is streaming-only and does not use OpenAPI create schemas.
+        # It maintains a manual allow-list for InsertProjectLogsEvent.
         logs_migrator = LogsMigrator(
-            mock_source_client, mock_dest_client, temp_checkpoint_dir
+            mock_source_client,
+            mock_dest_client,
+            temp_checkpoint_dir,
+            page_limit=1,
+            insert_batch_size=1,
         )
         prompt_migrator = PromptMigrator(
             mock_source_client, mock_dest_client, temp_checkpoint_dir
@@ -186,7 +197,6 @@ class TestOpenAPIFieldInclusion:
             dataset_migrator,
             experiment_migrator,
             function_migrator,
-            logs_migrator,
             prompt_migrator,
         ]:
             allowed_fields = migrator.allowed_fields_for_insert
@@ -202,8 +212,8 @@ class TestOpenAPIFieldInclusion:
         assert experiment_migrator.allowed_fields_for_insert is not None
         assert function_migrator.allowed_fields_for_insert is not None
 
-        # LogsMigrator now also has allowed fields (InsertProjectLogsEvent schema)
-        assert logs_migrator.allowed_fields_for_insert is not None
+        # LogsMigrator is validated separately via explicit allow-list
+        assert isinstance(logs_migrator._INSERT_FIELDS, set)
 
     async def test_resource_name_to_schema_mapping(
         self,

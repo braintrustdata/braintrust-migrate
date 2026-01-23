@@ -3,34 +3,14 @@
 from unittest.mock import Mock
 
 import pytest
-from braintrust_api.types import Function
 
 from braintrust_migrate.resources.functions import FunctionMigrator
 
 
 @pytest.fixture
 def function_with_prompt_origin():
-    """Create a function that depends on a prompt."""
-    function = Mock(spec=Function)
-    function.id = "func-123"
-    function.name = "Test Function"
-    function.slug = "test-function"
-    function.project_id = "project-456"
-    function.function_data = {"type": "code", "code": "def test(): pass"}
-    function.description = "A test function"
-    function.tags = ["test"]
-    function.function_type = "tool"
-    function.function_schema = {"parameters": {}, "returns": {}}
-
-    # Mock origin that references a prompt
-    origin = Mock()
-    origin.object_type = "prompt"
-    origin.object_id = "prompt-789"
-    origin.internal = False
-    function.origin = origin
-
-    # Mock the to_dict method to return a proper dictionary
-    function.to_dict.return_value = {
+    """Create a function dict that depends on a prompt."""
+    return {
         "id": "func-123",
         "name": "Test Function",
         "slug": "test-function",
@@ -47,32 +27,11 @@ def function_with_prompt_origin():
         },
     }
 
-    return function
-
 
 @pytest.fixture
 def function_with_dataset_origin():
-    """Create a function that depends on a dataset."""
-    function = Mock(spec=Function)
-    function.id = "func-789"
-    function.name = "Dataset Function"
-    function.slug = "dataset-function"
-    function.project_id = "project-456"
-    function.function_data = {"type": "code", "code": "def dataset_func(): pass"}
-    function.description = "A function with dataset origin"
-    function.tags = ["dataset"]
-    function.function_type = "tool"
-    function.function_schema = {"parameters": {}, "returns": {}}
-
-    # Mock origin that references a dataset
-    origin = Mock()
-    origin.object_type = "dataset"
-    origin.object_id = "dataset-123"
-    origin.internal = False
-    function.origin = origin
-
-    # Mock the to_dict method to return a proper dictionary
-    function.to_dict.return_value = {
+    """Create a function dict that depends on a dataset."""
+    return {
         "id": "func-789",
         "name": "Dataset Function",
         "slug": "dataset-function",
@@ -89,32 +48,11 @@ def function_with_dataset_origin():
         },
     }
 
-    return function
-
 
 @pytest.fixture
 def function_with_non_migratable_origin():
-    """Create a function with origin pointing to a non-migratable resource."""
-    function = Mock(spec=Function)
-    function.id = "func-999"
-    function.name = "Org Function"
-    function.slug = "org-function"
-    function.project_id = "project-456"
-    function.function_data = {"type": "code", "code": "def org_func(): pass"}
-    function.description = "A function with organization origin"
-    function.tags = ["org"]
-    function.function_type = "tool"
-    function.function_schema = {"parameters": {}, "returns": {}}
-
-    # Mock origin that references an organization (non-migratable)
-    origin = Mock()
-    origin.object_type = "organization"
-    origin.object_id = "org-123"
-    origin.internal = False
-    function.origin = origin
-
-    # Mock the to_dict method to return a proper dictionary
-    function.to_dict.return_value = {
+    """Create a function dict with origin pointing to a non-migratable resource."""
+    return {
         "id": "func-999",
         "name": "Org Function",
         "slug": "org-function",
@@ -131,26 +69,11 @@ def function_with_non_migratable_origin():
         },
     }
 
-    return function
-
 
 @pytest.fixture
 def function_without_origin():
-    """Create a function without origin dependencies."""
-    function = Mock(spec=Function)
-    function.id = "func-456"
-    function.name = "Independent Function"
-    function.slug = "independent-function"
-    function.project_id = "project-456"
-    function.function_data = {"type": "code", "code": "def independent(): pass"}
-    function.description = "A function without dependencies"
-    function.tags = ["independent"]
-    function.function_type = "scorer"
-    function.function_schema = {"parameters": {}, "returns": {}}
-    function.origin = None
-
-    # Mock the to_dict method to return a proper dictionary
-    function.to_dict.return_value = {
+    """Create a function dict without origin dependencies."""
+    return {
         "id": "func-456",
         "name": "Independent Function",
         "slug": "independent-function",
@@ -162,8 +85,6 @@ def function_without_origin():
         "function_schema": {"parameters": {}, "returns": {}},
         "origin": None,
     }
-
-    return function
 
 
 @pytest.mark.asyncio
@@ -218,12 +139,19 @@ class TestFunctionDependencies:
         # Set up ID mapping for the prompt dependency
         migrator.state.id_mapping["prompt-789"] = "dest-prompt-789"
 
-        # Mock successful function creation
-        created_function = Mock(spec=Function)
-        created_function.id = "dest-func-123"
-        created_function.name = "Test Function"
-        created_function.slug = "test-function"
-        mock_dest_client.with_retry.return_value = created_function
+        # Mock successful function creation via raw_request
+        async def mock_with_retry(operation_name, coro_func):
+            result = coro_func()
+            if hasattr(result, "__await__"):
+                return await result
+            return result
+
+        mock_dest_client.with_retry.side_effect = mock_with_retry
+        mock_dest_client.raw_request.return_value = {
+            "id": "dest-func-123",
+            "name": "Test Function",
+            "slug": "test-function",
+        }
 
         result = await migrator.migrate_resource(function_with_prompt_origin)
 
@@ -243,12 +171,19 @@ class TestFunctionDependencies:
         )
         migrator.dest_project_id = "dest-project-456"
 
-        # Mock successful function creation
-        created_function = Mock(spec=Function)
-        created_function.id = "dest-func-456"
-        created_function.name = "Independent Function"
-        created_function.slug = "independent-function"
-        mock_dest_client.with_retry.return_value = created_function
+        # Mock successful function creation via raw_request
+        async def mock_with_retry(operation_name, coro_func):
+            result = coro_func()
+            if hasattr(result, "__await__"):
+                return await result
+            return result
+
+        mock_dest_client.with_retry.side_effect = mock_with_retry
+        mock_dest_client.raw_request.return_value = {
+            "id": "dest-func-456",
+            "name": "Independent Function",
+            "slug": "independent-function",
+        }
 
         result = await migrator.migrate_resource(function_without_origin)
 
@@ -270,12 +205,19 @@ class TestFunctionDependencies:
 
         # No ID mapping set up - dependency unresolved
 
-        # Mock successful function creation (should still work, just without origin)
-        created_function = Mock(spec=Function)
-        created_function.id = "dest-func-123"
-        created_function.name = "Test Function"
-        created_function.slug = "test-function"
-        mock_dest_client.with_retry.return_value = created_function
+        # Mock successful function creation via raw_request
+        async def mock_with_retry(operation_name, coro_func):
+            result = coro_func()
+            if hasattr(result, "__await__"):
+                return await result
+            return result
+
+        mock_dest_client.with_retry.side_effect = mock_with_retry
+        mock_dest_client.raw_request.return_value = {
+            "id": "dest-func-123",
+            "name": "Test Function",
+            "slug": "test-function",
+        }
 
         result = await migrator.migrate_resource(function_with_prompt_origin)
 
@@ -333,11 +275,18 @@ class TestFunctionDependencies:
         migrator.state.id_mapping["dataset-123"] = "dest-dataset-123"
 
         # Mock successful function creation
-        created_function = Mock(spec=Function)
-        created_function.id = "dest-func-789"
-        created_function.name = "Dataset Function"
-        created_function.slug = "dataset-function"
-        mock_dest_client.with_retry.return_value = created_function
+        async def mock_with_retry(operation_name, coro_func):
+            result = coro_func()
+            if hasattr(result, "__await__"):
+                return await result
+            return result
+
+        mock_dest_client.with_retry.side_effect = mock_with_retry
+        mock_dest_client.raw_request.return_value = {
+            "id": "dest-func-789",
+            "name": "Dataset Function",
+            "slug": "dataset-function",
+        }
 
         result = await migrator.migrate_resource(function_with_dataset_origin)
 
@@ -358,11 +307,18 @@ class TestFunctionDependencies:
         migrator.dest_project_id = "dest-project-456"
 
         # Mock successful function creation
-        created_function = Mock(spec=Function)
-        created_function.id = "dest-func-999"
-        created_function.name = "Org Function"
-        created_function.slug = "org-function"
-        mock_dest_client.with_retry.return_value = created_function
+        async def mock_with_retry(operation_name, coro_func):
+            result = coro_func()
+            if hasattr(result, "__await__"):
+                return await result
+            return result
+
+        mock_dest_client.with_retry.side_effect = mock_with_retry
+        mock_dest_client.raw_request.return_value = {
+            "id": "dest-func-999",
+            "name": "Org Function",
+            "slug": "org-function",
+        }
 
         result = await migrator.migrate_resource(function_with_non_migratable_origin)
 
@@ -405,11 +361,18 @@ class TestFunctionDependencies:
         migrator._list_resources_with_client = mock_list_resources_with_client
 
         # Mock successful function creation
-        created_function = Mock(spec=Function)
-        created_function.id = "dest-func-123"
-        created_function.name = "Test Function"
-        created_function.slug = "test-function"
-        mock_dest_client.with_retry.return_value = created_function
+        async def mock_with_retry(operation_name, coro_func):
+            result = coro_func()
+            if hasattr(result, "__await__"):
+                return await result
+            return result
+
+        mock_dest_client.with_retry.side_effect = mock_with_retry
+        mock_dest_client.raw_request.return_value = {
+            "id": "dest-func-123",
+            "name": "Test Function",
+            "slug": "test-function",
+        }
 
         result = await migrator.migrate_resource(function_with_prompt_origin)
 
@@ -447,11 +410,18 @@ class TestFunctionDependencies:
         migrator._list_resources_with_client = mock_list_resources_with_client
 
         # Mock successful function creation (should work even without resolved origin)
-        created_function = Mock(spec=Function)
-        created_function.id = "dest-func-123"
-        created_function.name = "Test Function"
-        created_function.slug = "test-function"
-        mock_dest_client.with_retry.return_value = created_function
+        async def mock_with_retry(operation_name, coro_func):
+            result = coro_func()
+            if hasattr(result, "__await__"):
+                return await result
+            return result
+
+        mock_dest_client.with_retry.side_effect = mock_with_retry
+        mock_dest_client.raw_request.return_value = {
+            "id": "dest-func-123",
+            "name": "Test Function",
+            "slug": "test-function",
+        }
 
         result = await migrator.migrate_resource(function_with_prompt_origin)
 
@@ -527,22 +497,8 @@ class TestFunctionDependencies:
         )
         migrator.dest_project_id = "dest-project-456"
 
-        # Create two functions that reference the same dataset type
-        function1 = Mock(spec=Function)
-        function1.id = "func-123"
-        function1.name = "Function 1"
-        function1.slug = "function-1"
-        function1.project_id = "project-456"
-        function1.function_data = {"type": "code", "code": "def func1(): pass"}
-
-        # Mock origin that references dataset-1
-        origin1 = Mock()
-        origin1.object_type = "dataset"
-        origin1.object_id = "dataset-123"
-        origin1.internal = False
-        function1.origin = origin1
-
-        function1.to_dict.return_value = {
+        # Create two function dicts that reference the same dataset type
+        function1 = {
             "id": "func-123",
             "name": "Function 1",
             "slug": "function-1",
@@ -555,21 +511,7 @@ class TestFunctionDependencies:
             },
         }
 
-        function2 = Mock(spec=Function)
-        function2.id = "func-456"
-        function2.name = "Function 2"
-        function2.slug = "function-2"
-        function2.project_id = "project-456"
-        function2.function_data = {"type": "code", "code": "def func2(): pass"}
-
-        # Mock origin that references dataset-2 (same type, different ID)
-        origin2 = Mock()
-        origin2.object_type = "dataset"
-        origin2.object_id = "dataset-456"
-        origin2.internal = False
-        function2.origin = origin2
-
-        function2.to_dict.return_value = {
+        function2 = {
             "id": "func-456",
             "name": "Function 2",
             "slug": "function-2",
@@ -614,24 +556,24 @@ class TestFunctionDependencies:
 
         migrator._list_resources_with_client = mock_list_resources_with_client
 
-        # Mock successful function creations
-        created_function1 = Mock(spec=Function)
-        created_function1.id = "dest-func-123"
-
-        created_function2 = Mock(spec=Function)
-        created_function2.id = "dest-func-456"
-
-        # Return different functions for different calls
+        # Mock successful function creations via raw_request
         call_order = []
 
-        def mock_with_retry(operation_name, func):
+        async def mock_with_retry(operation_name, coro_func):
             call_order.append(operation_name)
-            if len(call_order) == 1:  # First function creation
-                return created_function1
-            else:  # Second function creation
-                return created_function2
+            result = coro_func()
+            if hasattr(result, "__await__"):
+                return await result
+            return result
 
         mock_dest_client.with_retry.side_effect = mock_with_retry
+
+        # Return different responses for different calls
+        response_queue = [
+            {"id": "dest-func-123", "name": "Function 1", "slug": "function-1"},
+            {"id": "dest-func-456", "name": "Function 2", "slug": "function-2"},
+        ]
+        mock_dest_client.raw_request.side_effect = response_queue
 
         # Migrate first function - should make API calls to fetch datasets
         result1 = await migrator.migrate_resource(function1)

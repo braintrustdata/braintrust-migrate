@@ -1,33 +1,29 @@
 """Project score migration functionality."""
 
-import structlog
-from braintrust_api.types import ProjectScore
-
 from .base import ResourceMigrator
 
-logger = structlog.get_logger(__name__)
 
+class ProjectScoreMigrator(ResourceMigrator[dict]):
+    """Migrator for project scores.
 
-class ProjectScoreMigrator(ResourceMigrator[ProjectScore]):
-    """Migrator for project scores."""
+    Uses raw API requests instead of SDK to avoid model dependencies.
+    """
 
     @property
     def resource_name(self) -> str:
         """Return the name of this resource type."""
         return "ProjectScores"
 
-    async def list_source_resources(
-        self, project_id: str | None = None
-    ) -> list[ProjectScore]:
-        """List all project scores from the source organization.
+    async def list_source_resources(self, project_id: str | None = None) -> list[dict]:
+        """List all project scores from the source organization using raw API.
 
         Args:
             project_id: Optional project ID to filter by
 
         Returns:
-            List of project scores
+            List of project score dicts
         """
-        logger.info("Listing project scores from source", project_id=project_id)
+        self._logger.info("Listing project scores from source", project_id=project_id)
 
         try:
             return await self._list_resources_with_client(
@@ -38,16 +34,16 @@ class ProjectScoreMigrator(ResourceMigrator[ProjectScore]):
             )
 
         except Exception as e:
-            logger.error(
+            self._logger.error(
                 "Failed to list project scores", error=str(e), project_id=project_id
             )
             raise
 
-    async def migrate_resource(self, resource: ProjectScore) -> str:
-        """Migrate a single project score to the destination.
+    async def migrate_resource(self, resource: dict) -> str:
+        """Migrate a single project score to the destination using raw API.
 
         Args:
-            resource: The project score to migrate
+            resource: The project score dict to migrate
 
         Returns:
             The ID of the migrated project score
@@ -57,13 +53,16 @@ class ProjectScoreMigrator(ResourceMigrator[ProjectScore]):
         """
         # Get the destination project ID
         # First try the ID mapping, then fall back to the configured dest_project_id
-        dest_project_id = self.state.id_mapping.get(resource.project_id)
+        source_project_id = resource.get("project_id")
+        dest_project_id = (
+            self.state.id_mapping.get(source_project_id) if source_project_id else None
+        )
         if not dest_project_id:
             dest_project_id = self.dest_project_id
 
         if not dest_project_id:
-            error_msg = f"No destination project mapping found for project score '{resource.name}' (source project: {resource.project_id})"
-            logger.error(error_msg)
+            error_msg = f"No destination project mapping found for project score '{resource.get('name')}' (source project: {source_project_id})"
+            self._logger.error(error_msg)
             raise ValueError(error_msg)
 
         try:
@@ -74,41 +73,53 @@ class ProjectScoreMigrator(ResourceMigrator[ProjectScore]):
             create_data["project_id"] = dest_project_id
 
             # Handle config with potential function dependencies
-            if resource.config is not None:
-                config = await self._resolve_config_dependencies(resource.config)
-                create_data["config"] = config
+            config = resource.get("config")
+            if config is not None:
+                resolved_config = await self._resolve_config_dependencies(config)
+                create_data["config"] = resolved_config
 
-            logger.info(
+            self._logger.info(
                 "Creating project score in destination",
-                score_name=resource.name,
-                score_type=resource.score_type,
+                score_name=resource.get("name"),
+                score_type=resource.get("score_type"),
                 dest_project_id=dest_project_id,
             )
 
-            created_score = await self.dest_client.with_retry(
+            # Create project score using raw API
+            response = await self.dest_client.with_retry(
                 "create_project_score",
-                lambda: self.dest_client.client.project_scores.create(**create_data),
+                lambda create_data=create_data: self.dest_client.raw_request(
+                    "POST",
+                    "/v1/project_score",
+                    json=create_data,
+                ),
             )
 
-            logger.info(
+            dest_score_id = response.get("id")
+            if not dest_score_id:
+                raise ValueError(
+                    f"No ID returned when creating project score {resource.get('name')}"
+                )
+
+            self._logger.info(
                 "Successfully migrated project score",
-                score_name=resource.name,
-                source_id=resource.id,
-                dest_id=created_score.id,
+                score_name=resource.get("name"),
+                source_id=resource.get("id"),
+                dest_id=dest_score_id,
             )
 
-            return created_score.id
+            return dest_score_id
 
         except Exception as e:
-            error_msg = f"Failed to migrate project score '{resource.name}': {e}"
-            logger.error(error_msg, source_id=resource.id)
+            error_msg = f"Failed to migrate project score '{resource.get('name')}': {e}"
+            self._logger.error(error_msg, source_id=resource.get("id"))
             raise Exception(error_msg) from e
 
-    async def _resolve_config_dependencies(self, config) -> dict:
+    async def _resolve_config_dependencies(self, config: dict) -> dict:
         """Resolve function dependencies in project score config.
 
         Args:
-            config: The project score config object
+            config: The project score config dict
 
         Returns:
             Config with resolved function IDs
@@ -116,8 +127,8 @@ class ProjectScoreMigrator(ResourceMigrator[ProjectScore]):
         if not config:
             return config
 
-        # Convert config to dict and resolve dependencies - all Braintrust objects have to_dict()
-        config_dict = config.to_dict()
+        # Config is already a dict from raw API
+        config_dict = dict(config)
 
         # Handle online scoring config with dependency resolution
         if config_dict.get("online"):
@@ -131,7 +142,7 @@ class ProjectScoreMigrator(ResourceMigrator[ProjectScore]):
                     if resolved_scorer:
                         resolved_scorers.append(resolved_scorer)
                     else:
-                        logger.warning(
+                        self._logger.warning(
                             "Failed to resolve scorer function reference",
                             scorer=scorer,
                         )
@@ -140,7 +151,7 @@ class ProjectScoreMigrator(ResourceMigrator[ProjectScore]):
 
         return config_dict
 
-    async def get_dependencies(self, resource: ProjectScore) -> list[str]:
+    async def get_dependencies(self, resource: dict) -> list[str]:
         """Get the dependencies for a project score.
 
         Project scores depend on:
@@ -148,24 +159,28 @@ class ProjectScoreMigrator(ResourceMigrator[ProjectScore]):
         2. Functions (for online scoring config)
 
         Args:
-            resource: The project score to get dependencies for
+            resource: The project score dict to get dependencies for
 
         Returns:
             List of dependency IDs
         """
-        dependencies = [resource.project_id]
+        project_id = resource.get("project_id")
+        dependencies = [project_id] if project_id else []
 
         # Check for function dependencies in config
-        if (
-            resource.config
-            and hasattr(resource.config, "online")
-            and resource.config.online
-        ):
-            online_config = resource.config.online
-            if hasattr(online_config, "scorers") and online_config.scorers:
-                for scorer in online_config.scorers:
-                    if hasattr(scorer, "type") and scorer.type == "function":
-                        if hasattr(scorer, "id"):
-                            dependencies.append(scorer.id)
+        config = resource.get("config")
+        if config:
+            online_config = config.get("online")
+            if online_config:
+                scorers = online_config.get("scorers")
+                if scorers:
+                    for scorer in scorers:
+                        if (
+                            isinstance(scorer, dict)
+                            and scorer.get("type") == "function"
+                        ):
+                            scorer_id = scorer.get("id")
+                            if scorer_id:
+                                dependencies.append(scorer_id)
 
         return dependencies

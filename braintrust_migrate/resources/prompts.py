@@ -1,19 +1,22 @@
 """Prompt migrator for Braintrust migration tool."""
 
-from braintrust_api.types import Prompt
+import copy
 
 from braintrust_migrate.resources.base import ResourceMigrator
 
 
-class PromptMigrator(ResourceMigrator[Prompt]):
-    """Migrator for Braintrust prompts."""
+class PromptMigrator(ResourceMigrator[dict]):
+    """Migrator for Braintrust prompts.
+
+    Uses raw API requests instead of SDK to avoid model dependencies.
+    """
 
     @property
     def resource_name(self) -> str:
         """Human-readable name for this resource type."""
         return "Prompts"
 
-    async def get_dependencies(self, resource: Prompt) -> list[str]:
+    async def get_dependencies(self, resource: dict) -> list[str]:
         """Get list of resource IDs that this prompt depends on.
 
         Prompts can depend on:
@@ -21,7 +24,7 @@ class PromptMigrator(ResourceMigrator[Prompt]):
         2. Other prompts via prompt_data.origin.prompt_id
 
         Args:
-            resource: Prompt to get dependencies for.
+            resource: Prompt dict to get dependencies for.
 
         Returns:
             List of resource IDs this prompt depends on.
@@ -29,22 +32,22 @@ class PromptMigrator(ResourceMigrator[Prompt]):
         dependencies = []
 
         # Check prompt_data for dependencies
-        if hasattr(resource, "prompt_data") and resource.prompt_data:
-            prompt_data = resource.prompt_data
-
+        prompt_data = resource.get("prompt_data")
+        if prompt_data:
             # Not checking for tool_functions because they are already handled by the
             # function migrator
 
             # Check for prompt origin dependencies
-            if hasattr(prompt_data, "origin") and prompt_data.origin:
-                origin = prompt_data.origin
-                if hasattr(origin, "prompt_id") and origin.prompt_id:
-                    dependencies.append(origin.prompt_id)
+            origin = prompt_data.get("origin")
+            if origin:
+                prompt_id = origin.get("prompt_id")
+                if prompt_id:
+                    dependencies.append(prompt_id)
                     self._logger.debug(
                         "Found prompt dependency",
-                        prompt_id=resource.id,
-                        prompt_name=resource.name,
-                        origin_prompt_id=origin.prompt_id,
+                        prompt_id=resource.get("id"),
+                        prompt_name=resource.get("name"),
+                        origin_prompt_id=prompt_id,
                     )
 
         return dependencies
@@ -57,16 +60,14 @@ class PromptMigrator(ResourceMigrator[Prompt]):
         """
         return ["functions", "prompts"]
 
-    async def list_source_resources(
-        self, project_id: str | None = None
-    ) -> list[Prompt]:
-        """List all prompts from the source organization.
+    async def list_source_resources(self, project_id: str | None = None) -> list[dict]:
+        """List all prompts from the source organization using raw API.
 
         Args:
             project_id: Optional project ID to filter prompts.
 
         Returns:
-            List of prompts from the source organization.
+            List of prompt dicts from the source organization.
         """
         try:
             # Use base class helper method
@@ -91,8 +92,6 @@ class PromptMigrator(ResourceMigrator[Prompt]):
             return prompt_data
 
         # Create a deep copy to avoid modifying the original
-        import copy
-
         resolved_data = copy.deepcopy(prompt_data)
 
         # Resolve tool_functions dependencies using base class utility
@@ -138,11 +137,11 @@ class PromptMigrator(ResourceMigrator[Prompt]):
 
         return resolved_data
 
-    async def migrate_resource(self, resource: Prompt) -> str:
-        """Migrate a single prompt from source to destination.
+    async def migrate_resource(self, resource: dict) -> str:
+        """Migrate a single prompt from source to destination using raw API.
 
         Args:
-            resource: Source prompt to migrate.
+            resource: Source prompt dict to migrate.
 
         Returns:
             ID of the created prompt in destination.
@@ -152,10 +151,10 @@ class PromptMigrator(ResourceMigrator[Prompt]):
         """
         self._logger.info(
             "Migrating prompt",
-            source_id=resource.id,
-            name=resource.name,
-            slug=resource.slug,
-            project_id=resource.project_id,
+            source_id=resource.get("id"),
+            name=resource.get("name"),
+            slug=resource.get("slug"),
+            project_id=resource.get("project_id"),
         )
 
         # Create prompt in destination using base class serialization
@@ -165,26 +164,34 @@ class PromptMigrator(ResourceMigrator[Prompt]):
         create_params["project_id"] = self.dest_project_id
 
         # Handle prompt_data with dependency resolution
-        if hasattr(resource, "prompt_data") and resource.prompt_data:
-            prompt_data_dict = resource.prompt_data.to_dict()
-
+        prompt_data = resource.get("prompt_data")
+        if prompt_data:
             # Resolve dependencies in prompt_data
-            resolved_prompt_data = self._resolve_prompt_data_dependencies(
-                prompt_data_dict
-            )
+            resolved_prompt_data = self._resolve_prompt_data_dependencies(prompt_data)
             create_params["prompt_data"] = resolved_prompt_data
 
-        dest_prompt = await self.dest_client.with_retry(
+        # Create prompt using raw API
+        response = await self.dest_client.with_retry(
             "create_prompt",
-            lambda: self.dest_client.client.prompts.create(**create_params),
+            lambda create_params=create_params: self.dest_client.raw_request(
+                "POST",
+                "/v1/prompt",
+                json=create_params,
+            ),
         )
+
+        dest_prompt_id = response.get("id")
+        if not dest_prompt_id:
+            raise ValueError(
+                f"No ID returned when creating prompt {resource.get('name')}"
+            )
 
         self._logger.info(
             "Created prompt in destination",
-            source_id=resource.id,
-            dest_id=dest_prompt.id,
-            name=resource.name,
-            slug=resource.slug,
+            source_id=resource.get("id"),
+            dest_id=dest_prompt_id,
+            name=resource.get("name"),
+            slug=resource.get("slug"),
         )
 
-        return dest_prompt.id
+        return dest_prompt_id

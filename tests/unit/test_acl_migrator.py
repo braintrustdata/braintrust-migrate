@@ -1,30 +1,16 @@
 """Unit tests for ACLMigrator."""
 
-from unittest.mock import Mock
+from unittest.mock import AsyncMock
 
 import pytest
-from braintrust_api.types import ACL
 
 from braintrust_migrate.resources.acls import ACLMigrator
 
 
 @pytest.fixture
 def acl_with_user():
-    """Create an ACL with user_id."""
-    acl = Mock(spec=ACL)
-    acl.id = "acl-user-123"
-    acl.object_type = "project"
-    acl.object_id = "project-456"
-    acl.user_id = "user-123"
-    acl.group_id = None
-    acl.permission = "read"
-    acl.role_id = None
-    acl.restrict_object_type = None
-    acl.object_org_id = "org-456"
-    acl.created = "2024-01-01T00:00:00Z"
-
-    # Mock the to_dict method
-    acl.to_dict.return_value = {
+    """Create an ACL dict with user_id."""
+    return {
         "id": "acl-user-123",
         "object_type": "project",
         "object_id": "project-456",
@@ -37,26 +23,11 @@ def acl_with_user():
         "created": "2024-01-01T00:00:00Z",
     }
 
-    return acl
-
 
 @pytest.fixture
 def acl_with_role():
-    """Create an ACL with role_id."""
-    acl = Mock(spec=ACL)
-    acl.id = "acl-role-123"
-    acl.object_type = "project"
-    acl.object_id = "project-456"
-    acl.user_id = None
-    acl.group_id = "group-789"
-    acl.permission = None
-    acl.role_id = "role-123"
-    acl.restrict_object_type = None
-    acl.object_org_id = "org-456"
-    acl.created = "2024-01-01T00:00:00Z"
-
-    # Mock the to_dict method
-    acl.to_dict.return_value = {
+    """Create an ACL dict with role_id."""
+    return {
         "id": "acl-role-123",
         "object_type": "project",
         "object_id": "project-456",
@@ -69,26 +40,11 @@ def acl_with_role():
         "created": "2024-01-01T00:00:00Z",
     }
 
-    return acl
-
 
 @pytest.fixture
 def acl_with_permission():
-    """Create an ACL with direct permission."""
-    acl = Mock(spec=ACL)
-    acl.id = "acl-permission-123"
-    acl.object_type = "dataset"
-    acl.object_id = "dataset-456"
-    acl.user_id = None
-    acl.group_id = "group-789"
-    acl.permission = "update"
-    acl.role_id = None
-    acl.restrict_object_type = None
-    acl.object_org_id = "org-456"
-    acl.created = "2024-01-01T00:00:00Z"
-
-    # Mock the to_dict method
-    acl.to_dict.return_value = {
+    """Create an ACL dict with direct permission."""
+    return {
         "id": "acl-permission-123",
         "object_type": "dataset",
         "object_id": "dataset-456",
@@ -101,7 +57,18 @@ def acl_with_permission():
         "created": "2024-01-01T00:00:00Z",
     }
 
-    return acl
+
+@pytest.fixture
+def sample_acl():
+    """Create a sample ACL dict."""
+    return {
+        "id": "acl-123",
+        "object_type": "project",
+        "object_id": "project-456",
+        "group_id": "group-789",
+        "permission": "read",
+        "restrict_object_type": None,
+    }
 
 
 @pytest.mark.asyncio
@@ -246,9 +213,9 @@ class TestACLMigrator:
     ):
         """Test successful ACL migration with direct permission."""
         # Mock successful ACL creation
-        created_acl = Mock(spec=ACL)
-        created_acl.id = "dest-acl-permission-123"
-        mock_dest_client.with_retry.return_value = created_acl
+        mock_dest_client.with_retry = AsyncMock(
+            return_value={"id": "dest-acl-permission-123", "object_type": "dataset"}
+        )
 
         migrator = ACLMigrator(
             mock_source_client, mock_dest_client, temp_checkpoint_dir
@@ -272,9 +239,9 @@ class TestACLMigrator:
     ):
         """Test successful ACL migration with role."""
         # Mock successful ACL creation
-        created_acl = Mock(spec=ACL)
-        created_acl.id = "dest-acl-role-123"
-        mock_dest_client.with_retry.return_value = created_acl
+        mock_dest_client.with_retry = AsyncMock(
+            return_value={"id": "dest-acl-role-123", "object_type": "project"}
+        )
 
         migrator = ACLMigrator(
             mock_source_client, mock_dest_client, temp_checkpoint_dir
@@ -360,7 +327,9 @@ class TestACLMigrator:
         migrator.state.id_mapping["project-456"] = "dest-project-456"
         migrator.state.id_mapping["group-789"] = "dest-group-789"
 
-        mock_dest_client.with_retry.side_effect = Exception("Creation failed")
+        mock_dest_client.with_retry = AsyncMock(
+            side_effect=Exception("Creation failed")
+        )
 
         with pytest.raises(Exception, match="Creation failed"):
             await migrator.migrate_resource(sample_acl)
@@ -381,14 +350,15 @@ class TestACLMigrator:
         migrator.state.id_mapping["project-456"] = "dest-project-456"
         migrator.state.id_mapping["group-789"] = "dest-group-789"
 
-        # Create equivalent destination ACL
-        dest_acl = Mock(spec=ACL)
-        dest_acl.object_type = "project"
-        dest_acl.object_id = "dest-project-456"
-        dest_acl.group_id = "dest-group-789"
-        dest_acl.permission = "read"
-        dest_acl.role_id = None
-        dest_acl.restrict_object_type = None
+        # Create equivalent destination ACL dict
+        dest_acl = {
+            "object_type": "project",
+            "object_id": "dest-project-456",
+            "group_id": "dest-group-789",
+            "permission": "read",
+            "role_id": None,
+            "restrict_object_type": None,
+        }
 
         result = await migrator._acls_equivalent(sample_acl, dest_acl)
 
@@ -407,8 +377,9 @@ class TestACLMigrator:
         )
 
         # Create ACL with different object_type
-        dest_acl = Mock(spec=ACL)
-        dest_acl.object_type = "dataset"  # Different from sample_acl's "project"
+        dest_acl = {
+            "object_type": "dataset",  # Different from sample_acl's "project"
+        }
 
         result = await migrator._acls_equivalent(sample_acl, dest_acl)
 

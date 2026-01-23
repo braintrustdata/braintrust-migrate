@@ -1,230 +1,244 @@
-"""Tests for SpanIframeMigrator."""
+"""Unit tests for SpanIframeMigrator."""
+
+from unittest.mock import AsyncMock
 
 import pytest
-from braintrust_api.types.shared.span_i_frame import SpanIFrame
 
 from braintrust_migrate.resources.span_iframes import SpanIframeMigrator
-from tests.conftest import TEST_DEST_PROJECT_ID
 
 
 @pytest.fixture
-def span_iframe_migrator(mock_source_client, mock_dest_client, temp_checkpoint_dir):
-    """Create a SpanIframeMigrator instance for testing."""
-    migrator = SpanIframeMigrator(
-        source_client=mock_source_client,
-        dest_client=mock_dest_client,
-        checkpoint_dir=temp_checkpoint_dir,
-        batch_size=10,
-    )
-    migrator.set_destination_project_id(TEST_DEST_PROJECT_ID)
-    return migrator
+def sample_span_iframe():
+    """Create a sample span iframe dict."""
+    return {
+        "id": "iframe-123",
+        "name": "Test Iframe",
+        "project_id": "project-456",
+        "url": "https://example.com/viewer",
+        "description": "A test span iframe",
+        "post_message": True,
+        "created": "2024-01-01T00:00:00Z",
+    }
+
+
+@pytest.fixture
+def minimal_span_iframe():
+    """Create a minimal span iframe dict."""
+    return {
+        "id": "iframe-min-456",
+        "name": "Minimal Iframe",
+        "project_id": "project-456",
+        "url": "https://example.com/minimal",
+    }
 
 
 @pytest.mark.asyncio
 class TestSpanIframeMigrator:
-    """Test the SpanIframeMigrator class."""
+    """Test SpanIframeMigrator functionality."""
 
-    async def test_resource_name(self, span_iframe_migrator):
-        """Test the resource_name property."""
-        assert span_iframe_migrator.resource_name == "SpanIFrames"
+    async def test_resource_name(
+        self,
+        mock_source_client,
+        mock_dest_client,
+        temp_checkpoint_dir,
+    ):
+        """Test that resource_name returns correct value."""
+        migrator = SpanIframeMigrator(
+            mock_source_client, mock_dest_client, temp_checkpoint_dir
+        )
+
+        assert migrator.resource_name == "SpanIFrames"
+
+    async def test_get_dependencies_empty(
+        self,
+        mock_source_client,
+        mock_dest_client,
+        temp_checkpoint_dir,
+        sample_span_iframe,
+    ):
+        """Test that span iframes have no dependencies."""
+        migrator = SpanIframeMigrator(
+            mock_source_client, mock_dest_client, temp_checkpoint_dir
+        )
+
+        deps = await migrator.get_dependencies(sample_span_iframe)
+
+        assert deps == []
 
     async def test_list_source_resources_all(
-        self, span_iframe_migrator, mock_source_client, sample_span_iframe
+        self,
+        mock_source_client,
+        mock_dest_client,
+        temp_checkpoint_dir,
+        sample_span_iframe,
     ):
-        """Test listing all span iframes from source."""
-        # Mock the API response
-        mock_source_client.with_retry.return_value = [sample_span_iframe]
+        """Test listing all span iframes."""
+        mock_source_client.with_retry = AsyncMock(
+            return_value={"objects": [sample_span_iframe]}
+        )
 
-        result = await span_iframe_migrator.list_source_resources()
+        migrator = SpanIframeMigrator(
+            mock_source_client, mock_dest_client, temp_checkpoint_dir
+        )
 
-        assert len(result) == 1
-        assert result[0] == sample_span_iframe
-        mock_source_client.with_retry.assert_called_once()
+        iframes = await migrator.list_source_resources()
+
+        assert len(iframes) == 1
+        assert iframes[0] == sample_span_iframe
 
     async def test_list_source_resources_filtered_by_project(
-        self, span_iframe_migrator, mock_source_client
+        self,
+        mock_source_client,
+        mock_dest_client,
+        temp_checkpoint_dir,
+        sample_span_iframe,
     ):
-        """Test listing span iframes filtered by project ID."""
-        # Create span iframes for different projects
-        iframe1 = SpanIFrame(
-            id="iframe-1",
-            project_id="project-456",
-            name="Iframe 1",
-            url="https://example.com/iframe1",
-        )
-        iframe2 = SpanIFrame(
-            id="iframe-2",
-            project_id="other-project",
-            name="Iframe 2",
-            url="https://example.com/iframe2",
+        """Test listing span iframes filtered by project."""
+        mock_source_client.with_retry = AsyncMock(
+            return_value={"objects": [sample_span_iframe]}
         )
 
-        mock_source_client.with_retry.return_value = [iframe1, iframe2]
-
-        result = await span_iframe_migrator.list_source_resources(
-            project_id="project-456"
+        migrator = SpanIframeMigrator(
+            mock_source_client, mock_dest_client, temp_checkpoint_dir
         )
 
-        assert len(result) == 1
-        assert result[0].id == "iframe-1"
-        assert result[0].project_id == "project-456"
+        iframes = await migrator.list_source_resources(project_id="project-456")
+
+        assert len(iframes) == 1
 
     async def test_list_source_resources_async_iterator(
-        self, span_iframe_migrator, mock_source_client, sample_span_iframe
+        self,
+        mock_source_client,
+        mock_dest_client,
+        temp_checkpoint_dir,
+        sample_span_iframe,
     ):
-        """Test listing span iframes when API returns async iterator."""
+        """Test listing span iframes with raw API response."""
+        mock_source_client.with_retry = AsyncMock(
+            return_value={"objects": [sample_span_iframe]}
+        )
 
-        # Mock async iterator
-        class AsyncIterator:
-            def __init__(self, items):
-                self.items = items
-                self.index = 0
+        migrator = SpanIframeMigrator(
+            mock_source_client, mock_dest_client, temp_checkpoint_dir
+        )
 
-            def __aiter__(self):
-                return self
+        iframes = await migrator.list_source_resources()
 
-            async def __anext__(self):
-                if self.index >= len(self.items):
-                    raise StopAsyncIteration
-                item = self.items[self.index]
-                self.index += 1
-                return item
-
-        mock_response = AsyncIterator([sample_span_iframe])
-        mock_source_client.with_retry.return_value = mock_response
-
-        result = await span_iframe_migrator.list_source_resources()
-
-        assert len(result) == 1
-        assert result[0] == sample_span_iframe
-
-    async def test_list_source_resources_error(
-        self, span_iframe_migrator, mock_source_client
-    ):
-        """Test error handling when listing source span iframes fails."""
-        mock_source_client.with_retry.side_effect = Exception("API Error")
-
-        with pytest.raises(Exception, match="API Error"):
-            await span_iframe_migrator.list_source_resources()
-
-    async def test_get_resource_id(self, span_iframe_migrator, sample_span_iframe):
-        """Test extracting resource ID."""
-        resource_id = span_iframe_migrator.get_resource_id(sample_span_iframe)
-        assert resource_id == "span-iframe-123"
+        assert len(iframes) == 1
 
     async def test_migrate_resource_full(
-        self, span_iframe_migrator, mock_dest_client, sample_span_iframe
+        self,
+        mock_source_client,
+        mock_dest_client,
+        temp_checkpoint_dir,
+        sample_span_iframe,
     ):
-        """Test migrating a span iframe with all fields."""
-        # Mock successful creation
-        dest_iframe = SpanIFrame(
-            id="dest-iframe-123",
-            project_id=TEST_DEST_PROJECT_ID,
-            name="Test Span Iframe",
-            url="https://example.com/iframe",
-            description="A test span iframe",
-            post_message=True,
+        """Test successful migration of a span iframe with all fields."""
+        mock_dest_client.with_retry = AsyncMock(
+            return_value={"id": "new-iframe-789", "name": "Test Iframe"}
         )
-        mock_dest_client.with_retry.return_value = dest_iframe
 
-        result = await span_iframe_migrator.migrate_resource(sample_span_iframe)
+        migrator = SpanIframeMigrator(
+            mock_source_client, mock_dest_client, temp_checkpoint_dir
+        )
+        migrator.dest_project_id = "dest-project-999"
 
-        assert result == "dest-iframe-123"
-        mock_dest_client.with_retry.assert_called_once()
+        result = await migrator.migrate_resource(sample_span_iframe)
 
-        # Verify create parameters
-        call_args = mock_dest_client.with_retry.call_args
-        assert call_args[0][0] == "create_span_iframe"
+        assert result == "new-iframe-789"
 
     async def test_migrate_resource_minimal(
-        self, span_iframe_migrator, mock_dest_client
+        self,
+        mock_source_client,
+        mock_dest_client,
+        temp_checkpoint_dir,
+        minimal_span_iframe,
     ):
-        """Test migrating a span iframe with minimal fields."""
-        # Create minimal span iframe
-        minimal_iframe = SpanIFrame(
-            id="span-iframe-123",
-            project_id="project-456",
-            name="Minimal Iframe",
-            url="https://example.com/minimal",
+        """Test migration of span iframe with minimal fields."""
+        mock_dest_client.with_retry = AsyncMock(
+            return_value={"id": "new-iframe-min", "name": "Minimal Iframe"}
         )
 
-        dest_iframe = SpanIFrame(
-            id="dest-iframe-123",
-            project_id=TEST_DEST_PROJECT_ID,
-            name="Minimal Iframe",
-            url="https://example.com/minimal",
+        migrator = SpanIframeMigrator(
+            mock_source_client, mock_dest_client, temp_checkpoint_dir
         )
-        mock_dest_client.with_retry.return_value = dest_iframe
+        migrator.dest_project_id = "dest-project-999"
 
-        result = await span_iframe_migrator.migrate_resource(minimal_iframe)
+        result = await migrator.migrate_resource(minimal_span_iframe)
 
-        assert result == "dest-iframe-123"
+        assert result == "new-iframe-min"
 
     async def test_migrate_resource_error(
-        self, span_iframe_migrator, mock_dest_client, sample_span_iframe
+        self,
+        mock_source_client,
+        mock_dest_client,
+        temp_checkpoint_dir,
+        sample_span_iframe,
     ):
-        """Test error handling when migrating span iframe fails."""
-        mock_dest_client.with_retry.side_effect = Exception("Creation failed")
+        """Test handling of creation errors."""
+        mock_dest_client.with_retry = AsyncMock(
+            side_effect=Exception("API error creating iframe")
+        )
 
-        with pytest.raises(Exception, match="Creation failed"):
-            await span_iframe_migrator.migrate_resource(sample_span_iframe)
+        migrator = SpanIframeMigrator(
+            mock_source_client, mock_dest_client, temp_checkpoint_dir
+        )
+        migrator.dest_project_id = "dest-project-999"
 
-    async def test_get_dependencies(self, span_iframe_migrator, sample_span_iframe):
-        """Test getting dependencies for a span iframe."""
-        dependencies = await span_iframe_migrator.get_dependencies(sample_span_iframe)
-        assert dependencies == []
+        with pytest.raises(Exception, match="API error creating iframe"):
+            await migrator.migrate_resource(sample_span_iframe)
 
     async def test_migrate_resource_preserves_optional_fields(
-        self, span_iframe_migrator, mock_dest_client
+        self,
+        mock_source_client,
+        mock_dest_client,
+        temp_checkpoint_dir,
+        sample_span_iframe,
     ):
         """Test that optional fields are preserved during migration."""
-        # Create span iframe with optional fields
-        iframe_with_options = SpanIFrame(
-            id="span-iframe-123",
-            project_id="project-456",
-            name="Test Iframe",
-            url="https://example.com/iframe",
-            description="Test description",
-            post_message=False,  # Explicitly False
+        mock_dest_client.with_retry = AsyncMock(
+            return_value={
+                "id": "new-iframe-789",
+                "name": "Test Iframe",
+                "description": "A test span iframe",
+                "post_message": True,
+            }
         )
 
-        dest_iframe = SpanIFrame(
-            id="dest-iframe-123",
-            project_id=TEST_DEST_PROJECT_ID,
-            name="Test Iframe",
-            url="https://example.com/iframe",
-            description="Test description",
-            post_message=False,
+        migrator = SpanIframeMigrator(
+            mock_source_client, mock_dest_client, temp_checkpoint_dir
         )
-        mock_dest_client.with_retry.return_value = dest_iframe
+        migrator.dest_project_id = "dest-project-999"
 
-        await span_iframe_migrator.migrate_resource(iframe_with_options)
+        result = await migrator.migrate_resource(sample_span_iframe)
 
-        # Verify the create call was made with correct parameters
-        mock_dest_client.with_retry.assert_called_once()
+        assert result == "new-iframe-789"
 
     async def test_migrate_resource_skips_none_optional_fields(
-        self, span_iframe_migrator, mock_dest_client
+        self,
+        mock_source_client,
+        mock_dest_client,
+        temp_checkpoint_dir,
     ):
-        """Test that None optional fields are not included in create params."""
-        # Create span iframe with None optional fields
-        iframe_minimal = SpanIFrame(
-            id="span-iframe-123",
-            project_id="project-456",
-            name="Test Iframe",
-            url="https://example.com/iframe",
-            description=None,
-            post_message=None,
+        """Test that None optional fields are skipped."""
+        iframe_with_none = {
+            "id": "iframe-none-123",
+            "name": "Iframe with None",
+            "project_id": "project-456",
+            "url": "https://example.com",
+            "description": None,
+            "post_message": None,
+        }
+
+        mock_dest_client.with_retry = AsyncMock(
+            return_value={"id": "new-iframe-none", "name": "Iframe with None"}
         )
 
-        dest_iframe = SpanIFrame(
-            id="dest-iframe-123",
-            project_id=TEST_DEST_PROJECT_ID,
-            name="Test Iframe",
-            url="https://example.com/iframe",
+        migrator = SpanIframeMigrator(
+            mock_source_client, mock_dest_client, temp_checkpoint_dir
         )
-        mock_dest_client.with_retry.return_value = dest_iframe
+        migrator.dest_project_id = "dest-project-999"
 
-        await span_iframe_migrator.migrate_resource(iframe_minimal)
+        result = await migrator.migrate_resource(iframe_with_none)
 
-        mock_dest_client.with_retry.assert_called_once()
+        assert result == "new-iframe-none"

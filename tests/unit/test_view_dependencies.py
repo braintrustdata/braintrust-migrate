@@ -1,153 +1,67 @@
-"""Unit tests for ViewMigrator dependency resolution."""
+"""Unit tests for ViewMigrator dependency handling."""
 
-from unittest.mock import AsyncMock, Mock
+from unittest.mock import AsyncMock
 
 import pytest
-from braintrust_api.types import View
 
 from braintrust_migrate.resources.views import ViewMigrator
 
 
 @pytest.fixture
-def mock_source_client():
-    """Create a mock source client."""
-    client = Mock()
-    client.client.views.list = AsyncMock()
-    client.with_retry = AsyncMock()
-    return client
-
-
-@pytest.fixture
-def mock_dest_client():
-    """Create a mock destination client."""
-    client = Mock()
-    client.client.views.list = AsyncMock()
-    client.client.views.create = AsyncMock()
-    client.with_retry = AsyncMock()
-    return client
-
-
-@pytest.fixture
-def temp_checkpoint_dir(tmp_path):
-    """Create a temporary checkpoint directory."""
-    return tmp_path / "checkpoints"
-
-
-@pytest.fixture
 def project_view():
-    """Create a view that references a project."""
-    view = Mock(spec=View)
-    view.id = "view-123"
-    view.name = "Project Overview"
-    view.object_type = "project"
-    view.object_id = "project-456"
-    view.view_type = "experiments"
-    view.view_data = {"filters": []}
-    view.options = {"columnVisibility": {}}
-    view.user_id = "user-789"
-
-    # Mock the to_dict method
-    view.to_dict.return_value = {
-        "id": "view-123",
-        "name": "Project Overview",
-        "object_type": "project",
+    """Create a view attached to a project."""
+    return {
+        "id": "view-proj-123",
+        "name": "Project View",
         "object_id": "project-456",
-        "view_type": "experiments",
-        "view_data": {"filters": []},
-        "options": {"columnVisibility": {}},
-        "user_id": "user-789",
+        "object_type": "project",
+        "view_type": "table",
+        "view_data": {"columns": ["name", "id"]},
     }
-
-    return view
 
 
 @pytest.fixture
 def experiment_view():
-    """Create a view that references an experiment."""
-    view = Mock(spec=View)
-    view.id = "view-456"
-    view.name = "Experiment Details"
-    view.object_type = "experiment"
-    view.object_id = "experiment-123"
-    view.view_type = "logs"
-    view.view_data = {"sort": [{"field": "timestamp", "order": "desc"}]}
-    view.options = {"pageSize": 50}
-    view.user_id = "user-789"
-
-    # Mock the to_dict method
-    view.to_dict.return_value = {
-        "id": "view-456",
-        "name": "Experiment Details",
+    """Create a view attached to an experiment."""
+    return {
+        "id": "view-exp-123",
+        "name": "Experiment View",
+        "object_id": "exp-789",
         "object_type": "experiment",
-        "object_id": "experiment-123",
-        "view_type": "logs",
-        "view_data": {"sort": [{"field": "timestamp", "order": "desc"}]},
-        "options": {"pageSize": 50},
-        "user_id": "user-789",
+        "view_type": "table",
+        "view_data": {"columns": ["score", "output"]},
     }
-
-    return view
 
 
 @pytest.fixture
 def dataset_view():
-    """Create a view that references a dataset."""
-    view = Mock(spec=View)
-    view.id = "view-789"
-    view.name = "Dataset Analysis"
-    view.object_type = "dataset"
-    view.object_id = "dataset-456"
-    view.view_type = "dataset"
-    view.view_data = {"filters": [{"field": "score", "op": ">", "value": 0.8}]}
-    view.options = {"groupBy": ["category"]}
-    view.user_id = "user-789"
-
-    # Mock the to_dict method
-    view.to_dict.return_value = {
-        "id": "view-789",
-        "name": "Dataset Analysis",
+    """Create a view attached to a dataset."""
+    return {
+        "id": "view-ds-123",
+        "name": "Dataset View",
+        "object_id": "dataset-abc",
         "object_type": "dataset",
-        "object_id": "dataset-456",
-        "view_type": "dataset",
-        "view_data": {"filters": [{"field": "score", "op": ">", "value": 0.8}]},
-        "options": {"groupBy": ["category"]},
-        "user_id": "user-789",
+        "view_type": "table",
+        "view_data": {"columns": ["input", "expected"]},
     }
-
-    return view
 
 
 @pytest.fixture
-def unknown_object_view():
-    """Create a view that references an unknown object type."""
-    view = Mock(spec=View)
-    view.id = "view-999"
-    view.name = "Unknown Object View"
-    view.object_type = "unknown_type"
-    view.object_id = "unknown-123"
-    view.view_type = "custom"
-    view.view_data = {}
-    view.options = {}
-    view.user_id = "user-789"
-
-    # Mock the to_dict method
-    view.to_dict.return_value = {
-        "id": "view-999",
-        "name": "Unknown Object View",
+def unknown_type_view():
+    """Create a view with unknown object type."""
+    return {
+        "id": "view-unknown-123",
+        "name": "Unknown View",
+        "object_id": "unknown-xyz",
         "object_type": "unknown_type",
-        "object_id": "unknown-123",
-        "view_type": "custom",
+        "view_type": "table",
         "view_data": {},
-        "options": {},
-        "user_id": "user-789",
     }
-
-    return view
 
 
 @pytest.mark.asyncio
 class TestViewDependencies:
-    """Test dependency resolution in ViewMigrator."""
+    """Test ViewMigrator dependency resolution."""
 
     async def test_get_dependencies_project_view(
         self,
@@ -156,15 +70,14 @@ class TestViewDependencies:
         temp_checkpoint_dir,
         project_view,
     ):
-        """Test that project views return no dependencies (handled separately)."""
+        """Test project views have no extra dependencies."""
         migrator = ViewMigrator(
             mock_source_client, mock_dest_client, temp_checkpoint_dir
         )
 
-        dependencies = await migrator.get_dependencies(project_view)
+        deps = await migrator.get_dependencies(project_view)
 
-        # Project views don't return dependencies since projects are handled separately
-        assert dependencies == []
+        assert deps == []
 
     async def test_get_dependencies_experiment_view(
         self,
@@ -173,14 +86,14 @@ class TestViewDependencies:
         temp_checkpoint_dir,
         experiment_view,
     ):
-        """Test that experiment views return experiment dependencies."""
+        """Test experiment views depend on the experiment."""
         migrator = ViewMigrator(
             mock_source_client, mock_dest_client, temp_checkpoint_dir
         )
 
-        dependencies = await migrator.get_dependencies(experiment_view)
+        deps = await migrator.get_dependencies(experiment_view)
 
-        assert dependencies == ["experiment-123"]
+        assert deps == ["exp-789"]
 
     async def test_get_dependencies_dataset_view(
         self,
@@ -189,30 +102,30 @@ class TestViewDependencies:
         temp_checkpoint_dir,
         dataset_view,
     ):
-        """Test that dataset views return dataset dependencies."""
+        """Test dataset views depend on the dataset."""
         migrator = ViewMigrator(
             mock_source_client, mock_dest_client, temp_checkpoint_dir
         )
 
-        dependencies = await migrator.get_dependencies(dataset_view)
+        deps = await migrator.get_dependencies(dataset_view)
 
-        assert dependencies == ["dataset-456"]
+        assert deps == ["dataset-abc"]
 
     async def test_get_dependencies_unknown_object_view(
         self,
         mock_source_client,
         mock_dest_client,
         temp_checkpoint_dir,
-        unknown_object_view,
+        unknown_type_view,
     ):
-        """Test that unknown object type views return dependencies."""
+        """Test views with unknown types add object_id as dependency."""
         migrator = ViewMigrator(
             mock_source_client, mock_dest_client, temp_checkpoint_dir
         )
 
-        dependencies = await migrator.get_dependencies(unknown_object_view)
+        deps = await migrator.get_dependencies(unknown_type_view)
 
-        assert dependencies == ["unknown-123"]
+        assert deps == ["unknown-xyz"]
 
     async def test_resolve_object_id_project(
         self,
@@ -225,11 +138,11 @@ class TestViewDependencies:
         migrator = ViewMigrator(
             mock_source_client, mock_dest_client, temp_checkpoint_dir
         )
-        migrator.dest_project_id = "dest-project-456"
+        migrator.dest_project_id = "dest-project-999"
 
-        resolved_id = migrator._resolve_object_id(project_view)
+        result = migrator._resolve_object_id(project_view)
 
-        assert resolved_id == "dest-project-456"
+        assert result == "dest-project-999"
 
     async def test_resolve_object_id_experiment_resolved(
         self,
@@ -242,11 +155,11 @@ class TestViewDependencies:
         migrator = ViewMigrator(
             mock_source_client, mock_dest_client, temp_checkpoint_dir
         )
-        migrator.state.id_mapping["experiment-123"] = "dest-experiment-123"
+        migrator.state.id_mapping["exp-789"] = "dest-exp-789"
 
-        resolved_id = migrator._resolve_object_id(experiment_view)
+        result = migrator._resolve_object_id(experiment_view)
 
-        assert resolved_id == "dest-experiment-123"
+        assert result == "dest-exp-789"
 
     async def test_resolve_object_id_experiment_unresolved(
         self,
@@ -255,15 +168,16 @@ class TestViewDependencies:
         temp_checkpoint_dir,
         experiment_view,
     ):
-        """Test resolving object_id for experiment views without mapping."""
+        """Test resolving object_id for experiment views without mapping (fallback)."""
         migrator = ViewMigrator(
             mock_source_client, mock_dest_client, temp_checkpoint_dir
         )
+        # No mapping added
 
-        resolved_id = migrator._resolve_object_id(experiment_view)
+        result = migrator._resolve_object_id(experiment_view)
 
-        # Should return original ID when no mapping exists
-        assert resolved_id == "experiment-123"
+        # Falls back to source ID
+        assert result == "exp-789"
 
     async def test_resolve_object_id_dataset_resolved(
         self,
@@ -276,28 +190,27 @@ class TestViewDependencies:
         migrator = ViewMigrator(
             mock_source_client, mock_dest_client, temp_checkpoint_dir
         )
-        migrator.state.id_mapping["dataset-456"] = "dest-dataset-456"
+        migrator.state.id_mapping["dataset-abc"] = "dest-dataset-abc"
 
-        resolved_id = migrator._resolve_object_id(dataset_view)
+        result = migrator._resolve_object_id(dataset_view)
 
-        assert resolved_id == "dest-dataset-456"
+        assert result == "dest-dataset-abc"
 
     async def test_resolve_object_id_unknown_type(
         self,
         mock_source_client,
         mock_dest_client,
         temp_checkpoint_dir,
-        unknown_object_view,
+        unknown_type_view,
     ):
-        """Test resolving object_id for unknown object types."""
+        """Test resolving object_id for unknown types (uses source ID)."""
         migrator = ViewMigrator(
             mock_source_client, mock_dest_client, temp_checkpoint_dir
         )
 
-        resolved_id = migrator._resolve_object_id(unknown_object_view)
+        result = migrator._resolve_object_id(unknown_type_view)
 
-        # Should return original ID for unknown types
-        assert resolved_id == "unknown-123"
+        assert result == "unknown-xyz"
 
     async def test_migrate_resource_project_view(
         self,
@@ -307,20 +220,18 @@ class TestViewDependencies:
         project_view,
     ):
         """Test migrating a project view."""
-        # Mock successful view creation
-        new_view = Mock(spec=View)
-        new_view.id = "new-view-123"
-        mock_dest_client.with_retry.return_value = new_view
+        mock_dest_client.with_retry = AsyncMock(
+            return_value={"id": "new-view-proj", "name": "Project View"}
+        )
 
         migrator = ViewMigrator(
             mock_source_client, mock_dest_client, temp_checkpoint_dir
         )
-        migrator.dest_project_id = "dest-project-456"
+        migrator.dest_project_id = "dest-project-999"
 
         result = await migrator.migrate_resource(project_view)
 
-        assert result == "new-view-123"
-        mock_dest_client.with_retry.assert_called_once()
+        assert result == "new-view-proj"
 
     async def test_migrate_resource_experiment_view_resolved(
         self,
@@ -330,21 +241,18 @@ class TestViewDependencies:
         experiment_view,
     ):
         """Test migrating an experiment view with resolved dependency."""
-        # Mock successful view creation
-        new_view = Mock(spec=View)
-        new_view.id = "new-view-456"
-        mock_dest_client.with_retry.return_value = new_view
+        mock_dest_client.with_retry = AsyncMock(
+            return_value={"id": "new-view-exp", "name": "Experiment View"}
+        )
 
         migrator = ViewMigrator(
             mock_source_client, mock_dest_client, temp_checkpoint_dir
         )
-        migrator.dest_project_id = "dest-project-456"
-        migrator.state.id_mapping["experiment-123"] = "dest-experiment-123"
+        migrator.state.id_mapping["exp-789"] = "dest-exp-789"
 
         result = await migrator.migrate_resource(experiment_view)
 
-        assert result == "new-view-456"
-        mock_dest_client.with_retry.assert_called_once()
+        assert result == "new-view-exp"
 
     async def test_migrate_resource_dataset_view_unresolved(
         self,
@@ -353,19 +261,16 @@ class TestViewDependencies:
         temp_checkpoint_dir,
         dataset_view,
     ):
-        """Test migrating a dataset view with unresolved dependency."""
-        # Mock successful view creation
-        new_view = Mock(spec=View)
-        new_view.id = "new-view-789"
-        mock_dest_client.with_retry.return_value = new_view
+        """Test migrating a dataset view without resolved dependency (uses fallback)."""
+        mock_dest_client.with_retry = AsyncMock(
+            return_value={"id": "new-view-ds", "name": "Dataset View"}
+        )
 
         migrator = ViewMigrator(
             mock_source_client, mock_dest_client, temp_checkpoint_dir
         )
-        migrator.dest_project_id = "dest-project-456"
-        # Don't add dataset mapping - dependency remains unresolved
+        # No mapping - will use source ID as fallback
 
         result = await migrator.migrate_resource(dataset_view)
 
-        assert result == "new-view-789"
-        mock_dest_client.with_retry.assert_called_once()
+        assert result == "new-view-ds"

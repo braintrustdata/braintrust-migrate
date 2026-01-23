@@ -1,9 +1,11 @@
 """Migration orchestrator for coordinating Braintrust resource migrations."""
 
+import asyncio
 import json
+from collections.abc import Awaitable, Callable, Sequence
 from datetime import datetime
 from pathlib import Path
-from typing import Any, ClassVar
+from typing import Any, ClassVar, TypeVar, cast
 
 import structlog
 from braintrust_api.types import Project
@@ -26,6 +28,31 @@ from braintrust_migrate.resources import (
 )
 
 logger = structlog.get_logger(__name__)
+
+# Human-readable summary truncation limits
+MAX_SUMMARY_ITEMS_PER_REASON: int = 10
+
+T = TypeVar("T")
+
+
+async def _gather_with_concurrency(
+    coros: Sequence[Awaitable[T]], *, max_concurrent: int
+) -> list[T | Exception]:
+    """Run awaitables with bounded concurrency.
+
+    Returns a list aligned with the input order. Any exception is captured and
+    returned as an Exception element (i.e. this will not raise).
+    """
+    sem = asyncio.Semaphore(max_concurrent)
+
+    async def _run(coro: Awaitable[T]) -> T:
+        async with sem:
+            return await coro
+
+    return cast(
+        list[T | Exception],
+        await asyncio.gather(*(_run(c) for c in coros), return_exceptions=True),
+    )
 
 
 class MigrationOrchestrator:
@@ -162,14 +189,50 @@ class MigrationOrchestrator:
 
                 # STEP 2: Migrate project-scoped resources for each project
                 self._logger.info("Migrating project-scoped resources")
-                for project in projects:
-                    project_results = await self._migrate_project(
+                max_concurrent = int(self.config.migration.max_concurrent)
+                self._logger.info(
+                    "Starting bounded project migrations",
+                    max_concurrent=max_concurrent,
+                    total_projects=len(projects),
+                )
+
+                project_coros = [
+                    self._migrate_project(
                         project,
                         source_client,
                         dest_client,
                         checkpoint_dir,
-                        global_id_mappings,  # Pass shared mappings
+                        global_id_mappings,  # shared mappings across all projects
                     )
+                    for project in projects
+                ]
+                project_results_list = await _gather_with_concurrency(
+                    project_coros, max_concurrent=max_concurrent
+                )
+
+                for project, res in zip(projects, project_results_list, strict=True):
+                    if isinstance(res, Exception):
+                        error_msg = f"Project migration failed: {res}"
+                        self._logger.error(
+                            error_msg,
+                            project=project.get("name"),
+                            source_project_id=project.get("source_id"),
+                            dest_project_id=project.get("dest_id"),
+                        )
+                        project_results = {
+                            "project_id": project.get("dest_id"),
+                            "project_name": project.get("name"),
+                            "resources": {},
+                            "total_resources": 0,
+                            "migrated_resources": 0,
+                            "skipped_resources": 0,
+                            "failed_resources": 0,
+                            "errors": [
+                                {"resource_type": "project", "error": error_msg}
+                            ],
+                        }
+                    else:
+                        project_results = cast(dict[str, Any], res)
 
                     total_results["projects"][project["name"]] = project_results
 
@@ -248,8 +311,10 @@ class MigrationOrchestrator:
 
         projects = []
 
+        if source_projects is None:
+            projects = []
         # Convert to list if it's an async iterator
-        if hasattr(source_projects, "__aiter__"):
+        elif hasattr(source_projects, "__aiter__"):
             async for project in source_projects:
                 projects.append(project)
         else:
@@ -322,7 +387,9 @@ class MigrationOrchestrator:
 
             # Convert to list and check if project exists
             existing_project = None
-            if hasattr(dest_projects, "__aiter__"):
+            if dest_projects is None:
+                existing_project = None
+            elif hasattr(dest_projects, "__aiter__"):
                 async for dest_project in dest_projects:
                     if dest_project.name == source_project.name:
                         existing_project = dest_project
@@ -343,22 +410,31 @@ class MigrationOrchestrator:
 
             # Create project in destination
             create_params = {"name": source_project.name}
-            if hasattr(source_project, "description") and source_project.description:
-                create_params["description"] = source_project.description
+            description = cast(str | None, getattr(source_project, "description", None))
+            if description:
+                create_params["description"] = description
 
-            new_project = await dest_client.with_retry(
-                "create_project",
-                lambda: dest_client.client.projects.create(**create_params),
+            new_project = cast(
+                Any,
+                await dest_client.with_retry(
+                    "create_project",
+                    # braintrust-api client is dynamically generated; use Any to avoid type noise
+                    lambda: cast(Any, dest_client.client.projects).create(
+                        **create_params
+                    ),
+                ),
             )
+
+            new_project_id = cast(str, new_project.id)
 
             self._logger.info(
                 "Created project in destination",
                 project_name=source_project.name,
                 source_id=source_project.id,
-                dest_id=new_project.id,
+                dest_id=new_project_id,
             )
 
-            return new_project.id
+            return new_project_id
 
         except Exception as e:
             self._logger.error(
@@ -375,6 +451,9 @@ class MigrationOrchestrator:
         dest_client: BraintrustClient,
         checkpoint_dir: Path,
         global_id_mappings: dict[str, str],
+        progress_factory: Callable[[str], Callable[[dict[str, Any]], None]]
+        | None = None,
+        resource_callback: Callable[[str, dict[str, Any]], None] | None = None,
     ) -> dict[str, Any]:
         """Migrate all resources for a specific project.
 
@@ -384,6 +463,9 @@ class MigrationOrchestrator:
             dest_client: Destination organization client.
             checkpoint_dir: Directory for storing checkpoints.
             global_id_mappings: Global ID mappings shared across all projects.
+            progress_factory: Factory for creating streaming progress hooks.
+            resource_callback: Called after each resource type completes with
+                (resource_name, results_dict) for real-time feedback.
 
         Returns:
             Migration results for the project.
@@ -426,18 +508,67 @@ class MigrationOrchestrator:
                 self._logger.debug(f"Skipping {resource_name} (not in migration list)")
                 continue
 
+            migrator = None
             try:
                 self._logger.info(
                     f"Migrating {resource_name} for project {project_name}"
                 )
 
                 # Create migrator instance
-                migrator = migrator_class(
-                    source_client,
-                    dest_client,
-                    project_checkpoint_dir,
-                    self.config.migration.batch_size,
+                # Only create progress hooks for streaming resources that will use them
+                is_streaming_resource = resource_name in (
+                    "logs",
+                    "datasets",
+                    "experiments",
                 )
+                progress_hook = (
+                    progress_factory(resource_name)
+                    if progress_factory is not None and is_streaming_resource
+                    else None
+                )
+                if resource_name == "logs":
+                    migrator = LogsMigrator(
+                        source_client,
+                        dest_client,
+                        project_checkpoint_dir,
+                        page_limit=self.config.migration.logs_fetch_limit,
+                        insert_batch_size=self.config.migration.logs_insert_batch_size,
+                        use_version_snapshot=self.config.migration.logs_use_version_snapshot,
+                        use_seen_db=self.config.migration.logs_use_seen_db,
+                        progress_hook=progress_hook,
+                    )
+                elif resource_name == "datasets":
+                    migrator = migrator_class(
+                        source_client,
+                        dest_client,
+                        project_checkpoint_dir,
+                        self.config.migration.batch_size,
+                        events_fetch_limit=self.config.migration.dataset_events_fetch_limit,
+                        events_insert_batch_size=self.config.migration.dataset_events_insert_batch_size,
+                        events_use_version_snapshot=self.config.migration.dataset_events_use_version_snapshot,
+                        events_use_seen_db=self.config.migration.dataset_events_use_seen_db,
+                        events_progress_hook=progress_hook,
+                    )
+                elif resource_name == "experiments":
+                    # Experiments can be logs-scale; stream their events with dedicated knobs.
+                    migrator = migrator_class(
+                        source_client,
+                        dest_client,
+                        project_checkpoint_dir,
+                        self.config.migration.batch_size,
+                        events_fetch_limit=self.config.migration.experiment_events_fetch_limit,
+                        events_insert_batch_size=self.config.migration.experiment_events_insert_batch_size,
+                        events_use_version_snapshot=self.config.migration.experiment_events_use_version_snapshot,
+                        events_use_seen_db=self.config.migration.experiment_events_use_seen_db,
+                        events_progress_hook=progress_hook,
+                    )
+                else:
+                    migrator = migrator_class(
+                        source_client,
+                        dest_client,
+                        project_checkpoint_dir,
+                        self.config.migration.batch_size,
+                    )
 
                 # Set the destination project ID for the migrator
                 migrator.set_destination_project_id(dest_project_id)
@@ -488,15 +619,66 @@ class MigrationOrchestrator:
                     failed=resource_results["failed"],
                 )
 
+                # Notify callback for real-time console feedback
+                if resource_callback is not None:
+                    resource_callback(resource_name, resource_results)
+
             except Exception as e:
-                error_msg = f"Failed to migrate {resource_name}: {e}"
-                self._logger.error(error_msg, project=project_name)
-                project_results["errors"].append(
-                    {
-                        "resource_type": resource_name,
-                        "error": error_msg,
-                    }
+                err_str = str(e)
+                detail = err_str if err_str else repr(e)
+                error_msg = (
+                    f"Failed to migrate {resource_name}: {type(e).__name__}: {detail}"
                 )
+                self._logger.error(
+                    error_msg,
+                    project=project_name,
+                    resource=resource_name,
+                    error_type=type(e).__name__,
+                    error_repr=repr(e),
+                )
+
+                # Best-effort: capture partial progress for streaming migrators so the
+                # migration_results.json shows what was actually moved before failure.
+                partial: dict[str, Any] | None = None
+                try:
+                    if migrator is not None and hasattr(
+                        migrator, "get_partial_results"
+                    ):
+                        partial = migrator.get_partial_results()  # type: ignore[no-any-return]
+                except Exception:
+                    partial = None
+
+                if partial is not None:
+                    # Attach error to partial result and store it.
+                    partial_errors = list(partial.get("errors") or [])
+                    partial_errors.append(
+                        {
+                            "error": error_msg,
+                            "error_type": type(e).__name__,
+                            "error_repr": repr(e),
+                        }
+                    )
+                    partial["errors"] = partial_errors
+                    project_results["resources"][resource_name] = partial
+                    # Aggregate partials so summary reflects real progress.
+                    project_results["total_resources"] += int(partial.get("total", 0))
+                    project_results["migrated_resources"] += int(
+                        partial.get("migrated", 0)
+                    )
+                    project_results["skipped_resources"] += int(
+                        partial.get("skipped", 0)
+                    )
+                    project_results["failed_resources"] += int(partial.get("failed", 0))
+                    project_results["errors"].extend(partial_errors)
+                else:
+                    project_results["errors"].append(
+                        {
+                            "resource_type": resource_name,
+                            "error": error_msg,
+                            "error_type": type(e).__name__,
+                            "error_repr": repr(e),
+                        }
+                    )
 
         self._logger.info(
             f"Completed project migration: {project_name}",
@@ -698,9 +880,9 @@ class MigrationOrchestrator:
                         {
                             "project": project_name,
                             "resource_type": resource_type,
-                            "source_id": error["source_id"],
+                            "source_id": error.get("source_id"),
                             "name": error.get("name"),
-                            "error": error["error"],
+                            "error": error.get("error"),
                         }
                     )
 
@@ -807,13 +989,14 @@ class MigrationOrchestrator:
                     f.write(
                         f"\n### {reason.replace('_', ' ').title()} ({len(items)} items)\n"
                     )
-                    for item in items[:10]:  # Show first 10
+                    for item in items[:MAX_SUMMARY_ITEMS_PER_REASON]:
                         name_str = f" '{item['name']}'" if item["name"] else ""
                         f.write(
                             f"  - {item['resource_type']}: {item['source_id']}{name_str}\n"
                         )
-                    if len(items) > 10:
-                        f.write(f"  ... and {len(items) - 10} more\n")
+                    if len(items) > MAX_SUMMARY_ITEMS_PER_REASON:
+                        remaining = len(items) - MAX_SUMMARY_ITEMS_PER_REASON
+                        f.write(f"  ... and {remaining} more\n")
 
             # Failed resources detail
             failed = detailed_report["detailed_breakdown"]["failed"]

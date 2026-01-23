@@ -1,16 +1,35 @@
 """Dataset migrator for Braintrust migration tool."""
 
-from typing import Any
+from __future__ import annotations
 
+import json as _json
+from collections.abc import Callable
+from pathlib import Path
+from typing import Any, ClassVar
+
+import httpx
 import structlog
-from braintrust_api.types import Dataset
 
+from braintrust_migrate.attachments import AttachmentCopier
+from braintrust_migrate.btql import (
+    btql_quote,
+    fetch_btql_sorted_page_with_retries,
+)
 from braintrust_migrate.resources.base import MigrationResult, ResourceMigrator
+from braintrust_migrate.streaming_utils import (
+    EventsStreamState,
+    SeenIdsDB,
+    build_btql_sorted_page_query,
+    stream_btql_sorted_events,
+)
 
 logger = structlog.get_logger(__name__)
 
+# HTTP status codes
+HTTP_STATUS_REQUEST_ENTITY_TOO_LARGE = 413
 
-class DatasetMigrator(ResourceMigrator[Dataset]):
+
+class DatasetMigrator(ResourceMigrator[dict]):
     """Migrator for Braintrust datasets.
 
     Handles migration of:
@@ -18,7 +37,55 @@ class DatasetMigrator(ResourceMigrator[Dataset]):
     - Dataset records/items
     - Brainstore blobs if enabled
     - Uses bulk operations for better performance
+
+    Uses raw API requests instead of SDK to avoid model dependencies.
     """
+
+    def __init__(
+        self,
+        source_client,
+        dest_client,
+        checkpoint_dir: Path,
+        batch_size: int = 100,
+        *,
+        events_fetch_limit: int = 50,
+        events_insert_batch_size: int = 200,
+        events_use_version_snapshot: bool = True,
+        events_use_seen_db: bool = True,
+        events_progress_hook: Callable[[dict[str, Any]], None] | None = None,
+    ) -> None:
+        super().__init__(
+            source_client, dest_client, checkpoint_dir, batch_size=batch_size
+        )
+        self.events_fetch_limit = events_fetch_limit
+        self.events_insert_batch_size = events_insert_batch_size
+        self.events_use_version_snapshot = events_use_version_snapshot
+        self.events_use_seen_db = events_use_seen_db
+        self._events_progress_hook = events_progress_hook
+        self._attachment_copier: AttachmentCopier | None = None
+        mig_cfg = getattr(self.source_client, "migration_config", None)
+        copy_enabled = getattr(mig_cfg, "copy_attachments", False) is True
+        if copy_enabled:
+            self._attachment_copier = AttachmentCopier(
+                source_client=self.source_client,
+                dest_client=self.dest_client,
+                max_bytes=int(
+                    getattr(mig_cfg, "attachment_max_bytes", 50 * 1024 * 1024)
+                ),
+            )
+
+        # Byte-aware insert batching config (best-effort; falls back to count-only if missing).
+        cfg = getattr(self.dest_client, "migration_config", None) or getattr(
+            self.source_client, "migration_config", None
+        )
+        try:
+            max_req = int(getattr(cfg, "insert_max_request_bytes", 6 * 1024 * 1024))
+            headroom = float(getattr(cfg, "insert_request_headroom_ratio", 0.5))
+            if headroom <= 0:
+                raise ValueError("headroom must be > 0")
+            self._insert_max_bytes: int | None = int(max_req * headroom)
+        except Exception:
+            self._insert_max_bytes = None
 
     @property
     def resource_name(self) -> str:
@@ -38,21 +105,40 @@ class DatasetMigrator(ResourceMigrator[Dataset]):
 
         return get_resource_create_fields("DatasetEvent")
 
-    async def list_source_resources(
-        self, project_id: str | None = None
-    ) -> list[Dataset]:
-        """List all datasets from the source organization.
+    # FALLBACK: Static field list for InsertDatasetEvent
+    # This is only used if OpenAPI schema is unavailable
+    # Primary source: allowed_fields_for_event_insert property (uses OpenAPI spec)
+    _EVENT_INSERT_FIELDS: ClassVar[set[str]] = {
+        "input",
+        "expected",
+        "metadata",
+        "tags",
+        "id",
+        "created",
+        "origin",
+        "_object_delete",
+        "_is_merge",
+        "_merge_paths",
+        "_array_delete",
+        "_parent_id",
+        "span_id",
+        "root_span_id",
+        "span_parents",
+    }
+
+    async def list_source_resources(self, project_id: str | None = None) -> list[dict]:
+        """List all datasets from the source organization using raw API.
 
         Args:
             project_id: Optional project ID to filter datasets.
 
         Returns:
-            List of source datasets.
+            List of dataset dicts from the source organization.
         """
         self._logger.info("Listing datasets from source organization")
 
         try:
-            # Use base class helper method
+            # Use base class helper method (now uses raw_request)
             return await self._list_resources_with_client(
                 self.source_client, "datasets", project_id
             )
@@ -61,7 +147,7 @@ class DatasetMigrator(ResourceMigrator[Dataset]):
             self._logger.error("Failed to list source datasets", error=str(e))
             raise
 
-    async def migrate_batch(self, resources: list[Dataset]) -> list[MigrationResult]:
+    async def migrate_batch(self, resources: list[dict]) -> list[MigrationResult]:
         """Migrate a batch of datasets using bulk operations for better performance.
 
         This overrides the base migrate_batch to:
@@ -137,12 +223,12 @@ class DatasetMigrator(ResourceMigrator[Dataset]):
         return results
 
     async def _create_datasets_batch(
-        self, datasets: list[Dataset]
+        self, datasets: list[dict]
     ) -> list[MigrationResult]:
-        """Create a batch of datasets.
+        """Create a batch of datasets using raw API.
 
         Args:
-            datasets: List of datasets to create
+            datasets: List of dataset dicts to create
 
         Returns:
             List of migration results for dataset creation
@@ -153,31 +239,42 @@ class DatasetMigrator(ResourceMigrator[Dataset]):
             source_id = self.get_resource_id(dataset)
 
             try:
-                # Create dataset in destination using base class serialization
+                # Create dataset in destination using OpenAPI allow-list filtering
                 create_params = self.serialize_resource_for_insert(dataset)
                 create_params["project_id"] = self.dest_project_id
 
-                dest_dataset = await self.dest_client.with_retry(
+                # Create dataset using raw API
+                response = await self.dest_client.with_retry(
                     "create_dataset",
-                    lambda: self.dest_client.client.datasets.create(**create_params),
+                    lambda create_params=create_params: self.dest_client.raw_request(
+                        "POST",
+                        "/v1/dataset",
+                        json=create_params,
+                    ),
                 )
+
+                dest_dataset_id = response.get("id")
+                if not dest_dataset_id:
+                    raise ValueError(
+                        f"No ID returned when creating dataset {dataset.get('name')}"
+                    )
 
                 self._logger.info(
                     "✅ Created dataset",
                     source_id=source_id,
-                    dest_id=dest_dataset.id,
-                    name=dataset.name,
+                    dest_id=dest_dataset_id,
+                    name=dataset.get("name"),
                 )
 
                 # Record success immediately for any potential dependencies
-                self.record_success(source_id, dest_dataset.id, dataset)
+                self.record_success(source_id, dest_dataset_id, dataset)
 
                 results.append(
                     MigrationResult(
                         success=True,
                         source_id=source_id,
-                        dest_id=dest_dataset.id,
-                        metadata={"name": dataset.name, "records_pending": True},
+                        dest_id=dest_dataset_id,
+                        metadata={"name": dataset.get("name"), "records_pending": True},
                     )
                 )
 
@@ -186,7 +283,7 @@ class DatasetMigrator(ResourceMigrator[Dataset]):
                 self._logger.error(
                     error_msg,
                     source_id=source_id,
-                    name=dataset.name,
+                    name=dataset.get("name"),
                 )
 
                 self.record_failure(source_id, error_msg)
@@ -215,6 +312,10 @@ class DatasetMigrator(ResourceMigrator[Dataset]):
 
         for result in successful_migrations:
             try:
+                if result.dest_id is None:
+                    raise ValueError(
+                        "Dataset migrated without dest_id; cannot copy records"
+                    )
                 await self._migrate_dataset_records(result.source_id, result.dest_id)
 
                 # Update metadata to indicate records are migrated
@@ -239,14 +340,14 @@ class DatasetMigrator(ResourceMigrator[Dataset]):
             dataset_count=len(successful_migrations),
         )
 
-    async def migrate_resource(self, resource: Dataset) -> str:
-        """Migrate a single dataset from source to destination.
+    async def migrate_resource(self, resource: dict) -> str:
+        """Migrate a single dataset from source to destination using raw API.
 
         Note: This method is kept for compatibility but migrate_batch should be used
         for better performance when migrating multiple datasets.
 
         Args:
-            resource: Source dataset to migrate.
+            resource: Source dataset dict to migrate.
 
         Returns:
             ID of the created dataset in destination.
@@ -256,33 +357,42 @@ class DatasetMigrator(ResourceMigrator[Dataset]):
         """
         self._logger.info(
             "Migrating dataset",
-            source_id=resource.id,
-            name=resource.name,
-            project_id=resource.project_id,
+            source_id=resource.get("id"),
+            name=resource.get("name"),
+            project_id=resource.get("project_id"),
         )
 
-        # Create dataset in destination using base class serialization
+        # Create dataset in destination using OpenAPI allow-list filtering
         create_params = self.serialize_resource_for_insert(resource)
-
-        # Override the project_id to use destination project
         create_params["project_id"] = self.dest_project_id
 
-        dest_dataset = await self.dest_client.with_retry(
+        # Create dataset using raw API
+        response = await self.dest_client.with_retry(
             "create_dataset",
-            lambda: self.dest_client.client.datasets.create(**create_params),
+            lambda create_params=create_params: self.dest_client.raw_request(
+                "POST",
+                "/v1/dataset",
+                json=create_params,
+            ),
         )
+
+        dest_dataset_id = response.get("id")
+        if not dest_dataset_id:
+            raise ValueError(
+                f"No ID returned when creating dataset {resource.get('name')}"
+            )
 
         self._logger.info(
             "Created dataset in destination",
-            source_id=resource.id,
-            dest_id=dest_dataset.id,
-            name=resource.name,
+            source_id=resource.get("id"),
+            dest_id=dest_dataset_id,
+            name=resource.get("name"),
         )
 
         # Migrate dataset records/items
-        await self._migrate_dataset_records(resource.id, dest_dataset.id)
+        await self._migrate_dataset_records(resource["id"], dest_dataset_id)
 
-        return dest_dataset.id
+        return dest_dataset_id
 
     async def _migrate_dataset_records(
         self, source_dataset_id: str, dest_dataset_id: str
@@ -299,105 +409,336 @@ class DatasetMigrator(ResourceMigrator[Dataset]):
             dest_dataset_id=dest_dataset_id,
         )
 
+        await self._migrate_dataset_records_streaming(
+            source_dataset_id, dest_dataset_id
+        )
+
+    # ---- Streaming dataset event copier (scales to large datasets) ----
+
+    @staticmethod
+    def _max_xact_id(events: list[dict[str, Any]]) -> str | None:
+        xacts: list[str] = []
+        for e in events:
+            x = e.get("_xact_id")
+            if isinstance(x, str) and x:
+                xacts.append(x)
+        if not xacts:
+            return None
         try:
-            # Get records from source dataset
-            source_records = await self.source_client.with_retry(
-                "list_dataset_records",
-                lambda: self.source_client.client.datasets.fetch(source_dataset_id),
+            return str(max(int(x) for x in xacts))
+        except Exception:
+            return max(xacts)
+
+    def _event_to_insert(
+        self, event: dict[str, Any], source_dataset_id: str
+    ) -> dict[str, Any]:
+        # Use dynamic schema from OpenAPI instead of static list
+        allowed_fields = self.allowed_fields_for_event_insert
+        if allowed_fields:
+            out: dict[str, Any] = {k: event[k] for k in allowed_fields if k in event}
+        else:
+            # Fallback to static list if OpenAPI schema not available
+            out = {k: event[k] for k in self._EVENT_INSERT_FIELDS if k in event}
+
+        if "id" in event:
+            out["id"] = event["id"]
+        if "origin" not in out or out.get("origin") is None:
+            origin: dict[str, Any] = {
+                "object_type": "dataset",
+                "object_id": source_dataset_id,
+                "id": event.get("id"),
+            }
+            if event.get("_xact_id") is not None:
+                origin["_xact_id"] = event.get("_xact_id")
+            if event.get("created") is not None:
+                origin["created"] = event.get("created")
+            out["origin"] = origin
+        return out
+
+    async def _fetch_dataset_events_page(
+        self,
+        *,
+        dataset_id: str,
+        cursor: str | None,
+        version: str | None,
+        limit: int,
+        state: EventsStreamState,
+    ) -> dict[str, Any]:
+        # Datasets are fetched via BTQL. Cursor/version are intentionally unused.
+        _ = cursor
+        _ = version
+        return await self._fetch_dataset_events_page_btql_sorted(
+            dataset_id=dataset_id, limit=limit, state=state
+        )
+
+    async def _fetch_dataset_events_page_btql_sorted(
+        self,
+        *,
+        dataset_id: str,
+        limit: int,
+        state: EventsStreamState,
+    ) -> dict[str, Any]:
+        """Fetch one page via POST /btql using SQL syntax, sorted by _pagination_key."""
+        last_pagination_key = state.btql_min_pagination_key
+
+        def _query_text_for_limit(n: int) -> str:
+            return build_btql_sorted_page_query(
+                from_expr=f"dataset('{btql_quote(dataset_id)}', shape => 'spans')",
+                limit=n,
+                last_pagination_key=last_pagination_key,
+                select="*",
             )
 
-            if (
-                not source_records
-                or not hasattr(source_records, "events")
-                or not source_records.events
-            ):
-                self._logger.info("No records found in source dataset")
-                return
+        return await fetch_btql_sorted_page_with_retries(
+            client=self.source_client,
+            query_for_limit=_query_text_for_limit,
+            configured_limit=int(limit),
+            operation="btql_dataset_events_page",
+            log_fields={"source_dataset_id": dataset_id},
+            timeout_seconds=120.0,
+        )
 
-            records_to_insert = []
-            for record in source_records.events:
-                # Convert record to insert format using dataset event-specific method
-                prepared_record = self._prepare_event_for_insertion(record)
-                if prepared_record:
-                    records_to_insert.append(prepared_record)
+    async def _insert_dataset_events(
+        self, *, dataset_id: str, events: list[dict[str, Any]]
+    ) -> None:
+        await self.dest_client.with_retry(
+            "insert_dataset_events",
+            lambda: self.dest_client.raw_request(
+                "POST",
+                f"/v1/dataset/{dataset_id}/insert",
+                json={"events": events},
+                timeout=120.0,
+            ),
+        )
 
-            if records_to_insert:
-                # Insert records in batches using bulk insert API
-                self._logger.info(
-                    "Bulk inserting dataset records",
-                    record_count=len(records_to_insert),
-                    dataset_id=dest_dataset_id,
-                )
+    @staticmethod
+    def _is_http_413(exc: Exception) -> bool:
+        return (
+            isinstance(exc, httpx.HTTPStatusError)
+            and exc.response is not None
+            and int(exc.response.status_code) == HTTP_STATUS_REQUEST_ENTITY_TOO_LARGE
+        )
 
-                batch_size = min(self.batch_size, 100)  # Limit batch size for records
-                for i in range(0, len(records_to_insert), batch_size):
-                    batch = records_to_insert[i : i + batch_size]
+    @staticmethod
+    def _approx_event_size_bytes(event: dict[str, Any]) -> int | None:
+        try:
+            return len(_json.dumps(event, separators=(",", ":"), ensure_ascii=False))
+        except Exception:
+            return None
 
-                    await self.dest_client.with_retry(
-                        "insert_dataset_records",
-                        lambda batch=batch: self.dest_client.client.datasets.insert(
-                            dataset_id=dest_dataset_id, events=batch
-                        ),
-                    )
+    @staticmethod
+    def _count_attachment_refs(event: dict[str, Any]) -> int:
+        def _walk(v: Any) -> int:
+            if isinstance(v, dict):
+                if v.get("type") == "braintrust_attachment" and isinstance(
+                    v.get("key"), str
+                ):
+                    return 1
+                return sum(_walk(x) for x in v.values())
+            if isinstance(v, list):
+                return sum(_walk(x) for x in v)
+            return 0
 
-                self._logger.info(
-                    "Migrated dataset records",
-                    source_dataset_id=source_dataset_id,
-                    dest_dataset_id=dest_dataset_id,
-                    record_count=len(records_to_insert),
-                )
-            else:
-                self._logger.info("No valid records to migrate")
+        return _walk(event)
 
-        except Exception as e:
+    def _dump_oversize_event_summary(
+        self,
+        *,
+        events_dir: Path,
+        cursor: str | None,
+        dest_dataset_id: str,
+        event: dict[str, Any],
+        error: Exception,
+    ) -> None:
+        event_id = event.get("id")
+        safe_id = str(event_id) if isinstance(event_id, str) and event_id else "unknown"
+        root_span_id = event.get("root_span_id")
+        span_id = event.get("span_id")
+        approx_size = self._approx_event_size_bytes(event)
+        attachment_refs = self._count_attachment_refs(event)
+        path = events_dir / f"oversize_dataset_event_{safe_id}.json"
+        summary = {
+            "error": str(error),
+            "cursor": cursor,
+            "dest_dataset_id": dest_dataset_id,
+            "event_id": event.get("id"),
+            "root_span_id": root_span_id,
+            "span_id": span_id,
+            "created": event.get("created"),
+            "approx_size_bytes": approx_size,
+            "attachment_refs": attachment_refs,
+            "top_level_keys": sorted(list(event.keys())),
+        }
+        try:
+            with open(path, "w") as f:
+                _json.dump(summary, f, indent=2)
             self._logger.error(
-                "Failed to migrate dataset records",
+                "Oversize dataset event isolated (413). This specific event cannot be inserted.",
+                summary_path=str(path),
+                event_id=safe_id,
+                root_span_id=root_span_id,
+                span_id=span_id,
+                approx_size_bytes=approx_size,
+                attachment_refs=attachment_refs,
+                cursor=cursor,
+            )
+        except Exception:
+            self._logger.error(
+                "Oversize dataset event isolated; failed to write summary",
+                event_id=safe_id,
+                root_span_id=root_span_id,
+                span_id=span_id,
+                cursor=cursor,
+            )
+
+    async def _migrate_dataset_records_streaming(
+        self, source_dataset_id: str, dest_dataset_id: str
+    ) -> None:
+        events_dir = self.checkpoint_dir / "dataset_events"
+        events_dir.mkdir(parents=True, exist_ok=True)
+
+        state_path = events_dir / f"{source_dataset_id}_state.json"
+        state = EventsStreamState.from_path(state_path)
+
+        seen_db = (
+            SeenIdsDB(str(events_dir / f"{source_dataset_id}_seen.sqlite3"))
+            if self.events_use_seen_db
+            else None
+        )
+
+        try:
+            if state.btql_min_pagination_key is None and state.cursor is not None:
+                # Legacy checkpoint format stored an opaque cursor (from /fetch). We
+                # cannot translate this to a BTQL pagination key. Start from the
+                # beginning and rely on seen_db for idempotency.
+                self._logger.warning(
+                    "Dataset events checkpoint contains legacy cursor but no btql_min_pagination_key; restarting BTQL stream from beginning",
+                    source_dataset_id=source_dataset_id,
+                )
+                state.cursor = None
+
+            # BTQL-based streaming does not use version snapshots.
+            version = None
+
+            progress = self._events_progress_hook
+
+            def _save_state() -> None:
+                state.cursor = None
+                with open(state_path, "w") as f:
+                    _json.dump(state.to_dict(), f, indent=2)
+
+            async def _fetch(n: int) -> dict[str, Any]:
+                return await self._fetch_dataset_events_page(
+                    dataset_id=source_dataset_id,
+                    cursor=None,
+                    version=version,
+                    limit=n,
+                    state=state,
+                )
+
+            async def _on_single_413(event: dict[str, Any], err: Exception) -> None:
+                self._dump_oversize_event_summary(
+                    events_dir=events_dir,
+                    cursor=state.btql_min_pagination_key,
+                    dest_dataset_id=dest_dataset_id,
+                    event=event,
+                    error=err,
+                )
+
+            await stream_btql_sorted_events(
+                fetch_page=_fetch,
+                page_limit=int(self.events_fetch_limit),
+                get_last_pk=lambda: state.btql_min_pagination_key,
+                set_last_pk=lambda pk: setattr(state, "btql_min_pagination_key", pk),
+                save_state=_save_state,
+                page_event_filter=lambda e: e.get("_object_delete") is True,
+                event_to_insert=lambda e: self._event_to_insert(e, source_dataset_id),
+                seen_db=seen_db,
+                insert_batch_size=int(self.events_insert_batch_size),
+                insert_max_bytes=self._insert_max_bytes,
+                rewrite_event_in_place=(
+                    None
+                    if self._attachment_copier is None
+                    else self._attachment_copier.rewrite_event_in_place
+                ),
+                insert_events=lambda batch: self._insert_dataset_events(
+                    dataset_id=dest_dataset_id, events=batch
+                ),
+                is_http_413=self._is_http_413,
+                on_single_413=_on_single_413,
+                incr_fetched=lambda n: setattr(
+                    state, "fetched_events", int(state.fetched_events) + int(n)
+                ),
+                incr_inserted=lambda n: setattr(
+                    state, "inserted_events", int(state.inserted_events) + int(n)
+                ),
+                incr_inserted_bytes=lambda n: setattr(
+                    state, "inserted_bytes", int(state.inserted_bytes) + int(n)
+                ),
+                incr_skipped_deleted=lambda n: setattr(
+                    state, "skipped_deleted", int(state.skipped_deleted) + int(n)
+                ),
+                incr_skipped_seen=lambda n: setattr(
+                    state, "skipped_seen", int(state.skipped_seen) + int(n)
+                ),
+                incr_attachments_copied=lambda n: setattr(
+                    state,
+                    "attachments_copied",
+                    int(state.attachments_copied) + int(n),
+                ),
+                hooks=None
+                if progress is None
+                else {
+                    "on_page": lambda info, _p=progress: _p(
+                        {
+                            "resource": "dataset_events",
+                            "phase": "page",
+                            "source_dataset_id": source_dataset_id,
+                            "dest_dataset_id": dest_dataset_id,
+                            "page_num": info.get("page_num"),
+                            "page_events": info.get("page_events"),
+                            "fetched_total": state.fetched_events,
+                            "inserted_total": state.inserted_events,
+                            "inserted_bytes_total": state.inserted_bytes,
+                            "skipped_deleted_total": state.skipped_deleted,
+                            "skipped_seen_total": state.skipped_seen,
+                            "attachments_copied_total": state.attachments_copied,
+                            "cursor": (
+                                (state.btql_min_pagination_key[:16] + "…")
+                                if isinstance(state.btql_min_pagination_key, str)
+                                else None
+                            ),
+                            "next_cursor": None,
+                        }
+                    ),
+                    "on_done": lambda _info, _p=progress: _p(
+                        {
+                            "resource": "dataset_events",
+                            "phase": "done",
+                            "source_dataset_id": source_dataset_id,
+                            "dest_dataset_id": dest_dataset_id,
+                            "fetched_total": state.fetched_events,
+                            "inserted_total": state.inserted_events,
+                            "inserted_bytes_total": state.inserted_bytes,
+                            "skipped_deleted_total": state.skipped_deleted,
+                            "skipped_seen_total": state.skipped_seen,
+                            "attachments_copied_total": state.attachments_copied,
+                            "cursor": None,
+                            "next_cursor": None,
+                        }
+                    ),
+                },
+            )
+
+            self._logger.info(
+                "Migrated dataset records (streaming)",
                 source_dataset_id=source_dataset_id,
                 dest_dataset_id=dest_dataset_id,
-                error=str(e),
+                fetched=state.fetched_events,
+                inserted=state.inserted_events,
+                skipped_deleted=state.skipped_deleted,
+                skipped_seen=state.skipped_seen,
             )
-            raise
-
-    def _prepare_event_for_insertion(self, event) -> dict[str, Any] | None:
-        """Prepare a dataset event for insertion into the destination.
-
-        Uses the same serialization pattern as the base class but for dataset events.
-
-        Args:
-            event: Source dataset event to prepare.
-
-        Returns:
-            Dictionary ready for insertion, or None if preparation failed.
-        """
-        try:
-            # Serialize using to_dict (all Braintrust API objects have this method)
-            event_dict = event.to_dict(
-                mode="json",
-                exclude_unset=True,
-                exclude_none=True,
-            )
-
-            if not event_dict:
-                return None
-
-            # Apply OpenAPI-based field filtering for InsertDatasetEvent schema
-            allowed_fields = self.allowed_fields_for_event_insert
-            if allowed_fields is None:
-                self._logger.error("No InsertDatasetEvent schema found in OpenAPI spec")
-                return None
-
-            filtered_event = {
-                field: event_dict[field]
-                for field in allowed_fields
-                if field in event_dict
-            }
-
-            return filtered_event if filtered_event else None
-
-        except Exception as e:
-            self._logger.warning(
-                "Failed to prepare dataset event for insertion",
-                error=str(e),
-                event_type=type(event).__name__,
-            )
-            return None
+        finally:
+            if seen_db is not None:
+                seen_db.close()

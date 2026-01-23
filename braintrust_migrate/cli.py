@@ -1,10 +1,12 @@
 """Command-line interface for Braintrust migration tool."""
 
+from __future__ import annotations
+
 import asyncio
 import json
 import sys
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, Any
 
 import structlog
 import typer
@@ -13,16 +15,19 @@ from rich.progress import (
     BarColumn,
     Progress,
     SpinnerColumn,
+    TaskID,
     TaskProgressColumn,
     TextColumn,
 )
 from rich.table import Table
 
-from braintrust_migrate.config import Config
+from braintrust_migrate.config import Config, canonicalize_created_after
 from braintrust_migrate.orchestration import MigrationOrchestrator
 
 # Constants
 MAX_ERRORS_TO_DISPLAY = 10
+PROJECTS_PREVIEW_LIMIT = 3
+SAMPLES_PREVIEW_LIMIT = 50
 
 # Create Typer app
 app = typer.Typer(
@@ -72,6 +77,7 @@ def migrate(
             "--resources",
             "-r",
             help="Comma-separated list of resources to migrate (all,datasets,prompts,tools,agents,experiments,logs,views)",
+            envvar="MIGRATION_RESOURCES",
         ),
     ] = "all",
     projects: Annotated[
@@ -80,6 +86,7 @@ def migrate(
             "--projects",
             "-p",
             help="Comma-separated list of project names to migrate (if not specified, all projects will be migrated)",
+            envvar="MIGRATION_PROJECTS",
         ),
     ] = None,
     state_dir: Annotated[
@@ -88,6 +95,16 @@ def migrate(
             "--state-dir",
             "-s",
             help="Directory for storing migration state and checkpoints",
+            envvar="MIGRATION_STATE_DIR",
+        ),
+    ] = None,
+    resume_run_dir: Annotated[
+        Path | None,
+        typer.Option(
+            "--resume-run-dir",
+            help="(Advanced) Resume from an existing timestamped checkpoint directory (e.g. checkpoints/20260113_212530). Prefer passing --state-dir as the run dir instead.",
+            envvar="MIGRATION_RESUME_RUN_DIR",
+            hidden=True,
         ),
     ] = None,
     log_level: Annotated[
@@ -96,6 +113,7 @@ def migrate(
             "--log-level",
             "-l",
             help="Log level (DEBUG, INFO, WARNING, ERROR, CRITICAL)",
+            envvar="LOG_LEVEL",
         ),
     ] = "INFO",
     log_format: Annotated[
@@ -104,6 +122,7 @@ def migrate(
             "--log-format",
             "-f",
             help="Log format (json or text)",
+            envvar="LOG_FORMAT",
         ),
     ] = "text",
     config_file: Annotated[
@@ -122,6 +141,33 @@ def migrate(
             help="Perform a dry run without making changes",
         ),
     ] = False,
+    logs_fetch_limit: Annotated[
+        int | None,
+        typer.Option(
+            "--logs-fetch-limit",
+            help="Fetch page size for streaming logs via BTQL (limit is in rows/spans)",
+            envvar="MIGRATION_LOGS_FETCH_LIMIT",
+        ),
+    ] = None,
+    logs_insert_batch_size: Annotated[
+        int | None,
+        typer.Option(
+            "--logs-insert-batch-size",
+            help="Insert batch size for streaming logs (number of events per insert call)",
+            envvar="MIGRATION_LOGS_INSERT_BATCH_SIZE",
+        ),
+    ] = None,
+    created_after: Annotated[
+        str | None,
+        typer.Option(
+            "--created-after",
+            help=(
+                "Only migrate data created on or after this date. Format: YYYY-MM-DD (e.g. 2026-01-15). "
+                "For logs: filters events. For experiments: filters which experiments to migrate."
+            ),
+            envvar="MIGRATION_CREATED_AFTER",
+        ),
+    ] = None,
 ) -> None:
     """Migrate resources from source to destination Braintrust organization.
 
@@ -138,7 +184,17 @@ def migrate(
     # Call the async implementation
     asyncio.run(
         _migrate_main(
-            resources, projects, state_dir, log_level, log_format, config_file, dry_run
+            resources,
+            projects,
+            state_dir,
+            resume_run_dir,
+            log_level,
+            log_format,
+            config_file,
+            dry_run,
+            logs_fetch_limit,
+            logs_insert_batch_size,
+            created_after,
         )
     )
 
@@ -147,10 +203,14 @@ async def _migrate_main(
     resources: str,
     projects: str | None,
     state_dir: Path | None,
+    resume_run_dir: Path | None,
     log_level: str,
     log_format: str,
     config_file: Path | None,
     dry_run: bool,
+    logs_fetch_limit: int | None,
+    logs_insert_batch_size: int | None,
+    created_after: str | None,
 ) -> None:
     """Async implementation of the migrate command."""
     setup_logging(log_level, log_format)
@@ -173,9 +233,22 @@ async def _migrate_main(
         else:
             config = Config.from_env()
 
-        # Override config with CLI arguments
-        if state_dir:
-            config.state_dir = state_dir
+        # Checkpoint normalization: allow a *single* checkpoint path (root/run/project)
+        # to be provided via CLI or env. CLI takes precedence, but env-driven `--state-dir`
+        # is supported as well.
+        state_dir_input = state_dir if state_dir is not None else config.state_dir
+        resume_run_dir_input = resume_run_dir
+
+        inferred_project: str | None = None
+        normalized_state_dir, normalized_resume_run_dir, inferred_project = (
+            _normalize_checkpoint_args(
+                state_dir_cli=state_dir_input,
+                resume_run_dir_cli=resume_run_dir_input,
+            )
+        )
+        if normalized_state_dir is not None:
+            config.state_dir = normalized_state_dir
+        resume_run_dir = normalized_resume_run_dir
 
         if resources != "all":
             config.resources = [r.strip() for r in resources.split(",")]
@@ -183,10 +256,22 @@ async def _migrate_main(
         # Parse and set project filter if provided
         if projects:
             config.project_names = [p.strip() for p in projects.split(",")]
+        elif inferred_project is not None:
+            # Convenience: if user pointed at a project checkpoint dir, assume they
+            # want to run just that project unless they specified --projects.
+            config.project_names = [inferred_project]
 
         # Override logging config
         config.logging.level = log_level
         config.logging.format = log_format
+
+        # Logs tuning overrides (only if flags provided; otherwise respect env/config-file)
+        if logs_fetch_limit is not None:
+            config.migration.logs_fetch_limit = logs_fetch_limit
+        if logs_insert_batch_size is not None:
+            config.migration.logs_insert_batch_size = logs_insert_batch_size
+        if created_after is not None:
+            config.migration.created_after = canonicalize_created_after(created_after)
 
         logger.info(
             "Starting migration",
@@ -196,6 +281,11 @@ async def _migrate_main(
             projects=getattr(config, "project_names", None),
             state_dir=str(config.state_dir),
             dry_run=dry_run,
+            logs_fetch_limit=config.migration.logs_fetch_limit,
+            logs_insert_batch_size=config.migration.logs_insert_batch_size,
+            created_after=config.migration.created_after,
+            resume_run_dir=str(resume_run_dir) if resume_run_dir is not None else None,
+            inferred_project=inferred_project,
         )
 
         if dry_run:
@@ -206,7 +296,7 @@ async def _migrate_main(
             return
 
         # Run migration
-        await _run_migration(config)
+        await _run_migration(config, resume_run_dir=resume_run_dir)
 
     except KeyboardInterrupt:
         console.print("\n[red]Migration interrupted by user[/red]")
@@ -218,7 +308,142 @@ async def _migrate_main(
         sys.exit(1)
 
 
-async def _run_migration(config: Config) -> None:
+def _looks_like_timestamp_dir(p: Path) -> bool:
+    # Format: YYYYMMDD_HHMMSS (e.g. 20260113_212530)
+    TIMESTAMP_DIR_NAME_LEN = 15
+    TIMESTAMP_SEPARATOR_POS = 8
+    name = p.name
+    if len(name) != TIMESTAMP_DIR_NAME_LEN:
+        return False
+    if name[TIMESTAMP_SEPARATOR_POS] != "_":
+        return False
+    return (
+        name[:TIMESTAMP_SEPARATOR_POS].isdigit()
+        and name[TIMESTAMP_SEPARATOR_POS + 1 :].isdigit()
+    )
+
+
+def _is_run_checkpoint_dir(p: Path) -> bool:
+    # A "run dir" is the timestamped folder that contains per-project subdirs.
+    # It typically includes a migration report/summary in this directory.
+    if not p.exists() or not p.is_dir():
+        return False
+
+    has_report = (p / "migration_report.json").exists()
+    has_summary = (p / "migration_summary.txt").exists()
+    if has_report or has_summary:
+        return True
+    # Heuristic fallback: timestamp dir containing at least one project subdir
+    # with a streaming state file.
+    if not _looks_like_timestamp_dir(p):
+        return False
+
+    has_any_project_state = False
+    try:
+        for child in p.iterdir():
+            if child.is_dir() and (child / "logs_streaming_state.json").exists():
+                has_any_project_state = True
+                break
+    except Exception:
+        has_any_project_state = False
+
+    return has_any_project_state
+
+
+def _is_project_checkpoint_dir(p: Path) -> bool:
+    # A "project dir" lives under a run dir and stores per-project streaming state.
+    if not p.exists() or not p.is_dir():
+        return False
+    if (p / "logs_streaming_state.json").exists():
+        return True
+    if (p / "dataset_events").exists():
+        return True
+    if (p / "experiment_events").exists():
+        return True
+    return False
+
+
+def _normalize_checkpoint_args(
+    *,
+    state_dir_cli: Path | None,
+    resume_run_dir_cli: Path | None,
+) -> tuple[Path | None, Path | None, str | None]:
+    """
+    Normalize checkpoint inputs so users can pass a single `--state-dir` path.
+
+    Returns (normalized_state_root, resume_run_dir, inferred_project_name).
+
+    Accepted `--state-dir` values:
+    - root dir (e.g. ./checkpoints) -> new run dir under it
+    - run dir (e.g. ./checkpoints/20260113_212530) -> resume that run
+    - project dir (e.g. ./checkpoints/20260113_212530/my-project) -> resume that run,
+      and infer project name for convenience.
+    """
+    inferred_project: str | None = None
+
+    if resume_run_dir_cli is not None:
+        normalized_root = (
+            state_dir_cli if state_dir_cli is not None else resume_run_dir_cli.parent
+        )
+        return normalized_root, resume_run_dir_cli, inferred_project
+
+    if state_dir_cli is None:
+        return None, None, None
+
+    # Common case: user points `--state-dir` at a project dir under a timestamp run dir
+    # (e.g. checkpoints/20260113_212530/my-project). Treat it as a project checkpoint
+    # dir even if it doesn't yet contain state files, to avoid nesting a new timestamp
+    # directory under the project directory.
+    try:
+        parent = state_dir_cli.parent
+        if parent is not None and _looks_like_timestamp_dir(parent):
+            inferred_project = state_dir_cli.name
+            run_dir = parent
+            root_dir = run_dir.parent
+            return root_dir, run_dir, inferred_project
+    except Exception:
+        pass
+
+    # If the user points `--state-dir` at a run dir, treat it as resume.
+    if _is_run_checkpoint_dir(state_dir_cli):
+        return state_dir_cli.parent, state_dir_cli, None
+
+    # If the user points `--state-dir` at a project dir, infer run dir + project.
+    if _is_project_checkpoint_dir(state_dir_cli):
+        inferred_project = state_dir_cli.name
+        run_dir = state_dir_cli.parent
+        root_dir = run_dir.parent
+        return root_dir, run_dir, inferred_project
+
+    # Otherwise, treat it as the root checkpoints directory.
+    return state_dir_cli, None, None
+
+
+def _resolve_run_checkpoint_dir(
+    *,
+    state_dir: Path,
+    resume_run_dir: Path | None,
+) -> tuple[Path, bool]:
+    """
+    Returns (checkpoint_dir, is_resuming).
+
+    - If resume_run_dir is provided, it's used directly.
+    - Else, if state_dir itself looks like a run checkpoint dir, use it directly.
+    - Else, create a new timestamped dir under state_dir.
+    """
+    if resume_run_dir is not None:
+        return resume_run_dir, True
+    if _is_run_checkpoint_dir(state_dir):
+        return state_dir, True
+
+    from datetime import datetime
+
+    start_time = datetime.now()
+    timestamp = start_time.strftime("%Y%m%d_%H%M%S")
+    return state_dir / timestamp, False
+
+
+async def _run_migration(config: Config, *, resume_run_dir: Path | None) -> None:
     """Run the migration process with progress reporting.
 
     Args:
@@ -226,6 +451,18 @@ async def _run_migration(config: Config) -> None:
     """
     # Create orchestrator
     orchestrator = MigrationOrchestrator(config)
+
+    # Resolve run checkpoint dir (new run vs resume).
+    checkpoint_dir, is_resuming = _resolve_run_checkpoint_dir(
+        state_dir=config.ensure_checkpoint_dir(),
+        resume_run_dir=resume_run_dir,
+    )
+    checkpoint_dir.mkdir(parents=True, exist_ok=True)
+    structlog.get_logger(__name__).info(
+        "Using run checkpoint directory",
+        checkpoint_dir=str(checkpoint_dir),
+        is_resuming=is_resuming,
+    )
 
     with Progress(
         SpinnerColumn(),
@@ -281,16 +518,25 @@ async def _run_migration(config: Config) -> None:
 
                 # Show project list for user awareness
                 if num_projects > 0:
-                    project_names = [p["name"] for p in projects[:3]]  # Show first 3
-                    if num_projects > 3:
-                        project_names.append(f"... and {num_projects - 3} more")
+                    project_names = [
+                        p["name"] for p in projects[:PROJECTS_PREVIEW_LIMIT]
+                    ]
+                    if num_projects > PROJECTS_PREVIEW_LIMIT:
+                        project_names.append(
+                            f"... and {num_projects - PROJECTS_PREVIEW_LIMIT} more"
+                        )
                     console.print(f"[blue]Projects:[/blue] {', '.join(project_names)}")
 
                 progress.update(migration_task, description="🚀 Starting migration...")
 
                 # Run migration with project-based progress tracking
                 results = await _run_migration_with_progress(
-                    orchestrator, progress, migration_task, num_projects
+                    orchestrator,
+                    progress,
+                    migration_task,
+                    num_projects,
+                    checkpoint_dir=checkpoint_dir,
+                    is_resuming=is_resuming,
                 )
 
                 # Final update
@@ -303,9 +549,8 @@ async def _run_migration(config: Config) -> None:
             # Display results
             _display_results(results)
 
-            # Save results to file
-            results_file = config.state_dir / "migration_results.json"
-            config.ensure_checkpoint_dir()
+            # Save results to file (inside the run checkpoint dir)
+            results_file = checkpoint_dir / "migration_results.json"
             with open(results_file, "w") as f:
                 json.dump(results, f, indent=2)
 
@@ -333,7 +578,13 @@ async def _run_migration(config: Config) -> None:
 
 
 async def _run_migration_with_progress(
-    orchestrator, progress, migration_task, total_projects
+    orchestrator,
+    progress,
+    migration_task,
+    total_projects,
+    *,
+    checkpoint_dir: Path,
+    is_resuming: bool,
 ):
     """Run migration with detailed progress updates.
 
@@ -356,10 +607,12 @@ async def _run_migration_with_progress(
     start_time = datetime.now()
     logger = structlog.get_logger(__name__)
     projects_completed = 0
+    # Track streaming throughput from progress hooks (per-project/resource).
+    stream_totals: dict[tuple[str, str], dict[str, float]] = {}
 
-    # Create timestamped checkpoint directory
-    timestamp = start_time.strftime("%Y%m%d_%H%M%S")
-    checkpoint_dir = orchestrator.config.ensure_checkpoint_dir() / timestamp
+    # Use the resolved run checkpoint dir (either new timestamp dir or resume dir)
+    orchestrator.config.ensure_checkpoint_dir()
+    checkpoint_dir.mkdir(parents=True, exist_ok=True)
 
     total_results = {
         "start_time": start_time.isoformat(),
@@ -442,13 +695,155 @@ async def _run_migration_with_progress(
                 completed=projects_completed,
             )
 
+            # Print project header for visibility
+            console.print(
+                f"\n[bold blue]📁 {project_name}[/bold blue] ({i + 1}/{total_projects})"
+            )
+
             try:
+                # Create per-project streaming progress tasks lazily.
+                stream_task_ids: dict[str, TaskID] = {}
+
+                def _stream_progress_factory(
+                    resource_name: str,
+                    *,
+                    _project_name: str = project_name,
+                    _progress: Progress = progress,
+                    _stream_task_ids: dict[str, TaskID] = stream_task_ids,
+                ):
+                    label_map = {
+                        "logs": "🧾 Logs",
+                        "experiments": "🧪 Experiment events",
+                        "datasets": "📚 Dataset events",
+                    }
+                    label = label_map.get(resource_name, resource_name)
+
+                    if resource_name not in _stream_task_ids:
+                        _stream_task_ids[resource_name] = _progress.add_task(
+                            f"{label} ({_project_name}): starting…",
+                            total=None,
+                        )
+                    task_id = _stream_task_ids[resource_name]
+
+                    def hook(update: dict[str, Any], *, _label: str = label) -> None:
+                        # Common fields
+                        phase = update.get("phase")
+                        fetched = update.get("fetched_total")
+                        inserted = update.get("inserted_total")
+                        inserted_bytes = update.get("inserted_bytes_total")
+                        _ = update.get("skipped_seen_total")
+                        _ = update.get("skipped_deleted_total")
+                        page_num = update.get("page_num")
+                        inserted_last = update.get("inserted_last")
+                        inserted_bytes_last = update.get("inserted_bytes_last")
+                        insert_seconds = update.get("insert_seconds")
+
+                        gb_part = ""
+                        if isinstance(inserted_bytes, int):
+                            gb = inserted_bytes / 1_000_000_000
+                            gb_part = f" gb={gb:.3f}"
+                            stream_totals[
+                                (_project_name, str(update.get("resource")))
+                            ] = {
+                                "inserted_rows": float(inserted or 0),
+                                "inserted_gb": gb,
+                            }
+
+                        batch_rate_part = ""
+                        if (
+                            isinstance(inserted_last, int)
+                            and isinstance(inserted_bytes_last, int)
+                            and isinstance(insert_seconds, int | float)
+                            and insert_seconds > 0
+                        ):
+                            rps = inserted_last / float(insert_seconds)
+                            gbps = (inserted_bytes_last / 1_000_000_000) / float(
+                                insert_seconds
+                            )
+                            batch_rate_part = f" rps={rps:.0f} gbps={gbps:.3f}"
+
+                        # Per-resource context
+                        page_part = f" page={page_num}" if page_num is not None else ""
+
+                        if update.get("resource") == "experiment_events":
+                            desc = (
+                                f"{_label} ({_project_name}):{page_part}"
+                                f" fetched={fetched} inserted={inserted}"
+                                f"{gb_part}{batch_rate_part}"
+                            )
+                        elif update.get("resource") == "dataset_events":
+                            desc = (
+                                f"{_label} ({_project_name}):{page_part}"
+                                f" fetched={fetched} inserted={inserted}"
+                                f"{gb_part}{batch_rate_part}"
+                            )
+                        else:
+                            # logs
+                            desc = (
+                                f"{_label} ({_project_name}):{page_part}"
+                                f" fetched={fetched} inserted={inserted}"
+                                f"{gb_part}{batch_rate_part}"
+                            )
+
+                        if phase == "done":
+                            _progress.update(
+                                task_id, description=desc, total=1, completed=1
+                            )
+                        else:
+                            _progress.update(task_id, description=desc)
+
+                    return hook
+
+                # Create callback for real-time resource feedback
+                def _resource_callback(
+                    resource_name: str,
+                    results: dict[str, Any],
+                    *,
+                    _project_name: str = project_name,
+                ) -> None:
+                    """Print real-time feedback when each resource type completes."""
+                    total = results.get("total", 0)
+                    migrated = results.get("migrated", 0)
+                    skipped = results.get("skipped", 0)
+                    failed = results.get("failed", 0)
+
+                    # Emoji labels for resource types
+                    label_map = {
+                        "datasets": "📚 datasets",
+                        "experiments": "🧪 experiments",
+                        "logs": "🧾 logs",
+                        "prompts": "💬 prompts",
+                        "functions": "⚙️  functions",
+                        "project_tags": "🏷️  project_tags",
+                        "project_scores": "📊 project_scores",
+                        "views": "👁️  views",
+                        "span_iframes": "🖼️  span_iframes",
+                    }
+                    label = label_map.get(resource_name, f"   {resource_name}")
+
+                    # Build status parts
+                    if total == 0:
+                        status = "[dim]none found[/dim]"
+                    else:
+                        parts = []
+                        if migrated > 0:
+                            parts.append(f"[green]{migrated} migrated[/green]")
+                        if skipped > 0:
+                            parts.append(f"[yellow]{skipped} skipped[/yellow]")
+                        if failed > 0:
+                            parts.append(f"[red]{failed} failed[/red]")
+                        status = ", ".join(parts) if parts else "[dim]0[/dim]"
+
+                    console.print(f"    {label}: {status}")
+
                 project_results = await orchestrator._migrate_project(
                     project,
                     source_client,
                     dest_client,
                     checkpoint_dir,
                     global_id_mappings,
+                    progress_factory=_stream_progress_factory,
+                    resource_callback=_resource_callback,
                 )
 
                 total_results["projects"][project_name] = project_results
@@ -469,20 +864,6 @@ async def _run_migration_with_progress(
 
                 # Complete this project
                 projects_completed += 1
-
-                # Show mini summary for this project
-                migrated = project_results.get("migrated_resources", 0)
-                total = project_results.get("total_resources", 0)
-                skipped = project_results.get("skipped_resources", 0)
-                failed = project_results.get("failed_resources", 0)
-
-                if total > 0:
-                    console.print(
-                        f"[blue]  {project_name}:[/blue] "
-                        f"[green]{migrated} migrated[/green], "
-                        f"[yellow]{skipped} skipped[/yellow]"
-                        + (f", [red]{failed} failed[/red]" if failed > 0 else "")
-                    )
 
                 progress.update(
                     migration_task,
@@ -522,6 +903,19 @@ async def _run_migration_with_progress(
         }
     )
 
+    # Add a lightweight throughput summary based on streaming progress hooks.
+    inserted_rows_total = 0.0
+    inserted_gb_total = 0.0
+    for v in stream_totals.values():
+        inserted_rows_total += float(v.get("inserted_rows", 0.0))
+        inserted_gb_total += float(v.get("inserted_gb", 0.0))
+    total_results["throughput"] = {
+        "inserted_rows_total": int(inserted_rows_total),
+        "inserted_gb_total": inserted_gb_total,
+        "rows_per_sec": (inserted_rows_total / duration) if duration > 0 else None,
+        "gb_per_sec": (inserted_gb_total / duration) if duration > 0 else None,
+    }
+
     # Generate detailed migration report
     report_path = orchestrator._generate_migration_report(total_results, checkpoint_dir)
     total_results["report_path"] = str(report_path)
@@ -550,6 +944,19 @@ def _display_results(results: dict) -> None:
 
     console.print("\n")
     console.print(summary_table)
+
+    # Throughput summary (streaming resources)
+    tp = results.get("throughput") or {}
+    rps = tp.get("rows_per_sec")
+    gbps = tp.get("gb_per_sec")
+    inserted_gb_total = tp.get("inserted_gb_total")
+    inserted_rows_total = tp.get("inserted_rows_total")
+    if isinstance(inserted_rows_total, int) and isinstance(inserted_gb_total, float):
+        rps_str = f"{rps:.1f}" if isinstance(rps, int | float) else "n/a"
+        gbps_str = f"{gbps:.3f}" if isinstance(gbps, int | float) else "n/a"
+        console.print(
+            f"\n[bold]Throughput:[/bold] inserted_rows={inserted_rows_total} inserted_gb={inserted_gb_total:.3f} rows/s={rps_str} gb/s={gbps_str}"
+        )
 
     # Project details table
     if results["projects"]:
@@ -921,7 +1328,9 @@ def _display_dry_run_results(
                 resource_name.title(),
                 status,
                 count,
-                samples[:50] + "..." if len(samples) > 50 else samples,
+                samples[:SAMPLES_PREVIEW_LIMIT] + "..."
+                if len(samples) > SAMPLES_PREVIEW_LIMIT
+                else samples,
             )
 
         console.print("\n")
