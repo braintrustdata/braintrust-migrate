@@ -614,7 +614,7 @@ class DatasetMigrator(ResourceMigrator[Dataset]):
                 root_span_id=root_span_id,
                 span_id=span_id,
                 cursor=cursor,
-        )
+            )
 
     async def _migrate_dataset_records_streaming(
         self, source_dataset_id: str, dest_dataset_id: str
@@ -642,11 +642,7 @@ class DatasetMigrator(ResourceMigrator[Dataset]):
                 )
                 state.cursor = None
 
-            if self.events_use_version_snapshot:
-                self._logger.warning(
-                    "Dataset version snapshotting is not supported on some deployments; disabling for this run",
-                    source_dataset_id=source_dataset_id,
-                )
+            # BTQL-based streaming does not use version snapshots.
             version = None
 
             progress = self._events_progress_hook
@@ -719,23 +715,23 @@ class DatasetMigrator(ResourceMigrator[Dataset]):
                 if progress is None
                 else {
                     "on_page": lambda info, _p=progress: _p(
-                            {
-                                "resource": "dataset_events",
+                        {
+                            "resource": "dataset_events",
                             "phase": "page",
-                                "source_dataset_id": source_dataset_id,
-                                "dest_dataset_id": dest_dataset_id,
+                            "source_dataset_id": source_dataset_id,
+                            "dest_dataset_id": dest_dataset_id,
                             "page_num": info.get("page_num"),
                             "page_events": info.get("page_events"),
-                                "fetched_total": state.fetched_events,
-                                "inserted_total": state.inserted_events,
-                                "inserted_bytes_total": state.inserted_bytes,
-                                "skipped_deleted_total": state.skipped_deleted,
-                                "skipped_seen_total": state.skipped_seen,
-                                "attachments_copied_total": state.attachments_copied,
+                            "fetched_total": state.fetched_events,
+                            "inserted_total": state.inserted_events,
+                            "inserted_bytes_total": state.inserted_bytes,
+                            "skipped_deleted_total": state.skipped_deleted,
+                            "skipped_seen_total": state.skipped_seen,
+                            "attachments_copied_total": state.attachments_copied,
                             "cursor": (
-                        (state.btql_min_pagination_key[:16] + "…")
-                        if isinstance(state.btql_min_pagination_key, str)
-                        else None
+                                (state.btql_min_pagination_key[:16] + "…")
+                                if isinstance(state.btql_min_pagination_key, str)
+                                else None
                             ),
                             "next_cursor": None,
                         }
@@ -757,7 +753,7 @@ class DatasetMigrator(ResourceMigrator[Dataset]):
                         }
                     ),
                 },
-                    )
+            )
 
             self._logger.info(
                 "Migrated dataset records (streaming)",

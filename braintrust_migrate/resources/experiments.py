@@ -295,7 +295,7 @@ class ExperimentMigrator(ResourceMigrator[Experiment]):
                     if dest_base_exp_id:
                         create_params["base_exp_id"] = dest_base_exp_id
                     else:
-                        self._logger.warning(
+                        self._logger.debug(
                             "Could not resolve base experiment dependency",
                             source_base_exp_id=experiment.base_exp_id,
                         )
@@ -306,7 +306,7 @@ class ExperimentMigrator(ResourceMigrator[Experiment]):
                     if dest_dataset_id:
                         create_params["dataset_id"] = dest_dataset_id
                     else:
-                        self._logger.warning(
+                        self._logger.debug(
                             "Could not resolve dataset dependency",
                             source_dataset_id=experiment.dataset_id,
                         )
@@ -424,7 +424,7 @@ class ExperimentMigrator(ResourceMigrator[Experiment]):
             if dest_base_exp_id:
                 create_params["base_exp_id"] = dest_base_exp_id
             else:
-                self._logger.warning(
+                self._logger.debug(
                     "Could not resolve base experiment dependency",
                     source_base_exp_id=resource.base_exp_id,
                 )
@@ -435,7 +435,7 @@ class ExperimentMigrator(ResourceMigrator[Experiment]):
             if dest_dataset_id:
                 create_params["dataset_id"] = dest_dataset_id
             else:
-                self._logger.warning(
+                self._logger.debug(
                     "Could not resolve dataset dependency",
                     source_dataset_id=resource.dataset_id,
                 )
@@ -685,7 +685,7 @@ class ExperimentMigrator(ResourceMigrator[Experiment]):
                 root_span_id=root_span_id,
                 span_id=span_id,
                 cursor=cursor,
-        )
+            )
 
     async def _migrate_experiment_events_streaming(
         self, source_experiment_id: str, dest_experiment_id: str
@@ -714,11 +714,7 @@ class ExperimentMigrator(ResourceMigrator[Experiment]):
                     )
                     state.cursor = None
 
-                if self.events_use_version_snapshot:
-                    self._logger.warning(
-                        "Experiment version snapshotting is not supported on some deployments; disabling for this run",
-                        source_experiment_id=source_experiment_id,
-                    )
+                # BTQL-based streaming does not use version snapshots.
                 version = None
                 progress = self._events_progress_hook
 
@@ -794,23 +790,23 @@ class ExperimentMigrator(ResourceMigrator[Experiment]):
                     if progress is None
                     else {
                         "on_page": lambda info, _p=progress: _p(
-                                {
-                                    "resource": "experiment_events",
+                            {
+                                "resource": "experiment_events",
                                 "phase": "page",
-                                    "source_experiment_id": source_experiment_id,
-                                    "dest_experiment_id": dest_experiment_id,
+                                "source_experiment_id": source_experiment_id,
+                                "dest_experiment_id": dest_experiment_id,
                                 "page_num": info.get("page_num"),
                                 "page_events": info.get("page_events"),
-                                    "fetched_total": state.fetched_events,
-                                    "inserted_total": state.inserted_events,
-                                    "inserted_bytes_total": state.inserted_bytes,
-                                    "skipped_deleted_total": state.skipped_deleted,
-                                    "skipped_seen_total": state.skipped_seen,
-                                    "attachments_copied_total": state.attachments_copied,
+                                "fetched_total": state.fetched_events,
+                                "inserted_total": state.inserted_events,
+                                "inserted_bytes_total": state.inserted_bytes,
+                                "skipped_deleted_total": state.skipped_deleted,
+                                "skipped_seen_total": state.skipped_seen,
+                                "attachments_copied_total": state.attachments_copied,
                                 "cursor": (
-                            (state.btql_min_pagination_key[:16] + "…")
-                            if isinstance(state.btql_min_pagination_key, str)
-                            else None
+                                    (state.btql_min_pagination_key[:16] + "…")
+                                    if isinstance(state.btql_min_pagination_key, str)
+                                    else None
                                 ),
                                 "next_cursor": None,
                             }
@@ -832,7 +828,7 @@ class ExperimentMigrator(ResourceMigrator[Experiment]):
                             }
                         ),
                     },
-                        )
+                )
 
                 self._logger.info(
                     "Migrated experiment events (streaming)",

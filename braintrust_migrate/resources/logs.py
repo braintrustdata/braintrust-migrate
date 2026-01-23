@@ -444,12 +444,7 @@ class LogsMigrator(ResourceMigrator[dict[str, Any]]):
         errors: list[dict[str, Any]] = []
 
         try:
-            if self.use_version_snapshot:
-                # Logs streaming fetch intentionally does not send `version` (see `_fetch_page`).
-                # Emitting this as warning was noisy; keep a one-time informational hint.
-                self._logger.info(
-                    "Logs version snapshotting is not used for project_logs; continuing without version snapshot"
-                )
+            # BTQL-based streaming does not use version snapshots.
 
             # Optional created-after filter for streaming queries (persisted for safe resume).
             created_after_cfg = getattr(
