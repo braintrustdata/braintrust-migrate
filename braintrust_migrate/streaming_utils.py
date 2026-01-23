@@ -7,9 +7,12 @@ drift across implementations.
 
 from __future__ import annotations
 
+import json as _json
 import sqlite3
 import time
 from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, TypedDict, cast
 
 from braintrust_migrate.batching import (
@@ -18,6 +21,55 @@ from braintrust_migrate.batching import (
 )
 from braintrust_migrate.btql import btql_quote
 from braintrust_migrate.insert_bisect import insert_with_413_bisect
+
+
+@dataclass
+class EventsStreamState:
+    """Checkpoint state for streaming events migration (datasets/experiments)."""
+
+    version: str | None = None
+    cursor: str | None = None
+    btql_min_pagination_key: str | None = None
+    query_source: str | None = None
+    fetched_events: int = 0
+    inserted_events: int = 0
+    inserted_bytes: int = 0
+    skipped_deleted: int = 0
+    skipped_seen: int = 0
+    attachments_copied: int = 0
+
+    @classmethod
+    def from_path(cls, path: Path) -> EventsStreamState:
+        if not path.exists():
+            return cls()
+        with open(path) as f:
+            data = _json.load(f)
+        return cls(
+            version=data.get("version"),
+            cursor=data.get("cursor"),
+            btql_min_pagination_key=data.get("btql_min_pagination_key"),
+            query_source=data.get("query_source"),
+            fetched_events=int(data.get("fetched_events", 0)),
+            inserted_events=int(data.get("inserted_events", 0)),
+            inserted_bytes=int(data.get("inserted_bytes", 0)),
+            skipped_deleted=int(data.get("skipped_deleted", 0)),
+            skipped_seen=int(data.get("skipped_seen", 0)),
+            attachments_copied=int(data.get("attachments_copied", 0)),
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "version": self.version,
+            "cursor": self.cursor,
+            "btql_min_pagination_key": self.btql_min_pagination_key,
+            "query_source": self.query_source,
+            "fetched_events": self.fetched_events,
+            "inserted_events": self.inserted_events,
+            "inserted_bytes": self.inserted_bytes,
+            "skipped_deleted": self.skipped_deleted,
+            "skipped_seen": self.skipped_seen,
+            "attachments_copied": self.attachments_copied,
+        }
 
 
 class SeenIdsDB:

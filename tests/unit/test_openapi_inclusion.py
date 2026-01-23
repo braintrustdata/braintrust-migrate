@@ -1,7 +1,5 @@
 """Unit tests for OpenAPI-based inclusion approach."""
 
-from unittest.mock import Mock
-
 import pytest
 
 from braintrust_migrate.openapi_utils import get_resource_create_fields
@@ -23,25 +21,8 @@ class TestOpenAPIInclusion:
             mock_source_client, mock_dest_client, temp_checkpoint_dir
         )
 
-        # Create a mock prompt with various fields
-        mock_prompt = Mock()
-        mock_prompt.id = "prompt-123"
-        mock_prompt.name = "Test Prompt"
-        mock_prompt.slug = "test-prompt"
-        mock_prompt.description = "A test prompt"
-        mock_prompt.created = "2024-01-01T00:00:00Z"
-        mock_prompt.log_id = "p"
-        mock_prompt.function_data = {"type": "code"}
-        mock_prompt.metadata = {"version": "1.0"}
-        mock_prompt.prompt_data = {"template": "Hello {{name}}"}
-        mock_prompt.tags = ["test"]
-        mock_prompt.function_type = "llm"
-        mock_prompt.project_id = "project-456"
-        mock_prompt.org_id = "org-789"
-        mock_prompt._xact_id = "xact-123"
-
-        # Mock the to_dict method to return all fields
-        mock_prompt.to_dict.return_value = {
+        # Create a prompt dict with various fields (as returned by raw API)
+        prompt_dict = {
             "id": "prompt-123",
             "name": "Test Prompt",
             "slug": "test-prompt",
@@ -59,7 +40,7 @@ class TestOpenAPIInclusion:
         }
 
         # Serialize the resource
-        serialized = migrator.serialize_resource_for_insert(mock_prompt)
+        serialized = migrator.serialize_resource_for_insert(prompt_dict)
 
         # Should only include fields allowed by CreatePrompt schema
         expected_fields = {
@@ -113,25 +94,22 @@ class TestOpenAPIInclusion:
         # Should not have allowed fields (no schema found)
         assert migrator.allowed_fields_for_insert is None
 
-        # Create a mock resource
-        mock_resource = Mock()
-        mock_resource.id = "unknown-123"
-        mock_resource.name = "Test Resource"
-        mock_resource.some_field = "some_value"
-
-        # Mock the to_dict method
-        mock_resource.to_dict.return_value = {
+        # Create a resource dict
+        resource_dict = {
             "id": "unknown-123",
             "name": "Test Resource",
             "some_field": "some_value",
+            "created": "2024-01-01T00:00:00Z",
         }
 
-        # Should return all fields with a warning (fallback behavior)
-        serialized = migrator.serialize_resource_for_insert(mock_resource)
+        # Should return all fields except always-excluded ones (fallback behavior)
+        serialized = migrator.serialize_resource_for_insert(resource_dict)
 
-        # Should include all original fields since no schema filtering is applied
-        expected_fields = {"id", "name", "some_field"}
-        assert set(serialized.keys()) == expected_fields
+        # Should include user fields but strip always-excluded fields (id, created)
+        assert "name" in serialized
+        assert "some_field" in serialized
+        assert "id" not in serialized  # Always stripped
+        assert "created" not in serialized  # Always stripped
 
     def test_openapi_field_extraction_accuracy(self):
         """Test that the OpenAPI field extraction matches the actual spec."""

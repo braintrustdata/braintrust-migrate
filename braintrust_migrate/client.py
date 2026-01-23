@@ -452,17 +452,26 @@ class BraintrustClient:
                 if retry_after is not None:
                     delay = min(max_delay, max(delay, retry_after))
 
-                self._logger.warning(
-                    "Operation failed, backing off and retrying",
-                    operation=operation_name,
-                    attempt=attempt,
-                    max_attempts=attempts,
-                    status_code=status,
-                    retry_after_seconds=retry_after,
-                    sleep_seconds=delay,
-                    error=str(e),
-                    **exc_ctx,
-                )
+                # Concise message for rate limits (expected behavior), verbose for other errors
+                if status == HTTP_STATUS_TOO_MANY_REQUESTS:
+                    self._logger.warning(
+                        "Rate limited, retrying",
+                        operation=operation_name,
+                        retry_in_seconds=round(delay, 1),
+                        attempt=f"{attempt}/{attempts}",
+                    )
+                else:
+                    self._logger.warning(
+                        "Operation failed, backing off and retrying",
+                        operation=operation_name,
+                        attempt=attempt,
+                        max_attempts=attempts,
+                        status_code=status,
+                        retry_after_seconds=retry_after,
+                        sleep_seconds=delay,
+                        error=str(e),
+                        **exc_ctx,
+                    )
                 await asyncio.sleep(delay)
 
         # Should be unreachable

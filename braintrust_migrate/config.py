@@ -136,8 +136,10 @@ class MigrationConfig(BaseModel):
     created_after: str | None = Field(
         default=None,
         description=(
-            "Optional ISO-8601 timestamp filter (logs only). When set, project logs "
-            "migration will only migrate events with created >= created_after."
+            "Optional ISO-8601 timestamp filter. When set: "
+            "(1) project logs migration only migrates events with created >= created_after, "
+            "(2) experiments migration only migrates experiments with created >= created_after "
+            "(and all their events)."
         ),
     )
 
@@ -306,7 +308,7 @@ class Config(BaseModel):
             "on",
         }
 
-        # Optional time filter (logs only)
+        # Optional time filter (applies to logs and experiments)
         created_after = os.getenv("MIGRATION_CREATED_AFTER")
 
         # Experiment events streaming settings

@@ -162,9 +162,10 @@ def migrate(
         typer.Option(
             "--created-after",
             help=(
-                "Optional ISO-8601 timestamp filter (logs only). When set, project logs "
-                "migration will only migrate events with created >= this value "
-                "(e.g. 2026-01-15T00:00:00Z)."
+                "Optional ISO-8601 timestamp filter. When set: "
+                "(1) logs migration only migrates events with created >= this value, "
+                "(2) experiments migration only migrates experiments with created >= this value "
+                "(and all their events). Example: 2026-01-15T00:00:00Z or 2026-01-15."
             ),
             envvar="MIGRATION_CREATED_AFTER",
         ),
@@ -696,6 +697,11 @@ async def _run_migration_with_progress(
                 completed=projects_completed,
             )
 
+            # Print project header for visibility
+            console.print(
+                f"\n[bold blue]📁 {project_name}[/bold blue] ({i + 1}/{total_projects})"
+            )
+
             try:
                 # Create per-project streaming progress tasks lazily.
                 stream_task_ids: dict[str, TaskID] = {}
@@ -759,23 +765,25 @@ async def _run_migration_with_progress(
                             batch_rate_part = f" rps={rps:.0f} gbps={gbps:.3f}"
 
                         # Per-resource context
+                        page_part = f" page={page_num}" if page_num is not None else ""
+
                         if update.get("resource") == "experiment_events":
                             desc = (
-                                f"{_label} ({_project_name}):"
-                                f" page={page_num} fetched={fetched} inserted={inserted}"
+                                f"{_label} ({_project_name}):{page_part}"
+                                f" fetched={fetched} inserted={inserted}"
                                 f"{gb_part}{batch_rate_part}"
                             )
                         elif update.get("resource") == "dataset_events":
                             desc = (
-                                f"{_label} ({_project_name}):"
-                                f" page={page_num} fetched={fetched} inserted={inserted}"
+                                f"{_label} ({_project_name}):{page_part}"
+                                f" fetched={fetched} inserted={inserted}"
                                 f"{gb_part}{batch_rate_part}"
                             )
                         else:
                             # logs
                             desc = (
-                                f"{_label} ({_project_name}):"
-                                f" page={page_num} fetched={fetched} inserted={inserted}"
+                                f"{_label} ({_project_name}):{page_part}"
+                                f" fetched={fetched} inserted={inserted}"
                                 f"{gb_part}{batch_rate_part}"
                             )
 
@@ -788,6 +796,48 @@ async def _run_migration_with_progress(
 
                     return hook
 
+                # Create callback for real-time resource feedback
+                def _resource_callback(
+                    resource_name: str,
+                    results: dict[str, Any],
+                    *,
+                    _project_name: str = project_name,
+                ) -> None:
+                    """Print real-time feedback when each resource type completes."""
+                    total = results.get("total", 0)
+                    migrated = results.get("migrated", 0)
+                    skipped = results.get("skipped", 0)
+                    failed = results.get("failed", 0)
+
+                    # Emoji labels for resource types
+                    label_map = {
+                        "datasets": "📚 datasets",
+                        "experiments": "🧪 experiments",
+                        "logs": "🧾 logs",
+                        "prompts": "💬 prompts",
+                        "functions": "⚙️  functions",
+                        "project_tags": "🏷️  project_tags",
+                        "project_scores": "📊 project_scores",
+                        "views": "👁️  views",
+                        "span_iframes": "🖼️  span_iframes",
+                    }
+                    label = label_map.get(resource_name, f"   {resource_name}")
+
+                    # Build status parts
+                    if total == 0:
+                        status = "[dim]none found[/dim]"
+                    else:
+                        parts = []
+                        if migrated > 0:
+                            parts.append(f"[green]{migrated} migrated[/green]")
+                        if skipped > 0:
+                            parts.append(f"[yellow]{skipped} skipped[/yellow]")
+                        if failed > 0:
+                            parts.append(f"[red]{failed} failed[/red]")
+                        status = ", ".join(parts) if parts else "[dim]0[/dim]"
+
+                    console.print(f"    {label}: {status}")
+
                 project_results = await orchestrator._migrate_project(
                     project,
                     source_client,
@@ -795,6 +845,7 @@ async def _run_migration_with_progress(
                     checkpoint_dir,
                     global_id_mappings,
                     progress_factory=_stream_progress_factory,
+                    resource_callback=_resource_callback,
                 )
 
                 total_results["projects"][project_name] = project_results
@@ -815,20 +866,6 @@ async def _run_migration_with_progress(
 
                 # Complete this project
                 projects_completed += 1
-
-                # Show mini summary for this project
-                migrated = project_results.get("migrated_resources", 0)
-                total = project_results.get("total_resources", 0)
-                skipped = project_results.get("skipped_resources", 0)
-                failed = project_results.get("failed_resources", 0)
-
-                if total > 0:
-                    console.print(
-                        f"[blue]  {project_name}:[/blue] "
-                        f"[green]{migrated} migrated[/green], "
-                        f"[yellow]{skipped} skipped[/yellow]"
-                        + (f", [red]{failed} failed[/red]" if failed > 0 else "")
-                    )
 
                 progress.update(
                     migration_task,

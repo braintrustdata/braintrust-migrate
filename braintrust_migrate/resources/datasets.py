@@ -4,13 +4,11 @@ from __future__ import annotations
 
 import json as _json
 from collections.abc import Callable
-from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, ClassVar, cast
+from typing import Any, ClassVar
 
 import httpx
 import structlog
-from braintrust_api.types import Dataset
 
 from braintrust_migrate.attachments import AttachmentCopier
 from braintrust_migrate.btql import (
@@ -19,6 +17,7 @@ from braintrust_migrate.btql import (
 )
 from braintrust_migrate.resources.base import MigrationResult, ResourceMigrator
 from braintrust_migrate.streaming_utils import (
+    EventsStreamState,
     SeenIdsDB,
     build_btql_sorted_page_query,
     stream_btql_sorted_events,
@@ -30,7 +29,7 @@ logger = structlog.get_logger(__name__)
 HTTP_STATUS_REQUEST_ENTITY_TOO_LARGE = 413
 
 
-class DatasetMigrator(ResourceMigrator[Dataset]):
+class DatasetMigrator(ResourceMigrator[dict]):
     """Migrator for Braintrust datasets.
 
     Handles migration of:
@@ -38,6 +37,8 @@ class DatasetMigrator(ResourceMigrator[Dataset]):
     - Dataset records/items
     - Brainstore blobs if enabled
     - Uses bulk operations for better performance
+
+    Uses raw API requests instead of SDK to avoid model dependencies.
     """
 
     def __init__(
@@ -104,7 +105,9 @@ class DatasetMigrator(ResourceMigrator[Dataset]):
 
         return get_resource_create_fields("DatasetEvent")
 
-    # InsertDatasetEvent allow-list (based on docs/OpenAPI)
+    # FALLBACK: Static field list for InsertDatasetEvent
+    # This is only used if OpenAPI schema is unavailable
+    # Primary source: allowed_fields_for_event_insert property (uses OpenAPI spec)
     _EVENT_INSERT_FIELDS: ClassVar[set[str]] = {
         "input",
         "expected",
@@ -123,21 +126,19 @@ class DatasetMigrator(ResourceMigrator[Dataset]):
         "span_parents",
     }
 
-    async def list_source_resources(
-        self, project_id: str | None = None
-    ) -> list[Dataset]:
-        """List all datasets from the source organization.
+    async def list_source_resources(self, project_id: str | None = None) -> list[dict]:
+        """List all datasets from the source organization using raw API.
 
         Args:
             project_id: Optional project ID to filter datasets.
 
         Returns:
-            List of source datasets.
+            List of dataset dicts from the source organization.
         """
         self._logger.info("Listing datasets from source organization")
 
         try:
-            # Use base class helper method
+            # Use base class helper method (now uses raw_request)
             return await self._list_resources_with_client(
                 self.source_client, "datasets", project_id
             )
@@ -146,7 +147,7 @@ class DatasetMigrator(ResourceMigrator[Dataset]):
             self._logger.error("Failed to list source datasets", error=str(e))
             raise
 
-    async def migrate_batch(self, resources: list[Dataset]) -> list[MigrationResult]:
+    async def migrate_batch(self, resources: list[dict]) -> list[MigrationResult]:
         """Migrate a batch of datasets using bulk operations for better performance.
 
         This overrides the base migrate_batch to:
@@ -222,12 +223,12 @@ class DatasetMigrator(ResourceMigrator[Dataset]):
         return results
 
     async def _create_datasets_batch(
-        self, datasets: list[Dataset]
+        self, datasets: list[dict]
     ) -> list[MigrationResult]:
-        """Create a batch of datasets.
+        """Create a batch of datasets using raw API.
 
         Args:
-            datasets: List of datasets to create
+            datasets: List of dataset dicts to create
 
         Returns:
             List of migration results for dataset creation
@@ -238,23 +239,31 @@ class DatasetMigrator(ResourceMigrator[Dataset]):
             source_id = self.get_resource_id(dataset)
 
             try:
-                # Create dataset in destination using base class serialization
+                # Create dataset in destination using OpenAPI allow-list filtering
                 create_params = self.serialize_resource_for_insert(dataset)
                 create_params["project_id"] = self.dest_project_id
 
-                dest_dataset = await self.dest_client.with_retry(
+                # Create dataset using raw API
+                response = await self.dest_client.with_retry(
                     "create_dataset",
-                    lambda create_params=create_params: self.dest_client.client.datasets.create(
-                        **create_params
+                    lambda create_params=create_params: self.dest_client.raw_request(
+                        "POST",
+                        "/v1/dataset",
+                        json=create_params,
                     ),
                 )
-                dest_dataset_id = cast(str, cast(Any, dest_dataset).id)
+
+                dest_dataset_id = response.get("id")
+                if not dest_dataset_id:
+                    raise ValueError(
+                        f"No ID returned when creating dataset {dataset.get('name')}"
+                    )
 
                 self._logger.info(
                     "✅ Created dataset",
                     source_id=source_id,
                     dest_id=dest_dataset_id,
-                    name=dataset.name,
+                    name=dataset.get("name"),
                 )
 
                 # Record success immediately for any potential dependencies
@@ -265,7 +274,7 @@ class DatasetMigrator(ResourceMigrator[Dataset]):
                         success=True,
                         source_id=source_id,
                         dest_id=dest_dataset_id,
-                        metadata={"name": dataset.name, "records_pending": True},
+                        metadata={"name": dataset.get("name"), "records_pending": True},
                     )
                 )
 
@@ -274,7 +283,7 @@ class DatasetMigrator(ResourceMigrator[Dataset]):
                 self._logger.error(
                     error_msg,
                     source_id=source_id,
-                    name=dataset.name,
+                    name=dataset.get("name"),
                 )
 
                 self.record_failure(source_id, error_msg)
@@ -331,14 +340,14 @@ class DatasetMigrator(ResourceMigrator[Dataset]):
             dataset_count=len(successful_migrations),
         )
 
-    async def migrate_resource(self, resource: Dataset) -> str:
-        """Migrate a single dataset from source to destination.
+    async def migrate_resource(self, resource: dict) -> str:
+        """Migrate a single dataset from source to destination using raw API.
 
         Note: This method is kept for compatibility but migrate_batch should be used
         for better performance when migrating multiple datasets.
 
         Args:
-            resource: Source dataset to migrate.
+            resource: Source dataset dict to migrate.
 
         Returns:
             ID of the created dataset in destination.
@@ -348,34 +357,40 @@ class DatasetMigrator(ResourceMigrator[Dataset]):
         """
         self._logger.info(
             "Migrating dataset",
-            source_id=resource.id,
-            name=resource.name,
-            project_id=resource.project_id,
+            source_id=resource.get("id"),
+            name=resource.get("name"),
+            project_id=resource.get("project_id"),
         )
 
-        # Create dataset in destination using base class serialization
+        # Create dataset in destination using OpenAPI allow-list filtering
         create_params = self.serialize_resource_for_insert(resource)
-
-        # Override the project_id to use destination project
         create_params["project_id"] = self.dest_project_id
 
-        dest_dataset = await self.dest_client.with_retry(
+        # Create dataset using raw API
+        response = await self.dest_client.with_retry(
             "create_dataset",
-            lambda create_params=create_params: self.dest_client.client.datasets.create(
-                **create_params
+            lambda create_params=create_params: self.dest_client.raw_request(
+                "POST",
+                "/v1/dataset",
+                json=create_params,
             ),
         )
-        dest_dataset_id = cast(str, cast(Any, dest_dataset).id)
+
+        dest_dataset_id = response.get("id")
+        if not dest_dataset_id:
+            raise ValueError(
+                f"No ID returned when creating dataset {resource.get('name')}"
+            )
 
         self._logger.info(
             "Created dataset in destination",
-            source_id=resource.id,
+            source_id=resource.get("id"),
             dest_id=dest_dataset_id,
-            name=resource.name,
+            name=resource.get("name"),
         )
 
         # Migrate dataset records/items
-        await self._migrate_dataset_records(resource.id, dest_dataset_id)
+        await self._migrate_dataset_records(resource["id"], dest_dataset_id)
 
         return dest_dataset_id
 
@@ -399,51 +414,6 @@ class DatasetMigrator(ResourceMigrator[Dataset]):
         )
 
     # ---- Streaming dataset event copier (scales to large datasets) ----
-    @dataclass(slots=True)
-    class _EventsStreamState:
-        version: str | None = None
-        cursor: str | None = None
-        btql_min_pagination_key: str | None = None
-        query_source: str | None = None
-        fetched_events: int = 0
-        inserted_events: int = 0
-        inserted_bytes: int = 0
-        skipped_deleted: int = 0
-        skipped_seen: int = 0
-        attachments_copied: int = 0
-
-        @classmethod
-        def from_path(cls, path: Path) -> DatasetMigrator._EventsStreamState:
-            if not path.exists():
-                return cls()
-            with open(path) as f:
-                data = _json.load(f)
-            return cls(
-                version=data.get("version"),
-                cursor=data.get("cursor"),
-                btql_min_pagination_key=data.get("btql_min_pagination_key"),
-                query_source=data.get("query_source"),
-                fetched_events=int(data.get("fetched_events", 0)),
-                inserted_events=int(data.get("inserted_events", 0)),
-                inserted_bytes=int(data.get("inserted_bytes", 0)),
-                skipped_deleted=int(data.get("skipped_deleted", 0)),
-                skipped_seen=int(data.get("skipped_seen", 0)),
-                attachments_copied=int(data.get("attachments_copied", 0)),
-            )
-
-        def to_dict(self) -> dict[str, Any]:
-            return {
-                "version": self.version,
-                "cursor": self.cursor,
-                "btql_min_pagination_key": self.btql_min_pagination_key,
-                "query_source": self.query_source,
-                "fetched_events": self.fetched_events,
-                "inserted_events": self.inserted_events,
-                "inserted_bytes": self.inserted_bytes,
-                "skipped_deleted": self.skipped_deleted,
-                "skipped_seen": self.skipped_seen,
-                "attachments_copied": self.attachments_copied,
-            }
 
     @staticmethod
     def _max_xact_id(events: list[dict[str, Any]]) -> str | None:
@@ -462,9 +432,14 @@ class DatasetMigrator(ResourceMigrator[Dataset]):
     def _event_to_insert(
         self, event: dict[str, Any], source_dataset_id: str
     ) -> dict[str, Any]:
-        out: dict[str, Any] = {
-            k: event[k] for k in self._EVENT_INSERT_FIELDS if k in event
-        }
+        # Use dynamic schema from OpenAPI instead of static list
+        allowed_fields = self.allowed_fields_for_event_insert
+        if allowed_fields:
+            out: dict[str, Any] = {k: event[k] for k in allowed_fields if k in event}
+        else:
+            # Fallback to static list if OpenAPI schema not available
+            out = {k: event[k] for k in self._EVENT_INSERT_FIELDS if k in event}
+
         if "id" in event:
             out["id"] = event["id"]
         if "origin" not in out or out.get("origin") is None:
@@ -487,7 +462,7 @@ class DatasetMigrator(ResourceMigrator[Dataset]):
         cursor: str | None,
         version: str | None,
         limit: int,
-        state: _EventsStreamState,
+        state: EventsStreamState,
     ) -> dict[str, Any]:
         # Datasets are fetched via BTQL. Cursor/version are intentionally unused.
         _ = cursor
@@ -501,7 +476,7 @@ class DatasetMigrator(ResourceMigrator[Dataset]):
         *,
         dataset_id: str,
         limit: int,
-        state: _EventsStreamState,
+        state: EventsStreamState,
     ) -> dict[str, Any]:
         """Fetch one page via POST /btql using SQL syntax, sorted by _pagination_key."""
         last_pagination_key = state.btql_min_pagination_key
@@ -623,7 +598,7 @@ class DatasetMigrator(ResourceMigrator[Dataset]):
         events_dir.mkdir(parents=True, exist_ok=True)
 
         state_path = events_dir / f"{source_dataset_id}_state.json"
-        state = self._EventsStreamState.from_path(state_path)
+        state = EventsStreamState.from_path(state_path)
 
         seen_db = (
             SeenIdsDB(str(events_dir / f"{source_dataset_id}_seen.sqlite3"))

@@ -4,12 +4,10 @@ from __future__ import annotations
 
 import json as _json
 from collections.abc import Callable
-from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, ClassVar, cast
+from typing import Any, ClassVar
 
 import httpx
-from braintrust_api.types import Experiment
 
 from braintrust_migrate.attachments import AttachmentCopier
 from braintrust_migrate.btql import (
@@ -18,6 +16,7 @@ from braintrust_migrate.btql import (
 )
 from braintrust_migrate.resources.base import MigrationResult, ResourceMigrator
 from braintrust_migrate.streaming_utils import (
+    EventsStreamState,
     SeenIdsDB,
     build_btql_sorted_page_query,
     stream_btql_sorted_events,
@@ -27,7 +26,7 @@ from braintrust_migrate.streaming_utils import (
 HTTP_STATUS_REQUEST_ENTITY_TOO_LARGE = 413
 
 
-class ExperimentMigrator(ResourceMigrator[Experiment]):
+class ExperimentMigrator(ResourceMigrator[dict]):
     """Migrator for Braintrust experiments.
 
     Features:
@@ -35,6 +34,8 @@ class ExperimentMigrator(ResourceMigrator[Experiment]):
     - Migrates all experiment events (evaluations) for each experiment
     - Handles experiment dependencies (base_exp_id, dataset_id)
     - Uses bulk operations for better performance
+
+    Uses raw API requests instead of SDK to avoid model dependencies.
     """
 
     def __init__(
@@ -101,7 +102,9 @@ class ExperimentMigrator(ResourceMigrator[Experiment]):
 
         return get_resource_create_fields("ExperimentEvent")
 
-    # InsertExperimentEvent allow-list (based on docs/OpenAPI)
+    # FALLBACK: Static field list for InsertExperimentEvent
+    # This is only used if OpenAPI schema is unavailable
+    # Primary source: allowed_fields_for_event_insert property (uses OpenAPI spec)
     _EVENT_INSERT_FIELDS: ClassVar[set[str]] = {
         "input",
         "output",
@@ -126,16 +129,14 @@ class ExperimentMigrator(ResourceMigrator[Experiment]):
         "span_parents",
     }
 
-    def _sort_experiments_by_dependencies(
-        self, experiments: list[Experiment]
-    ) -> list[Experiment]:
+    def _sort_experiments_by_dependencies(self, experiments: list[dict]) -> list[dict]:
         """Sort experiments using a simple two-pass approach.
 
         Pass 1: Experiments without base_exp_id (no dependencies)
         Pass 2: Experiments with base_exp_id (dependent experiments)
 
         Args:
-            experiments: List of experiments to sort
+            experiments: List of experiment dicts to sort
 
         Returns:
             List of experiments sorted by dependency order
@@ -144,7 +145,7 @@ class ExperimentMigrator(ResourceMigrator[Experiment]):
         dependent_experiments = []
 
         for exp in experiments:
-            if hasattr(exp, "base_exp_id") and exp.base_exp_id:
+            if exp.get("base_exp_id"):
                 dependent_experiments.append(exp)
             else:
                 independent_experiments.append(exp)
@@ -157,11 +158,10 @@ class ExperimentMigrator(ResourceMigrator[Experiment]):
 
         return independent_experiments + dependent_experiments
 
-    async def list_source_resources(
-        self, project_id: str | None = None
-    ) -> list[Experiment]:
-        """List all experiments from the source organization, sorted by dependencies."""
+    async def list_source_resources(self, project_id: str | None = None) -> list[dict]:
+        """List all experiments from the source organization using raw API, sorted by dependencies."""
         try:
+            # Use base class helper method (now uses raw_request)
             experiments = await self._list_resources_with_client(
                 self.source_client, "experiments", project_id
             )
@@ -182,15 +182,15 @@ class ExperimentMigrator(ResourceMigrator[Experiment]):
             self._logger.error("Failed to list source experiments", error=str(e))
             raise
 
-    async def get_dependencies(self, resource: Experiment) -> list[str]:
+    async def get_dependencies(self, resource: dict) -> list[str]:
         """Get list of resource IDs that this experiment depends on."""
         dependencies = []
 
-        if hasattr(resource, "dataset_id") and resource.dataset_id:
-            dependencies.append(resource.dataset_id)
+        if resource.get("dataset_id"):
+            dependencies.append(resource["dataset_id"])
 
-        if hasattr(resource, "base_exp_id") and resource.base_exp_id:
-            dependencies.append(resource.base_exp_id)
+        if resource.get("base_exp_id"):
+            dependencies.append(resource["base_exp_id"])
 
         return dependencies
 
@@ -198,7 +198,7 @@ class ExperimentMigrator(ResourceMigrator[Experiment]):
         """Get list of resource types that experiments might depend on."""
         return ["datasets", "experiments"]
 
-    async def migrate_batch(self, resources: list[Experiment]) -> list[MigrationResult]:
+    async def migrate_batch(self, resources: list[dict]) -> list[MigrationResult]:
         """Migrate a batch of experiments with dependency-aware ordering.
 
         This handles base_exp_id dependencies by:
@@ -224,7 +224,7 @@ class ExperimentMigrator(ResourceMigrator[Experiment]):
         dependent_experiments = []  # Has base_exp_id
 
         for i, experiment in enumerate(resources):
-            if hasattr(experiment, "base_exp_id") and experiment.base_exp_id:
+            if experiment.get("base_exp_id"):
                 dependent_experiments.append((i, experiment))
             else:
                 independent_experiments.append((i, experiment))
@@ -258,7 +258,7 @@ class ExperimentMigrator(ResourceMigrator[Experiment]):
         return results
 
     async def _create_experiments_batch(
-        self, indexed_experiments: list[tuple[int, Experiment]], phase_name: str
+        self, indexed_experiments: list[tuple[int, dict]], phase_name: str
     ) -> list[MigrationResult]:
         """Create a batch of experiments of the same dependency type.
 
@@ -285,47 +285,58 @@ class ExperimentMigrator(ResourceMigrator[Experiment]):
             source_id = self.get_resource_id(experiment)
 
             try:
-                # Prepare experiment for creation
+                # Prepare creation parameters using OpenAPI allow-list filtering
                 create_params = self.serialize_resource_for_insert(experiment)
                 create_params["project_id"] = self.dest_project_id
 
                 # Handle dependencies with ID mapping
-                if hasattr(experiment, "base_exp_id") and experiment.base_exp_id:
-                    dest_base_exp_id = self.state.id_mapping.get(experiment.base_exp_id)
+                if experiment.get("base_exp_id"):
+                    dest_base_exp_id = self.state.id_mapping.get(
+                        experiment["base_exp_id"]
+                    )
                     if dest_base_exp_id:
                         create_params["base_exp_id"] = dest_base_exp_id
                     else:
                         self._logger.debug(
                             "Could not resolve base experiment dependency",
-                            source_base_exp_id=experiment.base_exp_id,
+                            source_base_exp_id=experiment["base_exp_id"],
                         )
                         create_params.pop("base_exp_id", None)
 
-                if hasattr(experiment, "dataset_id") and experiment.dataset_id:
-                    dest_dataset_id = self.state.id_mapping.get(experiment.dataset_id)
+                if experiment.get("dataset_id"):
+                    dest_dataset_id = self.state.id_mapping.get(
+                        experiment["dataset_id"]
+                    )
                     if dest_dataset_id:
                         create_params["dataset_id"] = dest_dataset_id
                     else:
                         self._logger.debug(
                             "Could not resolve dataset dependency",
-                            source_dataset_id=experiment.dataset_id,
+                            source_dataset_id=experiment["dataset_id"],
                         )
                         create_params.pop("dataset_id", None)
 
-                # Create experiment
-                dest_experiment = await self.dest_client.with_retry(
+                # Create experiment using raw API
+                response = await self.dest_client.with_retry(
                     "create_experiment",
-                    lambda create_params=create_params: self.dest_client.client.experiments.create(
-                        **create_params
+                    lambda create_params=create_params: self.dest_client.raw_request(
+                        "POST",
+                        "/v1/experiment",
+                        json=create_params,
                     ),
                 )
-                dest_experiment_id = cast(str, cast(Any, dest_experiment).id)
+
+                dest_experiment_id = response.get("id")
+                if not dest_experiment_id:
+                    raise ValueError(
+                        f"No ID returned when creating experiment {experiment.get('name')}"
+                    )
 
                 self._logger.info(
                     f"✅ Created {phase_name} experiment",
                     source_id=source_id,
                     dest_id=dest_experiment_id,
-                    name=experiment.name,
+                    name=experiment.get("name"),
                 )
 
                 # Record success immediately for dependency resolution
@@ -336,7 +347,10 @@ class ExperimentMigrator(ResourceMigrator[Experiment]):
                         success=True,
                         source_id=source_id,
                         dest_id=dest_experiment_id,
-                        metadata={"name": experiment.name, "events_pending": True},
+                        metadata={
+                            "name": experiment.get("name"),
+                            "events_pending": True,
+                        },
                     )
                 )
 
@@ -345,7 +359,7 @@ class ExperimentMigrator(ResourceMigrator[Experiment]):
                 self._logger.error(
                     error_msg,
                     source_id=source_id,
-                    name=experiment.name,
+                    name=experiment.get("name"),
                 )
 
                 self.record_failure(source_id, error_msg)
@@ -402,55 +416,63 @@ class ExperimentMigrator(ResourceMigrator[Experiment]):
             experiment_count=len(successful_migrations),
         )
 
-    async def migrate_resource(self, resource: Experiment) -> str:
-        """Migrate a single experiment from source to destination.
+    async def migrate_resource(self, resource: dict) -> str:
+        """Migrate a single experiment from source to destination using raw API.
 
         Note: This method is kept for compatibility but migrate_batch should be used
         for better performance when migrating multiple experiments.
         """
         self._logger.info(
             "Migrating experiment",
-            source_id=resource.id,
-            name=resource.name,
+            source_id=resource.get("id"),
+            name=resource.get("name"),
         )
 
-        # Create experiment in destination using base class serialization
+        # Prepare creation parameters using OpenAPI allow-list filtering
         create_params = self.serialize_resource_for_insert(resource)
         create_params["project_id"] = self.dest_project_id
 
         # Handle dependencies with ID mapping
-        if hasattr(resource, "base_exp_id") and resource.base_exp_id:
-            dest_base_exp_id = self.state.id_mapping.get(resource.base_exp_id)
+        if resource.get("base_exp_id"):
+            dest_base_exp_id = self.state.id_mapping.get(resource["base_exp_id"])
             if dest_base_exp_id:
                 create_params["base_exp_id"] = dest_base_exp_id
             else:
                 self._logger.debug(
                     "Could not resolve base experiment dependency",
-                    source_base_exp_id=resource.base_exp_id,
+                    source_base_exp_id=resource["base_exp_id"],
                 )
                 create_params.pop("base_exp_id", None)
 
-        if hasattr(resource, "dataset_id") and resource.dataset_id:
-            dest_dataset_id = self.state.id_mapping.get(resource.dataset_id)
+        if resource.get("dataset_id"):
+            dest_dataset_id = self.state.id_mapping.get(resource["dataset_id"])
             if dest_dataset_id:
                 create_params["dataset_id"] = dest_dataset_id
             else:
                 self._logger.debug(
                     "Could not resolve dataset dependency",
-                    source_dataset_id=resource.dataset_id,
+                    source_dataset_id=resource["dataset_id"],
                 )
                 create_params.pop("dataset_id", None)
 
-        dest_experiment = await self.dest_client.with_retry(
+        # Create experiment using raw API
+        response = await self.dest_client.with_retry(
             "create_experiment",
-            lambda create_params=create_params: self.dest_client.client.experiments.create(
-                **create_params
+            lambda create_params=create_params: self.dest_client.raw_request(
+                "POST",
+                "/v1/experiment",
+                json=create_params,
             ),
         )
-        dest_experiment_id = cast(str, cast(Any, dest_experiment).id)
+
+        dest_experiment_id = response.get("id")
+        if not dest_experiment_id:
+            raise ValueError(
+                f"No ID returned when creating experiment {resource.get('name')}"
+            )
 
         # Migrate experiment events
-        await self._migrate_experiment_events(resource.id, dest_experiment_id)
+        await self._migrate_experiment_events(resource["id"], dest_experiment_id)
 
         return dest_experiment_id
 
@@ -467,52 +489,6 @@ class ExperimentMigrator(ResourceMigrator[Experiment]):
         await self._migrate_experiment_events_streaming(
             source_experiment_id, dest_experiment_id
         )
-
-    @dataclass(slots=True)
-    class _EventsStreamState:
-        version: str | None = None
-        cursor: str | None = None
-        btql_min_pagination_key: str | None = None
-        query_source: str | None = None
-        fetched_events: int = 0
-        inserted_events: int = 0
-        inserted_bytes: int = 0
-        skipped_deleted: int = 0
-        skipped_seen: int = 0
-        attachments_copied: int = 0
-
-        @classmethod
-        def from_path(cls, path: Path) -> ExperimentMigrator._EventsStreamState:
-            if not path.exists():
-                return cls()
-            with open(path) as f:
-                data = _json.load(f)
-            return cls(
-                version=data.get("version"),
-                cursor=data.get("cursor"),
-                btql_min_pagination_key=data.get("btql_min_pagination_key"),
-                query_source=data.get("query_source"),
-                fetched_events=int(data.get("fetched_events", 0)),
-                inserted_events=int(data.get("inserted_events", 0)),
-                inserted_bytes=int(data.get("inserted_bytes", 0)),
-                skipped_deleted=int(data.get("skipped_deleted", 0)),
-                skipped_seen=int(data.get("skipped_seen", 0)),
-                attachments_copied=int(data.get("attachments_copied", 0)),
-            )
-
-        def to_dict(self) -> dict[str, Any]:
-            return {
-                "version": self.version,
-                "cursor": self.cursor,
-                "btql_min_pagination_key": self.btql_min_pagination_key,
-                "query_source": self.query_source,
-                "fetched_events": self.fetched_events,
-                "inserted_events": self.inserted_events,
-                "inserted_bytes": self.inserted_bytes,
-                "skipped_deleted": self.skipped_deleted,
-                "skipped_seen": self.skipped_seen,
-                "attachments_copied": self.attachments_copied,
-            }
 
     @staticmethod
     def _max_xact_id(events: list[dict[str, Any]]) -> str | None:
@@ -531,9 +507,14 @@ class ExperimentMigrator(ResourceMigrator[Experiment]):
     def _event_to_insert(
         self, event: dict[str, Any], source_experiment_id: str
     ) -> dict[str, Any]:
-        out: dict[str, Any] = {
-            k: event[k] for k in self._EVENT_INSERT_FIELDS if k in event
-        }
+        # Use dynamic schema from OpenAPI instead of static list
+        allowed_fields = self.allowed_fields_for_event_insert
+        if allowed_fields:
+            out: dict[str, Any] = {k: event[k] for k in allowed_fields if k in event}
+        else:
+            # Fallback to static list if OpenAPI schema not available
+            out = {k: event[k] for k in self._EVENT_INSERT_FIELDS if k in event}
+
         # Ensure id preserved for idempotency
         if "id" in event:
             out["id"] = event["id"]
@@ -558,7 +539,7 @@ class ExperimentMigrator(ResourceMigrator[Experiment]):
         cursor: str | None,
         version: str | None,
         limit: int,
-        state: _EventsStreamState,
+        state: EventsStreamState,
     ) -> dict[str, Any]:
         # Experiments are fetched via BTQL. Cursor/version are intentionally unused.
         _ = cursor
@@ -572,7 +553,7 @@ class ExperimentMigrator(ResourceMigrator[Experiment]):
         *,
         experiment_id: str,
         limit: int,
-        state: _EventsStreamState,
+        state: EventsStreamState,
     ) -> dict[str, Any]:
         """Fetch one page via POST /btql using SQL syntax, sorted by _pagination_key."""
         last_pagination_key = state.btql_min_pagination_key
@@ -695,7 +676,7 @@ class ExperimentMigrator(ResourceMigrator[Experiment]):
             events_dir.mkdir(parents=True, exist_ok=True)
 
             state_path = events_dir / f"{source_experiment_id}_state.json"
-            state = self._EventsStreamState.from_path(state_path)
+            state = EventsStreamState.from_path(state_path)
 
             seen_db = (
                 SeenIdsDB(str(events_dir / f"{source_experiment_id}_seen.sqlite3"))

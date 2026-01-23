@@ -1,6 +1,5 @@
 """Abstract base class for Braintrust resource migrators."""
 
-import dataclasses
 import json
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
@@ -284,7 +283,13 @@ class ResourceMigrator(ABC, Generic[T]):
         Returns:
             Unique identifier for the resource.
         """
-        if hasattr(resource, "id"):
+        # Handle both dict and SDK object types
+        if isinstance(resource, dict):
+            resource_id = resource.get("id")
+            if resource_id:
+                return resource_id
+            raise ValueError(f"Resource dict does not have an 'id' key: {resource}")
+        elif hasattr(resource, "id"):
             return resource.id
         else:
             raise AttributeError(
@@ -371,7 +376,9 @@ class ResourceMigrator(ABC, Generic[T]):
         additional_params: dict | None = None,
         client_side_filter_field: str | None = None,
     ) -> list[T]:
-        """Generic method to list resources from a client.
+        """Generic method to list resources from a client using raw API.
+
+        Always uses raw_request. Legacy SDK-based migrators will need to be migrated.
 
         Args:
             client: Source or destination client
@@ -381,7 +388,7 @@ class ResourceMigrator(ABC, Generic[T]):
             client_side_filter_field: Field name to filter by project_id client-side
 
         Returns:
-            List of resources
+            List of resources as dicts from raw API
         """
         try:
             # Build parameters
@@ -392,23 +399,28 @@ class ResourceMigrator(ABC, Generic[T]):
             if additional_params:
                 params.update(additional_params)
 
-            # Get the resource client
-            resource_client = self._get_client_resource_attr(client, resource_type)
+            # Convert resource_type to API path (e.g., 'datasets' -> 'dataset')
+            api_path = resource_type.rstrip("s")
 
-            # Make the API call
+            # Make the API call using raw_request
             response = await client.with_retry(
-                f"list_{resource_type}", lambda: resource_client.list(**params)
+                f"list_{resource_type}",
+                lambda: client.raw_request(
+                    "GET",
+                    f"/v1/{api_path}",
+                    params=params,
+                ),
             )
 
-            # Convert response to list
-            resources = await self._handle_api_response_to_list(response)
+            # Extract objects from response
+            resources = response.get("objects", [])
 
-            # Apply client-side filtering if needed
+            # Apply client-side filtering if needed (for dicts)
             if project_id and client_side_filter_field:
                 resources = [
                     resource
                     for resource in resources
-                    if getattr(resource, client_side_filter_field, None) == project_id
+                    if resource.get(client_side_filter_field) == project_id
                 ]
 
             return resources
@@ -514,17 +526,28 @@ class ResourceMigrator(ABC, Generic[T]):
                 # Create mapping from source to destination by name matching
                 dest_by_name = {}
                 for dest_resource in dest_resources:
-                    # Handle different name fields
-                    name = getattr(dest_resource, "name", None)
-                    if name:
-                        dest_by_name[name] = dest_resource.id
+                    # Handle both dict and SDK object types
+                    if isinstance(dest_resource, dict):
+                        name = dest_resource.get("name")
+                        resource_id = dest_resource.get("id")
+                    else:
+                        name = getattr(dest_resource, "name", None)
+                        resource_id = getattr(dest_resource, "id", None)
+
+                    if name and resource_id:
+                        dest_by_name[name] = resource_id
 
                 # Map source IDs to destination IDs
                 mapped_count = 0
                 unmapped_count = 0
                 for source_resource in source_resources:
                     source_id = self.get_resource_id(source_resource)
-                    source_name = getattr(source_resource, "name", None)
+
+                    # Handle both dict and SDK object types
+                    if isinstance(source_resource, dict):
+                        source_name = source_resource.get("name")
+                    else:
+                        source_name = getattr(source_resource, "name", None)
 
                     if source_name and source_name in dest_by_name:
                         dest_id = dest_by_name[source_name]
@@ -699,145 +722,54 @@ class ResourceMigrator(ABC, Generic[T]):
         return get_resource_create_fields(resource_type)
 
     def serialize_resource_for_insert(self, resource: T) -> dict[str, Any]:
-        """Serialize a resource for insertion into the destination.
+        """Serialize a resource dict for insertion into the destination.
 
-        Default implementation uses common Braintrust patterns.
-        Override for resource-specific logic.
+        Filters the resource dict to only include fields allowed by the OpenAPI
+        Create{Resource} schema. The schema defines exactly which fields the
+        API accepts, so no additional stripping is needed.
+
+        All resource migrators now use raw API requests returning dicts,
+        so this method expects dict input.
 
         Args:
-            resource: Resource to serialize.
+            resource: Resource dict to serialize.
 
         Returns:
             Dictionary suitable for creation in destination.
+
+        Raises:
+            ValueError: If resource is None or not a dict.
         """
         if resource is None:
             raise ValueError("Cannot serialize None resource")
 
-        resource_type = type(resource).__name__
-        resource_id = getattr(resource, "id", "unknown")
-
-        serialized: dict[str, Any] | None = None
-        first_error: Exception | None = None
-
-        def _as_dict(obj: Any) -> dict[str, Any] | None:
-            if isinstance(obj, dict):
-                return obj
-            return None
-
-        # 1) Prefer generated-client "to_dict" if available, but be defensive:
-        # some objects throw Pydantic-internal serialization errors for certain kwargs.
-        if hasattr(resource, "to_dict") and callable(resource.to_dict):
-            try:
-                maybe = resource.to_dict(  # type: ignore[misc]
-                    mode="json",
-                    exclude_unset=True,
-                    exclude_none=True,
-                    use_api_names=True,
-                )
-                serialized = _as_dict(maybe)
-            except TypeError:
-                # Older/alternate signature: try without kwargs.
-                try:
-                    maybe = resource.to_dict()  # type: ignore[misc]
-                    serialized = _as_dict(maybe)
-                except Exception as e:
-                    first_error = first_error or e
-            except Exception as e:
-                # E.g. "'MockValSer' object cannot be converted to 'SchemaSerializer'"
-                first_error = first_error or e
-                try:
-                    maybe = resource.to_dict()  # type: ignore[misc]
-                    serialized = _as_dict(maybe)
-                except Exception as e2:
-                    first_error = first_error or e2
-
-        # 2) Pydantic v2 models
-        if (
-            serialized is None
-            and hasattr(resource, "model_dump")
-            and callable(  # type: ignore[misc]
-                resource.model_dump
-            )
-        ):
-            try:
-                maybe = resource.model_dump(  # type: ignore[misc]
-                    mode="json",
-                    by_alias=True,
-                    exclude_unset=True,
-                    exclude_none=True,
-                )
-                serialized = _as_dict(maybe)
-            except Exception as e:
-                first_error = first_error or e
-
-        # 3) Pydantic v1 models
-        if (
-            serialized is None
-            and hasattr(resource, "dict")
-            and callable(  # type: ignore[misc]
-                resource.dict
-            )
-        ):
-            try:
-                maybe = resource.dict(  # type: ignore[misc]
-                    by_alias=True,
-                    exclude_unset=True,
-                    exclude_none=True,
-                )
-                serialized = _as_dict(maybe)
-            except Exception as e:
-                first_error = first_error or e
-
-        # 4) Dataclasses
-        if serialized is None and dataclasses.is_dataclass(resource):
-            try:
-                serialized = dataclasses.asdict(resource)
-            except Exception as e:
-                first_error = first_error or e
-
-        # 5) Best-effort: __dict__
-        if serialized is None:
-            try:
-                raw = getattr(resource, "__dict__", {}).copy()
-                # Drop private/internal keys which frequently contain unserializable objects
-                serialized = {
-                    k: v for k, v in raw.items() if not str(k).startswith("_")
-                }
-            except Exception as e:
-                first_error = first_error or e
-
-        if serialized is None:
-            err = first_error or ValueError("Unknown serialization failure")
-            self._logger.error(
-                "Failed to serialize resource for insertion",
-                error=str(err),
-                resource_type=resource_type,
-                resource_id=resource_id,
-            )
+        if not isinstance(resource, dict):
             raise ValueError(
-                f"Failed to serialize resource {resource_type} with id {resource_id}"
-            ) from err
+                f"Expected dict resource, got {type(resource).__name__}. "
+                "All migrators should now use raw API requests returning dicts."
+            )
 
+        # Filter to only fields allowed by the OpenAPI create schema
         allowed_fields = self.allowed_fields_for_insert
-        if allowed_fields is None:
-            self._logger.warning(
-                "No allowed fields for insertion found for resource type",
-                resource_type=resource_type,
-            )
-            return serialized
+        if allowed_fields is not None:
+            return {k: v for k, v in resource.items() if k in allowed_fields}
 
-        filtered_serialized = {
-            field: serialized[field] for field in allowed_fields if field in serialized
-        }
-
-        if not filtered_serialized:
-            self._logger.warning(
-                "No allowed fields found for resource, returning all fields",
-                resource_type=resource_type,
-            )
-            return serialized
-
-        return filtered_serialized
+        # Fallback: no schema found - use all fields but strip obvious read-only ones
+        self._logger.warning(
+            "No OpenAPI schema found for resource type, stripping common read-only fields",
+            resource_type=self.resource_name,
+        )
+        serialized = dict(resource)
+        for k in (
+            "id",
+            "_xact_id",
+            "_pagination_key",
+            "org_id",
+            "created",
+            "deleted_at",
+        ):
+            serialized.pop(k, None)
+        return serialized
 
     async def resolve_dependencies(
         self, dependencies: list[str], strict: bool = True

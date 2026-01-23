@@ -107,10 +107,25 @@ class TestMigrationFlow:
                         mock_project.name = mock_project_data["name"]
                         mock_project.description = mock_project_data.get("description")
                         return mock_project
+                    elif "list_datasets" in op_name:
+                        # raw_request returns dict with objects key
+                        return {"objects": []}
+                    elif "list_experiments" in op_name:
+                        # raw_request returns dict with objects key
+                        return {"objects": []}
+                    elif "list_functions" in op_name:
+                        # raw_request returns dict with objects key
+                        return {"objects": []}
                     else:
                         return []
 
                 mock_client.with_retry = mock_with_retry
+
+                # Mock raw_request to return empty objects
+                async def mock_raw_request(method, path, **kwargs):
+                    return {"objects": []}
+
+                mock_client.raw_request = mock_raw_request
 
             yield source_mock, dest_mock
 

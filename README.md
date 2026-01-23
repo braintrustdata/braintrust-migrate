@@ -19,8 +19,9 @@ This tool provides migration capabilities for Braintrust organizations, handling
 - **Dependency Resolution**: Handles resource dependencies (e.g., functions referenced by prompts, datasets referenced by experiments)
 - **Organization vs Project Scope**: Org-level resources are migrated once, project-level resources per project
 - **Real-time Progress**: Live progress indicators and detailed migration reports
-- **High-volume Streaming**: Logs, experiment events, and dataset events are migrated via cursor-based pagination with bounded insert batches
-- **Resume + Idempotency**: Small checkpoints + a SQLite “seen ids” store enable safe resume and help avoid duplicate inserts/overwrites
+- **High-volume Streaming**: Logs, experiment events, and dataset events are migrated via BTQL sorted pagination (by `_pagination_key`) with bounded insert batches
+- **Resume + Idempotency**: Per-resource/per-experiment checkpoints + a SQLite "seen ids" store enable safe resume and help avoid duplicate inserts/overwrites
+- **Rate Limit Resilience**: Automatic LIMIT backoff on 500/504 errors (retries with progressively smaller page sizes: 1000 → 500 → 250 → ...)
 
 ## Features
 
@@ -130,21 +131,27 @@ MIGRATION_STATE_DIR=./checkpoints # Checkpoint directory
 # Prefer passing MIGRATION_STATE_DIR as the run directory instead.
 MIGRATION_RESUME_RUN_DIR=
 
-# Streaming migration tuning (high-volume)
-MIGRATION_LOGS_FETCH_LIMIT=50
-MIGRATION_LOGS_INSERT_BATCH_SIZE=200
-MIGRATION_LOGS_USE_VERSION_SNAPSHOT=true
-MIGRATION_LOGS_USE_SEEN_DB=true
+# Streaming migration tuning (high-volume resources: logs, experiments, datasets)
+# All of these resources use BTQL sorted pagination for scalability
+MIGRATION_LOGS_FETCH_LIMIT=1000                    # BTQL fetch page size (rows/spans)
+MIGRATION_LOGS_INSERT_BATCH_SIZE=200               # Insert batch size
+MIGRATION_LOGS_USE_VERSION_SNAPSHOT=true           # (Unused - BTQL doesn't use snapshots)
+MIGRATION_LOGS_USE_SEEN_DB=true                    # SQLite deduplication store
 
-MIGRATION_EXPERIMENT_EVENTS_FETCH_LIMIT=50
-MIGRATION_EXPERIMENT_EVENTS_INSERT_BATCH_SIZE=200
-MIGRATION_EXPERIMENT_EVENTS_USE_VERSION_SNAPSHOT=true
-MIGRATION_EXPERIMENT_EVENTS_USE_SEEN_DB=true
+MIGRATION_EXPERIMENT_EVENTS_FETCH_LIMIT=1000       # BTQL fetch page size (rows/spans)
+MIGRATION_EXPERIMENT_EVENTS_INSERT_BATCH_SIZE=200  # Insert batch size
+MIGRATION_EXPERIMENT_EVENTS_USE_VERSION_SNAPSHOT=true  # (Unused - BTQL doesn't use snapshots)
+MIGRATION_EXPERIMENT_EVENTS_USE_SEEN_DB=true       # SQLite deduplication store
 
-MIGRATION_DATASET_EVENTS_FETCH_LIMIT=50
-MIGRATION_DATASET_EVENTS_INSERT_BATCH_SIZE=200
-MIGRATION_DATASET_EVENTS_USE_VERSION_SNAPSHOT=true
-MIGRATION_DATASET_EVENTS_USE_SEEN_DB=true
+MIGRATION_DATASET_EVENTS_FETCH_LIMIT=1000          # BTQL fetch page size (rows/spans)
+MIGRATION_DATASET_EVENTS_INSERT_BATCH_SIZE=200     # Insert batch size
+MIGRATION_DATASET_EVENTS_USE_VERSION_SNAPSHOT=true # (Unused - BTQL doesn't use snapshots)
+MIGRATION_DATASET_EVENTS_USE_SEEN_DB=true          # SQLite deduplication store
+
+# Optional time-based filtering
+MIGRATION_CREATED_AFTER=                           # ISO-8601 timestamp (e.g. 2026-01-15T00:00:00Z)
+                                                   # - Logs: only migrate events created >= this time
+                                                   # - Experiments: only migrate experiments created >= this time
 ```
 
 ### Getting API Keys
@@ -220,6 +227,20 @@ braintrust-migrate migrate \
 braintrust-migrate migrate --dry-run
 ```
 
+**Time-based Filtering:**
+```bash
+# Only migrate logs/experiments created after a certain date
+braintrust-migrate migrate --created-after 2026-01-15T00:00:00Z
+
+# Date-only format (treated as midnight UTC)
+braintrust-migrate migrate --created-after 2026-01-15
+
+# Applies to:
+# - Logs: filters individual events by event.created >= created_after
+# - Experiments: filters which experiments to migrate by experiment.created >= created_after
+#   (for filtered experiments, all their events are migrated)
+```
+
 ### CLI Reference
 
 ```bash
@@ -249,8 +270,8 @@ The migration follows a dependency-aware order:
 7. **Functions** - Tools, scorers, tasks, and LLMs (migrated before prompts)
 8. **Prompts** - Template definitions that can use functions as tools
 9. **Project Scores** - Scoring configurations
-10. **Experiments** - Experiment definitions + event stream (cursor-paginated)
-11. **Logs** - Project logs / traces (cursor-paginated)
+10. **Experiments** - Experiment metadata + event streams (BTQL sorted pagination)
+11. **Logs** - Project logs / traces (BTQL sorted pagination)
 12. **Views** - Custom project views
 
 ### Smart Dependency Handling
@@ -278,6 +299,28 @@ After migration, you'll get:
 - **JSON Report** (`migration_report.json`) - Machine-readable detailed results
 - **Human Summary** (`migration_summary.txt`) - Readable overview with skip analysis
 - **Checkpoint Files** - Resume state for interrupted migrations
+
+### Checkpointing & Resume
+
+The tool uses **two-level checkpointing** for streaming resources (logs, experiments, datasets):
+
+**Level 1: Resource Metadata**
+- `{project}/experiments_state.json` - tracks which experiments are created
+- Contains `completed_ids`, `failed_ids`, and `id_mapping` (source → dest)
+- On resume: skips experiments in `completed_ids`
+
+**Level 2: Event Streaming State (per-experiment/dataset)**
+- `{project}/experiment_events/{exp_id}_state.json` - BTQL pagination position
+- `{project}/experiment_events/{exp_id}_seen.sqlite3` - deduplication store
+- Tracks `btql_min_pagination_key` (resume point) and counters (fetched/inserted)
+- On resume: continues from last `_pagination_key`
+
+**Example:** If you migrate 100 experiments and crash after:
+- ✅ Metadata created for experiments 1-50
+- ✅ All events migrated for experiments 1-30
+- ⚠️  50% of events migrated for experiment 31 (crashed mid-stream)
+
+On resume: skips 1-30 (done), resumes experiment 31 from saved `_pagination_key`, continues with 32-100.
 
 ## Resource Types
 

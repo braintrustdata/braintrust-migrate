@@ -1,11 +1,9 @@
 """ACL migrator for Braintrust migration tool."""
 
-from braintrust_api.types import ACL
-
 from braintrust_migrate.resources.base import ResourceMigrator
 
 
-class ACLMigrator(ResourceMigrator[ACL]):
+class ACLMigrator(ResourceMigrator[dict]):
     """Migrator for Braintrust ACLs.
 
     Handles ACL migration including complex dependency resolution:
@@ -16,6 +14,8 @@ class ACLMigrator(ResourceMigrator[ACL]):
     Note: user_id references are handled specially since users are
     organization-specific and cannot be migrated between organizations.
     ACLs with user_id will be skipped with a warning.
+
+    Uses raw API requests instead of SDK to avoid model dependencies.
     """
 
     @property
@@ -23,7 +23,7 @@ class ACLMigrator(ResourceMigrator[ACL]):
         """Human-readable name for this resource type."""
         return "ACLs"
 
-    async def get_dependencies(self, resource: ACL) -> list[str]:
+    async def get_dependencies(self, resource: dict) -> list[str]:
         """Get list of resource IDs that this ACL depends on.
 
         ACLs can depend on:
@@ -32,7 +32,7 @@ class ACLMigrator(ResourceMigrator[ACL]):
         - group_id: The group receiving the ACL (if not a user)
 
         Args:
-            resource: ACL to get dependencies for.
+            resource: ACL dict to get dependencies for.
 
         Returns:
             List of resource IDs this ACL depends on.
@@ -40,43 +40,46 @@ class ACLMigrator(ResourceMigrator[ACL]):
         dependencies = []
 
         # Add object dependency
-        if hasattr(resource, "object_id") and resource.object_id:
-            dependencies.append(resource.object_id)
+        object_id = resource.get("object_id")
+        if object_id:
+            dependencies.append(object_id)
             self._logger.debug(
                 "Found ACL object dependency",
-                acl_id=resource.id,
-                object_type=getattr(resource, "object_type", None),
-                object_id=resource.object_id,
+                acl_id=resource.get("id"),
+                object_type=resource.get("object_type"),
+                object_id=object_id,
             )
 
         # Add role dependency if present
-        if hasattr(resource, "role_id") and resource.role_id:
-            dependencies.append(resource.role_id)
+        role_id = resource.get("role_id")
+        if role_id:
+            dependencies.append(role_id)
             self._logger.debug(
                 "Found ACL role dependency",
-                acl_id=resource.id,
-                role_id=resource.role_id,
+                acl_id=resource.get("id"),
+                role_id=role_id,
             )
 
         # Add group dependency if present
-        if hasattr(resource, "group_id") and resource.group_id:
-            dependencies.append(resource.group_id)
+        group_id = resource.get("group_id")
+        if group_id:
+            dependencies.append(group_id)
             self._logger.debug(
                 "Found ACL group dependency",
-                acl_id=resource.id,
-                group_id=resource.group_id,
+                acl_id=resource.get("id"),
+                group_id=group_id,
             )
 
         return dependencies
 
-    async def list_source_resources(self, project_id: str | None = None) -> list[ACL]:
+    async def list_source_resources(self, project_id: str | None = None) -> list[dict]:
         """List all ACLs from the source organization.
 
         Args:
             project_id: Not used for ACLs (they are org-scoped).
 
         Returns:
-            List of ACLs from the source organization.
+            List of ACL dicts from the source organization.
         """
         try:
             # ACLs API requires object_id and object_type parameters
@@ -91,34 +94,38 @@ class ACLMigrator(ResourceMigrator[ACL]):
             self._logger.error("Failed to list source ACLs", error=str(e))
             raise
 
-    async def _acls_equivalent(self, source_acl: ACL, dest_acl: ACL) -> bool:
+    async def _acls_equivalent(self, source_acl: dict, dest_acl: dict) -> bool:
         """Check if two ACLs are equivalent after ID mapping.
 
         Args:
-            source_acl: Source ACL.
-            dest_acl: Destination ACL.
+            source_acl: Source ACL dict.
+            dest_acl: Destination ACL dict.
 
         Returns:
             True if ACLs are equivalent, False otherwise.
         """
         # Check object_type and object_id (with mapping)
-        mapped_object_id = self.state.id_mapping.get(source_acl.object_id)
-        object_match = (
-            source_acl.object_type == dest_acl.object_type
-            and mapped_object_id == dest_acl.object_id
+        source_object_id = source_acl.get("object_id")
+        mapped_object_id = (
+            self.state.id_mapping.get(source_object_id) if source_object_id else None
         )
+        object_match = source_acl.get("object_type") == dest_acl.get(
+            "object_type"
+        ) and mapped_object_id == dest_acl.get("object_id")
 
         if not object_match:
             return False
 
         # Check user_id or group_id (with mapping for groups)
         user_group_match = True
-        if hasattr(source_acl, "user_id") and source_acl.user_id:
+        source_user_id = source_acl.get("user_id")
+        source_group_id = source_acl.get("group_id")
+        if source_user_id:
             # Users can't be mapped, so this should not match
             user_group_match = False
-        elif hasattr(source_acl, "group_id") and source_acl.group_id:
-            mapped_group_id = self.state.id_mapping.get(source_acl.group_id)
-            user_group_match = mapped_group_id == getattr(dest_acl, "group_id", None)
+        elif source_group_id:
+            mapped_group_id = self.state.id_mapping.get(source_group_id)
+            user_group_match = mapped_group_id == dest_acl.get("group_id")
         else:
             # Neither user_id nor group_id - this shouldn't happen
             user_group_match = False
@@ -128,27 +135,27 @@ class ACLMigrator(ResourceMigrator[ACL]):
 
         # Check permission or role_id (with mapping for roles)
         permission_role_match = True
-        if hasattr(source_acl, "permission") and source_acl.permission:
-            permission_role_match = source_acl.permission == getattr(
-                dest_acl, "permission", None
-            )
-        elif hasattr(source_acl, "role_id") and source_acl.role_id:
-            mapped_role_id = self.state.id_mapping.get(source_acl.role_id)
-            permission_role_match = mapped_role_id == getattr(dest_acl, "role_id", None)
+        source_permission = source_acl.get("permission")
+        source_role_id = source_acl.get("role_id")
+        if source_permission:
+            permission_role_match = source_permission == dest_acl.get("permission")
+        elif source_role_id:
+            mapped_role_id = self.state.id_mapping.get(source_role_id)
+            permission_role_match = mapped_role_id == dest_acl.get("role_id")
 
         if not permission_role_match:
             return False
 
         # Check restrict_object_type
-        source_restrict = getattr(source_acl, "restrict_object_type", None)
-        dest_restrict = getattr(dest_acl, "restrict_object_type", None)
-        return source_restrict == dest_restrict
+        return source_acl.get("restrict_object_type") == dest_acl.get(
+            "restrict_object_type"
+        )
 
-    async def migrate_resource(self, resource: ACL) -> str:
-        """Migrate a single ACL from source to destination.
+    async def migrate_resource(self, resource: dict) -> str:
+        """Migrate a single ACL from source to destination using raw API.
 
         Args:
-            resource: Source ACL to migrate.
+            resource: Source ACL dict to migrate.
 
         Returns:
             ID of the created ACL in destination.
@@ -156,99 +163,118 @@ class ACLMigrator(ResourceMigrator[ACL]):
         Raises:
             Exception: If migration fails.
         """
+        resource_id = resource.get("id")
+        object_id = resource.get("object_id")
+        object_type = resource.get("object_type")
+
         # Skip ACLs with user_id since users can't be migrated
-        if hasattr(resource, "user_id") and resource.user_id:
+        user_id = resource.get("user_id")
+        if user_id:
             self._logger.warning(
                 "Skipping ACL with user_id - users are organization-specific",
-                acl_id=resource.id,
-                user_id=resource.user_id,
-                object_type=resource.object_type,
-                object_id=resource.object_id,
+                acl_id=resource_id,
+                user_id=user_id,
+                object_type=object_type,
+                object_id=object_id,
             )
-            raise Exception(f"ACL {resource.id} has user_id and cannot be migrated")
+            raise Exception(f"ACL {resource_id} has user_id and cannot be migrated")
 
         self._logger.info(
             "Migrating ACL",
-            source_id=resource.id,
-            object_type=resource.object_type,
-            object_id=resource.object_id,
+            source_id=resource_id,
+            object_type=object_type,
+            object_id=object_id,
         )
 
         # Create ACL in destination
         create_params = self.serialize_resource_for_insert(resource)
 
         # Resolve object_id dependency
-        mapped_object_id = self.state.id_mapping.get(resource.object_id)
+        mapped_object_id = self.state.id_mapping.get(object_id) if object_id else None
         if mapped_object_id:
             create_params["object_id"] = mapped_object_id
             self._logger.debug(
                 "Resolved ACL object dependency",
-                acl_id=resource.id,
-                source_object_id=resource.object_id,
+                acl_id=resource_id,
+                source_object_id=object_id,
                 dest_object_id=mapped_object_id,
             )
         else:
             self._logger.error(
                 "Could not resolve ACL object dependency",
-                acl_id=resource.id,
-                object_type=resource.object_type,
-                object_id=resource.object_id,
+                acl_id=resource_id,
+                object_type=object_type,
+                object_id=object_id,
             )
             raise Exception(
-                f"Could not resolve object dependency for ACL {resource.id}"
+                f"Could not resolve object dependency for ACL {resource_id}"
             )
 
         # Handle group_id with dependency resolution
-        if hasattr(resource, "group_id") and resource.group_id:
-            mapped_group_id = self.state.id_mapping.get(resource.group_id)
+        group_id = resource.get("group_id")
+        if group_id:
+            mapped_group_id = self.state.id_mapping.get(group_id)
             if mapped_group_id:
                 create_params["group_id"] = mapped_group_id
                 self._logger.debug(
                     "Resolved ACL group dependency",
-                    acl_id=resource.id,
-                    source_group_id=resource.group_id,
+                    acl_id=resource_id,
+                    source_group_id=group_id,
                     dest_group_id=mapped_group_id,
                 )
             else:
                 self._logger.error(
                     "Could not resolve ACL group dependency",
-                    acl_id=resource.id,
-                    group_id=resource.group_id,
+                    acl_id=resource_id,
+                    group_id=group_id,
                 )
                 raise Exception(
-                    f"Could not resolve group dependency for ACL {resource.id}"
+                    f"Could not resolve group dependency for ACL {resource_id}"
                 )
 
         # Handle role_id with dependency resolution
-        if hasattr(resource, "role_id") and resource.role_id:
-            mapped_role_id = self.state.id_mapping.get(resource.role_id)
+        role_id = resource.get("role_id")
+        if role_id:
+            mapped_role_id = self.state.id_mapping.get(role_id)
             if mapped_role_id:
                 create_params["role_id"] = mapped_role_id
                 self._logger.debug(
                     "Resolved ACL role dependency",
-                    acl_id=resource.id,
-                    source_role_id=resource.role_id,
+                    acl_id=resource_id,
+                    source_role_id=role_id,
                     dest_role_id=mapped_role_id,
                 )
             else:
                 self._logger.error(
                     "Could not resolve ACL role dependency",
-                    acl_id=resource.id,
-                    role_id=resource.role_id,
+                    acl_id=resource_id,
+                    role_id=role_id,
                 )
                 raise Exception(
-                    f"Could not resolve role dependency for ACL {resource.id}"
+                    f"Could not resolve role dependency for ACL {resource_id}"
                 )
 
-        dest_acl = await self.dest_client.with_retry(
-            "create_acl", lambda: self.dest_client.client.acls.create(**create_params)
+        # Create ACL using raw API
+        response = await self.dest_client.with_retry(
+            "create_acl",
+            lambda create_params=create_params: self.dest_client.raw_request(
+                "POST",
+                "/v1/acl",
+                json=create_params,
+            ),
         )
+
+        dest_acl_id = response.get("id")
+        if not dest_acl_id:
+            raise ValueError(
+                f"No ID returned when creating ACL for {object_type}/{object_id}"
+            )
 
         self._logger.info(
             "Created ACL in destination",
-            source_id=resource.id,
-            dest_id=dest_acl.id,
-            object_type=resource.object_type,
+            source_id=resource_id,
+            dest_id=dest_acl_id,
+            object_type=object_type,
         )
 
-        return dest_acl.id
+        return dest_acl_id

@@ -453,6 +453,7 @@ class MigrationOrchestrator:
         global_id_mappings: dict[str, str],
         progress_factory: Callable[[str], Callable[[dict[str, Any]], None]]
         | None = None,
+        resource_callback: Callable[[str, dict[str, Any]], None] | None = None,
     ) -> dict[str, Any]:
         """Migrate all resources for a specific project.
 
@@ -462,6 +463,9 @@ class MigrationOrchestrator:
             dest_client: Destination organization client.
             checkpoint_dir: Directory for storing checkpoints.
             global_id_mappings: Global ID mappings shared across all projects.
+            progress_factory: Factory for creating streaming progress hooks.
+            resource_callback: Called after each resource type completes with
+                (resource_name, results_dict) for real-time feedback.
 
         Returns:
             Migration results for the project.
@@ -511,9 +515,15 @@ class MigrationOrchestrator:
                 )
 
                 # Create migrator instance
+                # Only create progress hooks for streaming resources that will use them
+                is_streaming_resource = resource_name in (
+                    "logs",
+                    "datasets",
+                    "experiments",
+                )
                 progress_hook = (
                     progress_factory(resource_name)
-                    if progress_factory is not None
+                    if progress_factory is not None and is_streaming_resource
                     else None
                 )
                 if resource_name == "logs":
@@ -608,6 +618,10 @@ class MigrationOrchestrator:
                     skipped=resource_results["skipped"],
                     failed=resource_results["failed"],
                 )
+
+                # Notify callback for real-time console feedback
+                if resource_callback is not None:
+                    resource_callback(resource_name, resource_results)
 
             except Exception as e:
                 err_str = str(e)

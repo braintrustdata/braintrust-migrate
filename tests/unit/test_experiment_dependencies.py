@@ -3,7 +3,6 @@
 from unittest.mock import AsyncMock, Mock
 
 import pytest
-from braintrust_api.types import Experiment
 
 from braintrust_migrate.resources.experiments import ExperimentMigrator
 
@@ -32,7 +31,12 @@ def mock_dest_client():
     """Create a mock destination client."""
     client = Mock()
     client.client.experiments.list = AsyncMock()
-    client.client.experiments.create = AsyncMock()
+
+    # Mock create to return an object with an id attribute
+    mock_experiment = Mock()
+    mock_experiment.id = "new-exp-123"  # Default ID
+    client.client.experiments.create = AsyncMock(return_value=mock_experiment)
+
     client.client.experiments.insert = AsyncMock()
     client.raw_request = AsyncMock(return_value={"row_ids": []})
     client.with_retry = AsyncMock(side_effect=_passthrough_with_retry)
@@ -47,21 +51,8 @@ def temp_checkpoint_dir(tmp_path):
 
 @pytest.fixture
 def experiment_with_base_exp():
-    """Create an experiment that depends on another experiment."""
-    experiment = Mock(spec=Experiment)
-    experiment.id = "exp-123"
-    experiment.name = "Comparison Experiment"
-    experiment.project_id = "project-456"
-    experiment.description = "An experiment with baseline comparison"
-    experiment.base_exp_id = "base-exp-789"
-    experiment.dataset_id = None
-    experiment.dataset_version = None
-    experiment.public = True
-    experiment.metadata = {"type": "comparison"}
-    experiment.repo_info = None
-
-    # Mock the to_dict method to return a proper dictionary
-    experiment.to_dict.return_value = {
+    """Create an experiment dict that depends on another experiment."""
+    return {
         "id": "exp-123",
         "name": "Comparison Experiment",
         "project_id": "project-456",
@@ -73,26 +64,12 @@ def experiment_with_base_exp():
         "metadata": {"type": "comparison"},
         "repo_info": None,
     }
-    return experiment
 
 
 @pytest.fixture
 def experiment_with_dataset():
-    """Create an experiment that depends on a dataset."""
-    experiment = Mock(spec=Experiment)
-    experiment.id = "exp-456"
-    experiment.name = "Dataset Experiment"
-    experiment.project_id = "project-456"
-    experiment.description = "An experiment linked to a dataset"
-    experiment.base_exp_id = None
-    experiment.dataset_id = "dataset-123"
-    experiment.dataset_version = "v2.1"
-    experiment.public = False
-    experiment.metadata = {"dataset_linked": True}
-    experiment.repo_info = None
-
-    # Mock the to_dict method to return a proper dictionary
-    experiment.to_dict.return_value = {
+    """Create an experiment dict that depends on a dataset."""
+    return {
         "id": "exp-456",
         "name": "Dataset Experiment",
         "project_id": "project-456",
@@ -104,26 +81,12 @@ def experiment_with_dataset():
         "metadata": {"dataset_linked": True},
         "repo_info": None,
     }
-    return experiment
 
 
 @pytest.fixture
 def experiment_with_both_deps():
-    """Create an experiment with both base experiment and dataset dependencies."""
-    experiment = Mock(spec=Experiment)
-    experiment.id = "exp-789"
-    experiment.name = "Full Dependencies Experiment"
-    experiment.project_id = "project-456"
-    experiment.description = "An experiment with both dependencies"
-    experiment.base_exp_id = "base-exp-999"
-    experiment.dataset_id = "dataset-456"
-    experiment.dataset_version = "v1.0"
-    experiment.public = True
-    experiment.metadata = {"full_deps": True}
-    experiment.repo_info = None
-
-    # Mock the to_dict method to return a proper dictionary
-    experiment.to_dict.return_value = {
+    """Create an experiment dict with both base experiment and dataset dependencies."""
+    return {
         "id": "exp-789",
         "name": "Full Dependencies Experiment",
         "project_id": "project-456",
@@ -135,26 +98,12 @@ def experiment_with_both_deps():
         "metadata": {"full_deps": True},
         "repo_info": None,
     }
-    return experiment
 
 
 @pytest.fixture
 def experiment_without_dependencies():
-    """Create an experiment without any dependencies."""
-    experiment = Mock(spec=Experiment)
-    experiment.id = "exp-999"
-    experiment.name = "Independent Experiment"
-    experiment.project_id = "project-456"
-    experiment.description = "An experiment without dependencies"
-    experiment.base_exp_id = None
-    experiment.dataset_id = None
-    experiment.dataset_version = None
-    experiment.public = True
-    experiment.metadata = {"independent": True}
-    experiment.repo_info = None
-
-    # Mock the to_dict method to return a proper dictionary
-    experiment.to_dict.return_value = {
+    """Create an experiment dict without any dependencies."""
+    return {
         "id": "exp-999",
         "name": "Independent Experiment",
         "project_id": "project-456",
@@ -166,7 +115,6 @@ def experiment_without_dependencies():
         "metadata": {"independent": True},
         "repo_info": None,
     }
-    return experiment
 
 
 @pytest.mark.asyncio
@@ -247,10 +195,18 @@ class TestExperimentDependencies:
         experiment_with_base_exp,
     ):
         """Test migration with resolved base experiment dependency."""
-        # Mock successful experiment creation
-        new_experiment = Mock(spec=Experiment)
-        new_experiment.id = "new-exp-123"
-        mock_dest_client.client.experiments.create.return_value = new_experiment
+
+        # Mock successful experiment creation via raw_request
+        async def mock_with_retry(operation_name, coro_func):
+            result = coro_func()
+            if hasattr(result, "__await__"):
+                return await result
+            return result
+
+        mock_dest_client.with_retry = AsyncMock(side_effect=mock_with_retry)
+        mock_dest_client.raw_request = AsyncMock(
+            return_value={"id": "new-exp-123", "name": "Comparison Experiment"}
+        )
 
         migrator = ExperimentMigrator(
             mock_source_client, mock_dest_client, temp_checkpoint_dir
@@ -276,10 +232,18 @@ class TestExperimentDependencies:
         experiment_with_dataset,
     ):
         """Test migration with resolved dataset dependency."""
+
         # Mock successful experiment creation
-        new_experiment = Mock(spec=Experiment)
-        new_experiment.id = "new-exp-456"
-        mock_dest_client.client.experiments.create.return_value = new_experiment
+        async def mock_with_retry(operation_name, coro_func):
+            result = coro_func()
+            if hasattr(result, "__await__"):
+                return await result
+            return result
+
+        mock_dest_client.with_retry = AsyncMock(side_effect=mock_with_retry)
+        mock_dest_client.raw_request = AsyncMock(
+            return_value={"id": "new-exp-456", "name": "Dataset Experiment"}
+        )
 
         migrator = ExperimentMigrator(
             mock_source_client, mock_dest_client, temp_checkpoint_dir
@@ -305,10 +269,18 @@ class TestExperimentDependencies:
         experiment_with_both_deps,
     ):
         """Test migration with unresolved dependencies (should log warnings but continue)."""
+
         # Mock successful experiment creation
-        new_experiment = Mock(spec=Experiment)
-        new_experiment.id = "new-exp-789"
-        mock_dest_client.client.experiments.create.return_value = new_experiment
+        async def mock_with_retry(operation_name, coro_func):
+            result = coro_func()
+            if hasattr(result, "__await__"):
+                return await result
+            return result
+
+        mock_dest_client.with_retry = AsyncMock(side_effect=mock_with_retry)
+        mock_dest_client.raw_request = AsyncMock(
+            return_value={"id": "new-exp-789", "name": "Unresolved Experiment"}
+        )
 
         migrator = ExperimentMigrator(
             mock_source_client, mock_dest_client, temp_checkpoint_dir
@@ -333,10 +305,18 @@ class TestExperimentDependencies:
         experiment_without_dependencies,
     ):
         """Test migration of experiment without dependencies."""
+
         # Mock successful experiment creation
-        new_experiment = Mock(spec=Experiment)
-        new_experiment.id = "new-exp-999"
-        mock_dest_client.client.experiments.create.return_value = new_experiment
+        async def mock_with_retry(operation_name, coro_func):
+            result = coro_func()
+            if hasattr(result, "__await__"):
+                return await result
+            return result
+
+        mock_dest_client.with_retry = AsyncMock(side_effect=mock_with_retry)
+        mock_dest_client.raw_request = AsyncMock(
+            return_value={"id": "new-exp-999", "name": "Independent Experiment"}
+        )
 
         migrator = ExperimentMigrator(
             mock_source_client, mock_dest_client, temp_checkpoint_dir
@@ -373,36 +353,50 @@ class TestExperimentDependencies:
         temp_checkpoint_dir,
     ):
         """Test that dependency mappings are populated correctly."""
-        from unittest.mock import Mock
+        # Create dataset and experiment dicts (since we're using raw API now)
+        source_dataset = {
+            "id": "source-dataset-123",
+            "name": "Test Dataset",
+        }
 
-        # Mock datasets in source and destination
-        source_dataset = Mock()
-        source_dataset.id = "source-dataset-123"
-        source_dataset.name = "Test Dataset"
+        dest_dataset = {
+            "id": "dest-dataset-456",
+            "name": "Test Dataset",
+        }
 
-        dest_dataset = Mock()
-        dest_dataset.id = "dest-dataset-456"
-        dest_dataset.name = "Test Dataset"
+        source_exp = {
+            "id": "source-exp-789",
+            "name": "Base Experiment",
+        }
 
-        # Mock experiments in source and destination
-        source_exp = Mock()
-        source_exp.id = "source-exp-789"
-        source_exp.name = "Base Experiment"
+        dest_exp = {
+            "id": "dest-exp-999",
+            "name": "Base Experiment",
+        }
 
-        dest_exp = Mock()
-        dest_exp.id = "dest-exp-999"
-        dest_exp.name = "Base Experiment"
+        # Setup mock with_retry to handle raw_request calls
+        async def mock_with_retry(operation_name, coro_func):
+            result = coro_func()
+            if hasattr(result, "__await__"):
+                return await result
+            return result
 
-        # Setup mock responses
-        mock_source_client.with_retry.side_effect = [
-            [source_dataset],  # datasets list call
-            [source_exp],  # experiments list call
-        ]
+        # Mock raw_request separately for source and dest
+        mock_source_client.with_retry = AsyncMock(side_effect=mock_with_retry)
+        mock_source_client.raw_request = AsyncMock(
+            side_effect=[
+                {"objects": [source_dataset]},  # source datasets list
+                {"objects": [source_exp]},  # source experiments list
+            ]
+        )
 
-        mock_dest_client.with_retry.side_effect = [
-            [dest_dataset],  # datasets list call
-            [dest_exp],  # experiments list call
-        ]
+        mock_dest_client.with_retry = AsyncMock(side_effect=mock_with_retry)
+        mock_dest_client.raw_request = AsyncMock(
+            side_effect=[
+                {"objects": [dest_dataset]},  # dest datasets list
+                {"objects": [dest_exp]},  # dest experiments list
+            ]
+        )
 
         migrator = ExperimentMigrator(
             mock_source_client, mock_dest_client, temp_checkpoint_dir
