@@ -31,5 +31,5 @@ def test_created_after_rejects_empty() -> None:
 
 
 def test_created_after_rejects_invalid() -> None:
-    with pytest.raises(ValueError, match="Invalid created_after datetime"):
+    with pytest.raises(ValueError, match="Invalid created_after date"):
         canonicalize_created_after("not-a-date")

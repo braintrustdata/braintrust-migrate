@@ -37,7 +37,7 @@ def canonicalize_created_after(value: str) -> str:
         dt = datetime.fromisoformat(v_for_parse)
     except Exception as e:
         raise ValueError(
-            f"Invalid created_after datetime (expected ISO-8601 like 2026-01-15T00:00:00Z): {value!r}"
+            f"Invalid created_after date (expected YYYY-MM-DD like 2026-01-15): {value!r}"
         ) from e
 
     if dt.tzinfo is None:
@@ -102,12 +102,12 @@ class MigrationConfig(BaseModel):
         ),
     )
     insert_request_headroom_ratio: float = Field(
-        default=0.5,
+        default=0.75,
         ge=0.05,
         le=1.0,
         description=(
             "Headroom ratio applied to insert_max_request_bytes when computing the effective "
-            "byte cap for batching (e.g. 0.5 means target <= 50% of the max)."
+            "byte cap for batching (e.g. 0.75 means target <= 75% of the max)."
         ),
     )
 
@@ -287,57 +287,91 @@ class Config(BaseModel):
             os.getenv("MIGRATION_INSERT_MAX_REQUEST_BYTES", str(6 * 1024 * 1024))
         )
         insert_request_headroom_ratio = float(
-            os.getenv("MIGRATION_INSERT_REQUEST_HEADROOM_RATIO", "0.5")
+            os.getenv("MIGRATION_INSERT_REQUEST_HEADROOM_RATIO", "0.75")
         )
 
-        # Logs streaming settings
-        # Keep defaults consistent with MigrationConfig (1000) so env-driven runs match
-        # config-file/default-driven runs.
-        logs_fetch_limit = int(os.getenv("MIGRATION_LOGS_FETCH_LIMIT", "1000"))
-        logs_insert_batch_size = int(
-            os.getenv("MIGRATION_LOGS_INSERT_BATCH_SIZE", "200")
+        # Streaming settings for high-volume resources (logs, experiments, datasets)
+        # Unified env vars apply to all; resource-specific vars override if set.
+        #
+        # Unified:
+        #   MIGRATION_EVENTS_FETCH_LIMIT=1000
+        #   MIGRATION_EVENTS_INSERT_BATCH_SIZE=200
+        #   MIGRATION_EVENTS_USE_SEEN_DB=true
+        #
+        # Resource-specific overrides (optional):
+        #   MIGRATION_LOGS_FETCH_LIMIT, MIGRATION_EXPERIMENT_EVENTS_FETCH_LIMIT, etc.
+
+        def _get_int(specific_key: str, unified_key: str, default: str) -> int:
+            return int(os.getenv(specific_key) or os.getenv(unified_key, default))
+
+        def _get_bool(specific_key: str, unified_key: str, default: str) -> bool:
+            val = os.getenv(specific_key) or os.getenv(unified_key, default)
+            return val.lower() in {"1", "true", "yes", "y", "on"}
+
+        # Logs
+        logs_fetch_limit = _get_int(
+            "MIGRATION_LOGS_FETCH_LIMIT", "MIGRATION_EVENTS_FETCH_LIMIT", "1000"
         )
-        logs_use_version_snapshot = os.getenv(
-            "MIGRATION_LOGS_USE_VERSION_SNAPSHOT", "true"
-        ).lower() in {"1", "true", "yes", "y", "on"}
-        logs_use_seen_db = os.getenv("MIGRATION_LOGS_USE_SEEN_DB", "true").lower() in {
-            "1",
+        logs_insert_batch_size = _get_int(
+            "MIGRATION_LOGS_INSERT_BATCH_SIZE",
+            "MIGRATION_EVENTS_INSERT_BATCH_SIZE",
+            "200",
+        )
+        logs_use_version_snapshot = _get_bool(
+            "MIGRATION_LOGS_USE_VERSION_SNAPSHOT",
+            "MIGRATION_EVENTS_USE_VERSION_SNAPSHOT",
             "true",
-            "yes",
-            "y",
-            "on",
-        }
+        )
+        logs_use_seen_db = _get_bool(
+            "MIGRATION_LOGS_USE_SEEN_DB", "MIGRATION_EVENTS_USE_SEEN_DB", "true"
+        )
 
         # Optional time filter (applies to logs and experiments)
         created_after = os.getenv("MIGRATION_CREATED_AFTER")
 
-        # Experiment events streaming settings
-        experiment_events_fetch_limit = int(
-            os.getenv("MIGRATION_EXPERIMENT_EVENTS_FETCH_LIMIT", "1000")
+        # Experiment events
+        experiment_events_fetch_limit = _get_int(
+            "MIGRATION_EXPERIMENT_EVENTS_FETCH_LIMIT",
+            "MIGRATION_EVENTS_FETCH_LIMIT",
+            "1000",
         )
-        experiment_events_insert_batch_size = int(
-            os.getenv("MIGRATION_EXPERIMENT_EVENTS_INSERT_BATCH_SIZE", "200")
+        experiment_events_insert_batch_size = _get_int(
+            "MIGRATION_EXPERIMENT_EVENTS_INSERT_BATCH_SIZE",
+            "MIGRATION_EVENTS_INSERT_BATCH_SIZE",
+            "200",
         )
-        experiment_events_use_version_snapshot = os.getenv(
-            "MIGRATION_EXPERIMENT_EVENTS_USE_VERSION_SNAPSHOT", "true"
-        ).lower() in {"1", "true", "yes", "y", "on"}
-        experiment_events_use_seen_db = os.getenv(
-            "MIGRATION_EXPERIMENT_EVENTS_USE_SEEN_DB", "true"
-        ).lower() in {"1", "true", "yes", "y", "on"}
+        experiment_events_use_version_snapshot = _get_bool(
+            "MIGRATION_EXPERIMENT_EVENTS_USE_VERSION_SNAPSHOT",
+            "MIGRATION_EVENTS_USE_VERSION_SNAPSHOT",
+            "true",
+        )
+        experiment_events_use_seen_db = _get_bool(
+            "MIGRATION_EXPERIMENT_EVENTS_USE_SEEN_DB",
+            "MIGRATION_EVENTS_USE_SEEN_DB",
+            "true",
+        )
 
-        # Dataset events streaming settings
-        dataset_events_fetch_limit = int(
-            os.getenv("MIGRATION_DATASET_EVENTS_FETCH_LIMIT", "1000")
+        # Dataset events
+        dataset_events_fetch_limit = _get_int(
+            "MIGRATION_DATASET_EVENTS_FETCH_LIMIT",
+            "MIGRATION_EVENTS_FETCH_LIMIT",
+            "1000",
         )
-        dataset_events_insert_batch_size = int(
-            os.getenv("MIGRATION_DATASET_EVENTS_INSERT_BATCH_SIZE", "200")
+        dataset_events_insert_batch_size = _get_int(
+            "MIGRATION_DATASET_EVENTS_INSERT_BATCH_SIZE",
+            "MIGRATION_EVENTS_INSERT_BATCH_SIZE",
+            "200",
         )
-        dataset_events_use_version_snapshot = os.getenv(
-            "MIGRATION_DATASET_EVENTS_USE_VERSION_SNAPSHOT", "true"
-        ).lower() in {"1", "true", "yes", "y", "on"}
-        dataset_events_use_seen_db = os.getenv(
-            "MIGRATION_DATASET_EVENTS_USE_SEEN_DB", "true"
-        ).lower() in {"1", "true", "yes", "y", "on"}
+        dataset_events_use_version_snapshot = _get_bool(
+            "MIGRATION_DATASET_EVENTS_USE_VERSION_SNAPSHOT",
+            "MIGRATION_EVENTS_USE_VERSION_SNAPSHOT",
+            "true",
+        )
+        dataset_events_use_seen_db = _get_bool(
+            "MIGRATION_DATASET_EVENTS_USE_SEEN_DB",
+            "MIGRATION_EVENTS_USE_SEEN_DB",
+            "true",
+        )
 
         # Attachment copy settings
         copy_attachments = os.getenv("MIGRATION_COPY_ATTACHMENTS", "false").lower() in {

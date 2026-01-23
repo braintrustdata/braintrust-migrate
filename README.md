@@ -132,26 +132,25 @@ MIGRATION_STATE_DIR=./checkpoints # Checkpoint directory
 MIGRATION_RESUME_RUN_DIR=
 
 # Streaming migration tuning (high-volume resources: logs, experiments, datasets)
-# All of these resources use BTQL sorted pagination for scalability
-MIGRATION_LOGS_FETCH_LIMIT=1000                    # BTQL fetch page size (rows/spans)
-MIGRATION_LOGS_INSERT_BATCH_SIZE=200               # Insert batch size
-MIGRATION_LOGS_USE_VERSION_SNAPSHOT=true           # (Unused - BTQL doesn't use snapshots)
-MIGRATION_LOGS_USE_SEEN_DB=true                    # SQLite deduplication store
+# All streaming resources use BTQL sorted pagination for scalability.
+# Unified env vars apply to all; resource-specific vars override if set.
+MIGRATION_EVENTS_FETCH_LIMIT=1000          # BTQL fetch page size (rows/spans)
+MIGRATION_EVENTS_INSERT_BATCH_SIZE=200     # Insert batch size
+MIGRATION_EVENTS_USE_SEEN_DB=true          # SQLite deduplication store
 
-MIGRATION_EXPERIMENT_EVENTS_FETCH_LIMIT=1000       # BTQL fetch page size (rows/spans)
-MIGRATION_EXPERIMENT_EVENTS_INSERT_BATCH_SIZE=200  # Insert batch size
-MIGRATION_EXPERIMENT_EVENTS_USE_VERSION_SNAPSHOT=true  # (Unused - BTQL doesn't use snapshots)
-MIGRATION_EXPERIMENT_EVENTS_USE_SEEN_DB=true       # SQLite deduplication store
+# Resource-specific overrides (optional - only if one resource needs different settings)
+# MIGRATION_LOGS_FETCH_LIMIT=500           # Override just for logs
+# MIGRATION_EXPERIMENT_EVENTS_INSERT_BATCH_SIZE=100  # Override just for experiments
+# MIGRATION_DATASET_EVENTS_USE_SEEN_DB=false         # Override just for datasets
 
-MIGRATION_DATASET_EVENTS_FETCH_LIMIT=1000          # BTQL fetch page size (rows/spans)
-MIGRATION_DATASET_EVENTS_INSERT_BATCH_SIZE=200     # Insert batch size
-MIGRATION_DATASET_EVENTS_USE_VERSION_SNAPSHOT=true # (Unused - BTQL doesn't use snapshots)
-MIGRATION_DATASET_EVENTS_USE_SEEN_DB=true          # SQLite deduplication store
+# Insert request sizing (for large events with attachments)
+MIGRATION_INSERT_MAX_REQUEST_BYTES=6291456  # 6MB max request size (default)
+MIGRATION_INSERT_REQUEST_HEADROOM_RATIO=0.75  # Use 75% of max → ~4.5MB effective limit
 
 # Optional time-based filtering
-MIGRATION_CREATED_AFTER=                           # ISO-8601 timestamp (e.g. 2026-01-15T00:00:00Z)
-                                                   # - Logs: only migrate events created >= this time
-                                                   # - Experiments: only migrate experiments created >= this time
+MIGRATION_CREATED_AFTER=                           # Date filter (e.g. 2026-01-15)
+                                                   # - Logs: only migrate events created >= this date
+                                                   # - Experiments: only migrate experiments created >= this date
 ```
 
 ### Getting API Keys
@@ -229,16 +228,12 @@ braintrust-migrate migrate --dry-run
 
 **Time-based Filtering:**
 ```bash
-# Only migrate logs/experiments created after a certain date
-braintrust-migrate migrate --created-after 2026-01-15T00:00:00Z
-
-# Date-only format (treated as midnight UTC)
+# Only migrate logs/experiments created on or after a certain date
 braintrust-migrate migrate --created-after 2026-01-15
 
 # Applies to:
-# - Logs: filters individual events by event.created >= created_after
-# - Experiments: filters which experiments to migrate by experiment.created >= created_after
-#   (for filtered experiments, all their events are migrated)
+# - Logs: filters individual events by created date
+# - Experiments: filters which experiments to migrate (all their events are included)
 ```
 
 ### CLI Reference

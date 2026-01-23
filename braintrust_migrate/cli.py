@@ -162,10 +162,8 @@ def migrate(
         typer.Option(
             "--created-after",
             help=(
-                "Optional ISO-8601 timestamp filter. When set: "
-                "(1) logs migration only migrates events with created >= this value, "
-                "(2) experiments migration only migrates experiments with created >= this value "
-                "(and all their events). Example: 2026-01-15T00:00:00Z or 2026-01-15."
+                "Only migrate data created on or after this date. Format: YYYY-MM-DD (e.g. 2026-01-15). "
+                "For logs: filters events. For experiments: filters which experiments to migrate."
             ),
             envvar="MIGRATION_CREATED_AFTER",
         ),
