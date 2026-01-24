@@ -113,13 +113,28 @@ def build_btql_sorted_page_query(
     last_pagination_key: str | None,
     last_pagination_key_inclusive: bool = False,
     created_after: str | None = None,
+    created_before: str | None = None,
     select: str = "*",
 ) -> str:
-    """Build a BTQL SQL query for stable sorted paging on `_pagination_key`."""
+    """Build a BTQL SQL query for stable sorted paging on `_pagination_key`.
 
+    Args:
+        from_expr: The FROM expression (e.g., "project_logs('...', shape => 'spans')")
+        limit: Maximum number of rows to return
+        last_pagination_key: Resume pagination from this key
+        last_pagination_key_inclusive: If True, use >= instead of > for pagination key
+        created_after: Only include rows with created >= this value (inclusive)
+        created_before: Only include rows with created < this value (exclusive)
+        select: Fields to select (default "*")
+
+    Returns:
+        BTQL SQL query string
+    """
     conditions: list[str] = []
     if isinstance(created_after, str) and created_after:
         conditions.append(f"created >= '{btql_quote(created_after)}'")
+    if isinstance(created_before, str) and created_before:
+        conditions.append(f"created < '{btql_quote(created_before)}'")
     if isinstance(last_pagination_key, str) and last_pagination_key:
         op = ">=" if last_pagination_key_inclusive else ">"
         conditions.append(f"_pagination_key {op} '{btql_quote(last_pagination_key)}'")

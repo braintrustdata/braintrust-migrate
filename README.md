@@ -147,10 +147,12 @@ MIGRATION_EVENTS_USE_SEEN_DB=true          # SQLite deduplication store
 MIGRATION_INSERT_MAX_REQUEST_BYTES=6291456  # 6MB max request size (default)
 MIGRATION_INSERT_REQUEST_HEADROOM_RATIO=0.75  # Use 75% of max → ~4.5MB effective limit
 
-# Optional time-based filtering
-MIGRATION_CREATED_AFTER=                           # Date filter (e.g. 2026-01-15)
-                                                   # - Logs: only migrate events created >= this date
-                                                   # - Experiments: only migrate experiments created >= this date
+# Optional time-based filtering (date range)
+MIGRATION_CREATED_AFTER=                           # Inclusive start date (e.g. 2026-01-01)
+MIGRATION_CREATED_BEFORE=                          # Exclusive end date (e.g. 2026-02-01)
+                                                   # Together: migrates data where created >= after AND created < before
+                                                   # - Logs: filters individual events by created date
+                                                   # - Experiments: filters which experiments to migrate
 ```
 
 ### Getting API Keys
@@ -228,13 +230,26 @@ braintrust-migrate migrate --dry-run
 
 **Time-based Filtering:**
 ```bash
-# Only migrate logs/experiments created on or after a certain date
+# Only migrate data created on or after a certain date (inclusive)
 braintrust-migrate migrate --created-after 2026-01-15
+
+# Only migrate data created before a certain date (exclusive)
+braintrust-migrate migrate --created-before 2026-02-01
+
+# Date range: migrate all of January 2026
+# Uses half-open interval: [created-after, created-before)
+braintrust-migrate migrate --created-after 2026-01-01 --created-before 2026-02-01
 
 # Applies to:
 # - Logs: filters individual events by created date
 # - Experiments: filters which experiments to migrate (all their events are included)
 ```
+
+**Date Filter Semantics:**
+- `--created-after`: **Inclusive** — `created >= value`
+- `--created-before`: **Exclusive** — `created < value`
+
+This half-open interval `[after, before)` makes it easy to specify clean date ranges without overlap or gaps.
 
 ### CLI Reference
 

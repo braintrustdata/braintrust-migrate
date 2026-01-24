@@ -54,6 +54,7 @@ class _LogsStreamingState:
     btql_last_created: str | None = None
     query_source: str | None = None
     created_after: str | None = None
+    created_before: str | None = None
 
     @classmethod
     def from_path(cls, path: Path) -> _LogsStreamingState:
@@ -77,6 +78,7 @@ class _LogsStreamingState:
             btql_last_created=data.get("btql_last_created"),
             query_source=data.get("query_source"),
             created_after=data.get("created_after"),
+            created_before=data.get("created_before"),
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -94,6 +96,7 @@ class _LogsStreamingState:
             "btql_last_created": self.btql_last_created,
             "query_source": self.query_source,
             "created_after": self.created_after,
+            "created_before": self.created_before,
         }
 
 
@@ -284,6 +287,7 @@ class LogsMigrator(ResourceMigrator[dict[str, Any]]):
             self._stream_state.btql_min_pagination_key_inclusive
         )
         created_after = self._stream_state.created_after
+        created_before = self._stream_state.created_before
 
         from_expr = f"project_logs('{btql_quote(project_id)}', shape => 'spans')"
 
@@ -294,6 +298,7 @@ class LogsMigrator(ResourceMigrator[dict[str, Any]]):
                 last_pagination_key=last_pagination_key,
                 last_pagination_key_inclusive=last_pagination_key_inclusive,
                 created_after=created_after,
+                created_before=created_before,
                 select="*",
             )
 
@@ -446,12 +451,12 @@ class LogsMigrator(ResourceMigrator[dict[str, Any]]):
         try:
             # BTQL-based streaming does not use version snapshots.
 
-            # Optional created-after filter for streaming queries (persisted for safe resume).
-            created_after_cfg = getattr(
-                getattr(self.source_client, "migration_config", None),
-                "created_after",
-                None,
-            )
+            # Optional time filters for streaming queries (persisted for safe resume).
+            mig_cfg = getattr(self.source_client, "migration_config", None)
+            created_after_cfg = getattr(mig_cfg, "created_after", None)
+            created_before_cfg = getattr(mig_cfg, "created_before", None)
+
+            # Validate and persist created_after filter
             if (
                 self._stream_state.created_after is not None
                 or created_after_cfg is not None
@@ -462,7 +467,7 @@ class LogsMigrator(ResourceMigrator[dict[str, Any]]):
                             "migration_config.created_after must be a non-empty string when set"
                         )
                     self._stream_state.created_after = created_after_cfg
-                    self._stream_state.query_source = "btql_sorted_created_after"
+                    self._stream_state.query_source = "btql_sorted_date_filter"
                     self._save_stream_state()
                 elif created_after_cfg is None:
                     raise ValueError(
@@ -477,6 +482,34 @@ class LogsMigrator(ResourceMigrator[dict[str, Any]]):
                     raise ValueError(
                         f"created_after mismatch vs checkpoint: checkpoint={self._stream_state.created_after!r} "
                         f"run={created_after_cfg!r}. Re-run with the checkpoint value or start a fresh checkpoint."
+                    )
+
+            # Validate and persist created_before filter
+            if (
+                self._stream_state.created_before is not None
+                or created_before_cfg is not None
+            ):
+                if self._stream_state.created_before is None:
+                    if not isinstance(created_before_cfg, str) or not created_before_cfg:
+                        raise TypeError(
+                            "migration_config.created_before must be a non-empty string when set"
+                        )
+                    self._stream_state.created_before = created_before_cfg
+                    self._stream_state.query_source = "btql_sorted_date_filter"
+                    self._save_stream_state()
+                elif created_before_cfg is None:
+                    raise ValueError(
+                        "Checkpoint includes a created_before filter but this run does not. "
+                        "Re-run with the same --created-before value or start a fresh checkpoint."
+                    )
+                elif not isinstance(created_before_cfg, str) or not created_before_cfg:
+                    raise TypeError(
+                        "migration_config.created_before must be a non-empty string when set"
+                    )
+                elif self._stream_state.created_before != created_before_cfg:
+                    raise ValueError(
+                        f"created_before mismatch vs checkpoint: checkpoint={self._stream_state.created_before!r} "
+                        f"run={created_before_cfg!r}. Re-run with the checkpoint value or start a fresh checkpoint."
                     )
 
             # If this is the first BTQL page and created_after is set, preflight the first
@@ -496,14 +529,16 @@ class LogsMigrator(ResourceMigrator[dict[str, Any]]):
                     log_fields={
                         "source_project_id": source_project_id,
                         "created_after": self._stream_state.created_after,
+                        "created_before": self._stream_state.created_before,
                     },
                 )
                 if start_pk is None:
                     self._logger.info(
-                        "No project logs found at/after created_after; finishing",
+                        "No project logs found in date range; finishing",
                         source_project_id=source_project_id,
                         dest_project_id=dest_project_id,
                         created_after=self._stream_state.created_after,
+                        created_before=self._stream_state.created_before,
                     )
                     self._save_stream_state()
                     return {
@@ -523,7 +558,7 @@ class LogsMigrator(ResourceMigrator[dict[str, Any]]):
                     }
                 self._stream_state.btql_min_pagination_key = start_pk
                 self._stream_state.btql_min_pagination_key_inclusive = True
-                self._stream_state.query_source = "btql_sorted_created_after"
+                self._stream_state.query_source = "btql_sorted_date_filter"
                 self._save_stream_state()
 
             progress_hook = self._progress_hook

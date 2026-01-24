@@ -21,7 +21,11 @@ from rich.progress import (
 )
 from rich.table import Table
 
-from braintrust_migrate.config import Config, canonicalize_created_after
+from braintrust_migrate.config import (
+    Config,
+    canonicalize_created_after,
+    canonicalize_created_before,
+)
 from braintrust_migrate.orchestration import MigrationOrchestrator
 
 # Constants
@@ -168,6 +172,17 @@ def migrate(
             envvar="MIGRATION_CREATED_AFTER",
         ),
     ] = None,
+    created_before: Annotated[
+        str | None,
+        typer.Option(
+            "--created-before",
+            help=(
+                "Only migrate data created before this date (exclusive). Format: YYYY-MM-DD (e.g. 2026-02-01). "
+                "Use with --created-after for date ranges (e.g., --created-after 2026-01-01 --created-before 2026-02-01)."
+            ),
+            envvar="MIGRATION_CREATED_BEFORE",
+        ),
+    ] = None,
 ) -> None:
     """Migrate resources from source to destination Braintrust organization.
 
@@ -195,6 +210,7 @@ def migrate(
             logs_fetch_limit,
             logs_insert_batch_size,
             created_after,
+            created_before,
         )
     )
 
@@ -211,6 +227,7 @@ async def _migrate_main(
     logs_fetch_limit: int | None,
     logs_insert_batch_size: int | None,
     created_after: str | None,
+    created_before: str | None,
 ) -> None:
     """Async implementation of the migrate command."""
     setup_logging(log_level, log_format)
@@ -272,6 +289,8 @@ async def _migrate_main(
             config.migration.logs_insert_batch_size = logs_insert_batch_size
         if created_after is not None:
             config.migration.created_after = canonicalize_created_after(created_after)
+        if created_before is not None:
+            config.migration.created_before = canonicalize_created_before(created_before)
 
         logger.info(
             "Starting migration",
@@ -284,6 +303,7 @@ async def _migrate_main(
             logs_fetch_limit=config.migration.logs_fetch_limit,
             logs_insert_batch_size=config.migration.logs_insert_batch_size,
             created_after=config.migration.created_after,
+            created_before=config.migration.created_before,
             resume_run_dir=str(resume_run_dir) if resume_run_dir is not None else None,
             inferred_project=inferred_project,
         )

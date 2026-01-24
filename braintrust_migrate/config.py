@@ -15,8 +15,8 @@ load_dotenv()
 _DATE_ONLY_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
 
-def canonicalize_created_after(value: str) -> str:
-    """Normalize a user-supplied datetime string for BTQL `created >= ...` filters.
+def _canonicalize_datetime(value: str, field_name: str) -> str:
+    """Normalize a user-supplied datetime string for BTQL filters.
 
     Accepts:
     - YYYY-MM-DD (treated as midnight UTC)
@@ -26,7 +26,7 @@ def canonicalize_created_after(value: str) -> str:
     """
     v = (value or "").strip()
     if not v:
-        raise ValueError("created_after cannot be empty")
+        raise ValueError(f"{field_name} cannot be empty")
 
     if _DATE_ONLY_RE.match(v):
         dt = datetime.fromisoformat(v).replace(tzinfo=UTC)
@@ -37,13 +37,23 @@ def canonicalize_created_after(value: str) -> str:
         dt = datetime.fromisoformat(v_for_parse)
     except Exception as e:
         raise ValueError(
-            f"Invalid created_after date (expected YYYY-MM-DD like 2026-01-15): {value!r}"
+            f"Invalid {field_name} date (expected YYYY-MM-DD like 2026-01-15): {value!r}"
         ) from e
 
     if dt.tzinfo is None:
         dt = dt.replace(tzinfo=UTC)
     dt = dt.astimezone(UTC)
     return dt.isoformat().replace("+00:00", "Z")
+
+
+def canonicalize_created_after(value: str) -> str:
+    """Normalize a user-supplied datetime string for BTQL `created >= ...` filters."""
+    return _canonicalize_datetime(value, "created_after")
+
+
+def canonicalize_created_before(value: str) -> str:
+    """Normalize a user-supplied datetime string for BTQL `created < ...` filters."""
+    return _canonicalize_datetime(value, "created_before")
 
 
 class BraintrustOrgConfig(BaseModel):
@@ -142,6 +152,16 @@ class MigrationConfig(BaseModel):
             "(and all their events)."
         ),
     )
+    created_before: str | None = Field(
+        default=None,
+        description=(
+            "Optional ISO-8601 timestamp filter. When set: "
+            "(1) project logs migration only migrates events with created < created_before, "
+            "(2) experiments migration only migrates experiments with created < created_before "
+            "(and all their events). "
+            "Use with created_after for date ranges (e.g., --created-after 2026-01-01 --created-before 2026-02-01)."
+        ),
+    )
 
     # Experiment event migration tuning (experiments can be logs-scale)
     experiment_events_fetch_limit: int = Field(
@@ -204,6 +224,12 @@ class MigrationConfig(BaseModel):
         if v is None:
             return None
         return canonicalize_created_after(v)
+
+    @field_validator("created_before")
+    def validate_created_before(cls, v: str | None) -> str | None:
+        if v is None:
+            return None
+        return canonicalize_created_before(v)
 
 
 class LoggingConfig(BaseModel):
@@ -328,6 +354,7 @@ class Config(BaseModel):
 
         # Optional time filter (applies to logs and experiments)
         created_after = os.getenv("MIGRATION_CREATED_AFTER")
+        created_before = os.getenv("MIGRATION_CREATED_BEFORE")
 
         # Experiment events
         experiment_events_fetch_limit = _get_int(
@@ -414,6 +441,7 @@ class Config(BaseModel):
                 logs_use_version_snapshot=logs_use_version_snapshot,
                 logs_use_seen_db=logs_use_seen_db,
                 created_after=created_after,
+                created_before=created_before,
                 experiment_events_fetch_limit=experiment_events_fetch_limit,
                 experiment_events_insert_batch_size=experiment_events_insert_batch_size,
                 experiment_events_use_version_snapshot=experiment_events_use_version_snapshot,
