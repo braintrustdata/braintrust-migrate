@@ -177,8 +177,9 @@ def migrate(
         typer.Option(
             "--created-before",
             help=(
-                "Only migrate data created before this date (exclusive). Format: YYYY-MM-DD (e.g. 2026-02-01). "
-                "Use with --created-after for date ranges (e.g., --created-after 2026-01-01 --created-before 2026-02-01)."
+                "Only migrate data created on or before this date. Format: YYYY-MM-DD (e.g. 2026-01-15). "
+                "Date-only values are treated as end-of-day (23:59:59.999999 UTC). "
+                "Can be combined with --created-after to define a date range."
             ),
             envvar="MIGRATION_CREATED_BEFORE",
         ),

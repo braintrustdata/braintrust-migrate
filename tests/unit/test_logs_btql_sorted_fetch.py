@@ -326,3 +326,358 @@ async def test_logs_created_after_mismatch_with_checkpoint_errors(
 
     with pytest.raises(ValueError, match="created_after mismatch"):
         await migrator.migrate_all("proj-source")
+
+
+class _SourceBtqlClientCreatedBefore:
+    def __init__(
+        self, pages: list[list[dict[str, Any]]], mig_cfg: MigrationConfig
+    ) -> None:
+        self._pages = pages
+        self.migration_config = mig_cfg
+        self.queries: list[str] = []
+        self._fetch_calls = 0
+
+    async def with_retry(self, _operation_name: str, coro_func):
+        res = coro_func()
+        if hasattr(res, "__await__"):
+            return await res
+        return res
+
+    async def raw_request(
+        self, method: str, path: str, *, json: Any = None, **kwargs: Any
+    ) -> Any:
+        _ = kwargs
+        assert method.upper() == "POST"
+        assert path == "/btql"
+        q = (json or {}).get("query")
+        assert isinstance(q, str)
+        self.queries.append(q)
+
+        # Fetch queries select full rows.
+        assert "SELECT *" in q
+        assert "FROM project_logs('proj-source', shape => 'spans')" in q
+        assert "ORDER BY _pagination_key" in q
+        assert "cursor:" not in q
+
+        self._fetch_calls += 1
+        if self._fetch_calls == 1:
+            # First fetch should have only the created_before filter
+            assert "WHERE created <= '2020-01-02T23:59:59.999999Z'" in q
+        if self._fetch_calls == 2:
+            assert (
+                "WHERE created <= '2020-01-02T23:59:59.999999Z' AND _pagination_key > '1'"
+                in q
+            )
+
+        if self._pages:
+            return {"data": self._pages.pop(0)}
+        return {"data": []}
+
+
+class _SourceBtqlClientCreatedRange:
+    """Client that validates both created_after and created_before are used."""
+
+    def __init__(
+        self, pages: list[list[dict[str, Any]]], mig_cfg: MigrationConfig
+    ) -> None:
+        self._pages = pages
+        self.migration_config = mig_cfg
+        self.queries: list[str] = []
+        self._fetch_calls = 0
+        self._preflight_calls = 0
+
+    async def with_retry(self, _operation_name: str, coro_func):
+        res = coro_func()
+        if hasattr(res, "__await__"):
+            return await res
+        return res
+
+    async def raw_request(
+        self, method: str, path: str, *, json: Any = None, **kwargs: Any
+    ) -> Any:
+        _ = kwargs
+        assert method.upper() == "POST"
+        assert path == "/btql"
+        q = (json or {}).get("query")
+        assert isinstance(q, str)
+        self.queries.append(q)
+
+        # Preflight query selects only _pagination_key.
+        if "SELECT _pagination_key" in q:
+            self._preflight_calls += 1
+            assert "FROM project_logs('proj-source', shape => 'spans')" in q
+            assert "WHERE created >= '2020-01-01T00:00:00Z'" in q
+            assert "ORDER BY _pagination_key ASC" in q
+            assert "LIMIT 1" in q
+            return {"data": [{"_pagination_key": "1"}]}
+
+        # Fetch queries select full rows.
+        assert "SELECT *" in q
+        assert "FROM project_logs('proj-source', shape => 'spans')" in q
+        assert "ORDER BY _pagination_key" in q
+        assert "cursor:" not in q
+
+        self._fetch_calls += 1
+        if self._fetch_calls == 1:
+            # Both created_after and created_before should be present
+            assert "created >= '2020-01-01T00:00:00Z'" in q
+            assert "created <= '2020-01-02T23:59:59.999999Z'" in q
+
+        if self._pages:
+            return {"data": self._pages.pop(0)}
+        return {"data": []}
+
+
+@pytest.mark.asyncio
+async def test_logs_created_before_filters_query(tmp_path: Path) -> None:
+    # created_before=2020-01-02 (date-only) should canonicalize to end-of-day UTC.
+    source_cfg = MigrationConfig(created_before="2020-01-02")
+    dest_cfg = MigrationConfig(created_before="2020-01-02")
+
+    pages = [
+        [
+            {"id": "a", "created": "2020-01-01T00:00:00Z", "_pagination_key": "1"},
+        ],
+        [
+            {"id": "b", "created": "2020-01-02T00:00:00Z", "_pagination_key": "2"},
+        ],
+    ]
+
+    source = _SourceBtqlClientCreatedBefore(pages, source_cfg)
+    dest = _DestInsertClient(dest_cfg)
+
+    migrator = LogsMigrator(
+        source,  # type: ignore[arg-type]
+        dest,  # type: ignore[arg-type]
+        tmp_path,
+        page_limit=1,
+        insert_batch_size=10,
+        use_version_snapshot=False,
+        use_seen_db=False,
+        progress_hook=None,
+    )
+    migrator.set_destination_project_id("proj-dest")
+    res = await migrator.migrate_all("proj-source")
+
+    assert res["migrated"] == 2
+    assert dest.inserted_ids == ["a", "b"]
+
+
+@pytest.mark.asyncio
+async def test_logs_created_before_mismatch_with_checkpoint_errors(
+    tmp_path: Path,
+) -> None:
+    source_cfg = MigrationConfig(created_before="2020-01-02T23:59:59.999999Z")
+    dest_cfg = MigrationConfig(created_before="2020-01-02T23:59:59.999999Z")
+
+    # Write a checkpoint state with a different created_before.
+    (tmp_path / "logs_streaming_state.json").write_text(
+        '{"created_before":"2020-01-03T23:59:59.999999Z"}'
+    )
+
+    source = _SourceBtqlClient([], source_cfg)
+    dest = _DestInsertClient(dest_cfg)
+
+    migrator = LogsMigrator(
+        source,  # type: ignore[arg-type]
+        dest,  # type: ignore[arg-type]
+        tmp_path,
+        page_limit=1,
+        insert_batch_size=10,
+        use_version_snapshot=False,
+        use_seen_db=False,
+        progress_hook=None,
+    )
+    migrator.set_destination_project_id("proj-dest")
+
+    with pytest.raises(ValueError, match="created_before mismatch"):
+        await migrator.migrate_all("proj-source")
+
+
+@pytest.mark.asyncio
+async def test_logs_created_range_uses_both_filters(tmp_path: Path) -> None:
+    # Test using both created_after and created_before together.
+    source_cfg = MigrationConfig(
+        created_after="2020-01-01", created_before="2020-01-02"
+    )
+    dest_cfg = MigrationConfig(created_after="2020-01-01", created_before="2020-01-02")
+
+    pages = [
+        [
+            {"id": "a", "created": "2020-01-01T12:00:00Z", "_pagination_key": "1"},
+        ],
+    ]
+
+    source = _SourceBtqlClientCreatedRange(pages, source_cfg)
+    dest = _DestInsertClient(dest_cfg)
+
+    migrator = LogsMigrator(
+        source,  # type: ignore[arg-type]
+        dest,  # type: ignore[arg-type]
+        tmp_path,
+        page_limit=1,
+        insert_batch_size=10,
+        use_version_snapshot=False,
+        use_seen_db=False,
+        progress_hook=None,
+    )
+    migrator.set_destination_project_id("proj-dest")
+    res = await migrator.migrate_all("proj-source")
+
+    assert res["migrated"] == 1
+    assert dest.inserted_ids == ["a"]
+    # Verify both filters were used
+    combined = "\n".join(source.queries)
+    assert "created >= '2020-01-01T00:00:00Z'" in combined
+    assert "created <= '2020-01-02T23:59:59.999999Z'" in combined
+
+
+class _SourceBtqlClientSimple:
+    """Simplified source client that returns pages without strict pagination assertions."""
+
+    def __init__(
+        self, pages: list[list[dict[str, Any]]], mig_cfg: MigrationConfig
+    ) -> None:
+        self._pages = pages
+        self.migration_config = mig_cfg
+        self._call_index = 0
+
+    async def with_retry(self, _operation_name: str, coro_func):
+        res = coro_func()
+        if hasattr(res, "__await__"):
+            return await res
+        return res
+
+    async def raw_request(
+        self, method: str, path: str, *, json: Any = None, **kwargs: Any
+    ) -> Any:
+        _ = kwargs
+        assert method.upper() == "POST"
+        assert path == "/btql"
+        q = (json or {}).get("query")
+        assert isinstance(q, str)
+        assert "SELECT *" in q
+        assert "FROM project_logs(" in q
+
+        if self._pages:
+            return {"data": self._pages.pop(0)}
+        return {"data": []}
+
+
+class _DestInsertClientCapturingEvents:
+    """Destination client that captures full event payloads for testing."""
+
+    def __init__(self, mig_cfg: MigrationConfig) -> None:
+        self.migration_config = mig_cfg
+        self.inserted_events: list[dict[str, Any]] = []
+
+        class _Views:
+            async def create(self, **kwargs: Any) -> Any:
+                _ = kwargs
+                return {"id": "v1"}
+
+        class _ClientObj:
+            def __init__(self) -> None:
+                self.views = _Views()
+
+        self.client = _ClientObj()
+
+    async def with_retry(self, _operation_name: str, coro_func):
+        res = coro_func()
+        if hasattr(res, "__await__"):
+            return await res
+        return res
+
+    async def raw_request(
+        self, method: str, path: str, *, json: Any = None, **kwargs: Any
+    ) -> Any:
+        _ = kwargs
+        assert method.upper() == "POST"
+        assert "/v1/project_logs/" in path
+        assert path.endswith("/insert")
+        events = (json or {}).get("events", [])
+        for e in events:
+            if isinstance(e, dict):
+                self.inserted_events.append(e)
+        return {"row_ids": [e.get("id") for e in events if isinstance(e, dict)]}
+
+
+@pytest.mark.asyncio
+async def test_logs_strips_tags_from_non_root_spans(tmp_path: Path) -> None:
+    """Test that tags are stripped from non-root spans but preserved on root spans.
+
+    The Braintrust API does not allow 'tags' on non-root spans (child spans).
+    A span is a root span if:
+    - root_span_id is None/absent, OR
+    - span_id == root_span_id
+    """
+    source_cfg = MigrationConfig()
+    dest_cfg = MigrationConfig()
+
+    pages = [
+        [
+            # Root span: span_id == root_span_id (tags should be preserved)
+            {
+                "id": "root-span",
+                "created": "2020-01-01T00:00:00Z",
+                "_pagination_key": "1",
+                "span_id": "span-a",
+                "root_span_id": "span-a",
+                "tags": ["important", "production"],
+            },
+            # Non-root span: span_id != root_span_id (tags should be STRIPPED)
+            {
+                "id": "child-span",
+                "created": "2020-01-02T00:00:00Z",
+                "_pagination_key": "2",
+                "span_id": "span-b",
+                "root_span_id": "span-a",
+                "tags": ["should-be-removed"],
+            },
+            # Root span: root_span_id absent (tags should be preserved)
+            {
+                "id": "implicit-root",
+                "created": "2020-01-03T00:00:00Z",
+                "_pagination_key": "3",
+                "span_id": "span-c",
+                # No root_span_id means it's implicitly a root span
+                "tags": ["also-important"],
+            },
+        ],
+    ]
+
+    source = _SourceBtqlClientSimple(pages, source_cfg)
+    dest = _DestInsertClientCapturingEvents(dest_cfg)
+
+    migrator = LogsMigrator(
+        source,  # type: ignore[arg-type]
+        dest,  # type: ignore[arg-type]
+        tmp_path,
+        page_limit=10,
+        insert_batch_size=10,
+        use_version_snapshot=False,
+        use_seen_db=False,
+        progress_hook=None,
+    )
+    migrator.set_destination_project_id("proj-dest")
+    res = await migrator.migrate_all("proj-source")
+
+    assert res["migrated"] == 3
+    assert len(dest.inserted_events) == 3
+
+    # Find each inserted event by id
+    events_by_id = {e["id"]: e for e in dest.inserted_events}
+
+    # Root span (span_id == root_span_id): tags should be preserved
+    root_event = events_by_id["root-span"]
+    assert "tags" in root_event
+    assert root_event["tags"] == ["important", "production"]
+
+    # Non-root span (span_id != root_span_id): tags should be STRIPPED
+    child_event = events_by_id["child-span"]
+    assert "tags" not in child_event
+
+    # Implicit root span (no root_span_id): tags should be preserved
+    implicit_root_event = events_by_id["implicit-root"]
+    assert "tags" in implicit_root_event
+    assert implicit_root_event["tags"] == ["also-important"]

@@ -1,0 +1,36 @@
+from __future__ import annotations
+
+import pytest
+
+from braintrust_migrate.config import canonicalize_created_before
+
+
+def test_created_before_date_only_is_end_of_day_utc() -> None:
+    # For created_before, date-only values should use end-of-day for inclusive range
+    assert canonicalize_created_before("2020-01-02") == "2020-01-02T23:59:59.999999Z"
+
+
+def test_created_before_accepts_z_suffix() -> None:
+    assert canonicalize_created_before("2020-01-02T03:04:05Z") == "2020-01-02T03:04:05Z"
+
+
+def test_created_before_converts_offset_to_utc() -> None:
+    # 03:00 at -05:00 is 08:00Z
+    assert (
+        canonicalize_created_before("2020-01-02T03:00:00-05:00")
+        == "2020-01-02T08:00:00Z"
+    )
+
+
+def test_created_before_naive_datetime_treated_as_utc() -> None:
+    assert canonicalize_created_before("2020-01-02T03:04:05") == "2020-01-02T03:04:05Z"
+
+
+def test_created_before_rejects_empty() -> None:
+    with pytest.raises(ValueError, match="created_before cannot be empty"):
+        canonicalize_created_before("   ")
+
+
+def test_created_before_rejects_invalid() -> None:
+    with pytest.raises(ValueError, match="Invalid created_before date"):
+        canonicalize_created_before("not-a-date")

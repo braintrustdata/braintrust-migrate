@@ -36,6 +36,7 @@ class EventsStreamState:
     inserted_bytes: int = 0
     skipped_deleted: int = 0
     skipped_seen: int = 0
+    skipped_oversize: int = 0
     attachments_copied: int = 0
 
     @classmethod
@@ -54,6 +55,7 @@ class EventsStreamState:
             inserted_bytes=int(data.get("inserted_bytes", 0)),
             skipped_deleted=int(data.get("skipped_deleted", 0)),
             skipped_seen=int(data.get("skipped_seen", 0)),
+            skipped_oversize=int(data.get("skipped_oversize", 0)),
             attachments_copied=int(data.get("attachments_copied", 0)),
         )
 
@@ -68,6 +70,7 @@ class EventsStreamState:
             "inserted_bytes": self.inserted_bytes,
             "skipped_deleted": self.skipped_deleted,
             "skipped_seen": self.skipped_seen,
+            "skipped_oversize": self.skipped_oversize,
             "attachments_copied": self.attachments_copied,
         }
 
@@ -119,22 +122,23 @@ def build_btql_sorted_page_query(
     """Build a BTQL SQL query for stable sorted paging on `_pagination_key`.
 
     Args:
-        from_expr: The FROM expression (e.g., "project_logs('...', shape => 'spans')")
-        limit: Maximum number of rows to return
-        last_pagination_key: Resume pagination from this key
-        last_pagination_key_inclusive: If True, use >= instead of > for pagination key
-        created_after: Only include rows with created >= this value (inclusive)
-        created_before: Only include rows with created < this value (exclusive)
-        select: Fields to select (default "*")
+        from_expr: The BTQL FROM clause (e.g., 'logs(...)').
+        limit: Maximum number of rows to return.
+        last_pagination_key: Resume from this pagination key.
+        last_pagination_key_inclusive: If True, use >=; otherwise >.
+        created_after: Optional filter for created >= this timestamp.
+        created_before: Optional filter for created <= this timestamp.
+        select: Columns to select (default '*').
 
     Returns:
-        BTQL SQL query string
+        A BTQL query string.
     """
+
     conditions: list[str] = []
     if isinstance(created_after, str) and created_after:
         conditions.append(f"created >= '{btql_quote(created_after)}'")
     if isinstance(created_before, str) and created_before:
-        conditions.append(f"created < '{btql_quote(created_before)}'")
+        conditions.append(f"created <= '{btql_quote(created_before)}'")
     if isinstance(last_pagination_key, str) and last_pagination_key:
         op = ">=" if last_pagination_key_inclusive else ">"
         conditions.append(f"_pagination_key {op} '{btql_quote(last_pagination_key)}'")
@@ -157,6 +161,7 @@ class StreamHooks(TypedDict, total=False):
     on_page: Callable[[dict[str, Any]], None]
     on_done: Callable[[dict[str, Any]], None]
     on_batch_error: Callable[[dict[str, Any]], None]
+    on_skip_oversize: Callable[[dict[str, Any]], None]
 
 
 def _extract_ids(events: list[dict[str, Any]]) -> list[str]:
@@ -195,6 +200,7 @@ async def stream_btql_sorted_events(
     incr_inserted_bytes: Callable[[int], None],
     incr_skipped_deleted: Callable[[int], None] | None,
     incr_skipped_seen: Callable[[int], None] | None,
+    incr_skipped_oversize: Callable[[int], None] | None,
     incr_attachments_copied: Callable[[int], None] | None,
     # Optional progress hooks
     hooks: StreamHooks | None = None,
@@ -310,13 +316,29 @@ async def stream_btql_sorted_events(
                     incr_attachments_copied(copied)
 
             try:
-                await insert_with_413_bisect(
+                skipped_oversize = await insert_with_413_bisect(
                     batch,
                     insert_fn=_insert_one,
                     is_http_413=is_http_413,
                     on_success=_on_success,
                     on_single_413=_on_single_413,
+                    skip_single_413=True,
                 )
+                # Track skipped oversize events (these were logged via on_single_413)
+                if skipped_oversize:
+                    if incr_skipped_oversize is not None:
+                        incr_skipped_oversize(len(skipped_oversize))
+                    # Mark as seen so they won't be retried on resume
+                    if seen_db is not None:
+                        seen_db.mark_seen(_extract_ids(skipped_oversize))
+                    if hooks and "on_skip_oversize" in hooks:
+                        hooks["on_skip_oversize"](
+                            {
+                                "page_num": page_num,
+                                "skipped_count": len(skipped_oversize),
+                                "skipped_ids": _extract_ids(skipped_oversize),
+                            }
+                        )
             except Exception as e:
                 if hooks and "on_batch_error" in hooks:
                     hooks["on_batch_error"](

@@ -148,11 +148,18 @@ MIGRATION_INSERT_MAX_REQUEST_BYTES=6291456  # 6MB max request size (default)
 MIGRATION_INSERT_REQUEST_HEADROOM_RATIO=0.75  # Use 75% of max → ~4.5MB effective limit
 
 # Optional time-based filtering (date range)
-MIGRATION_CREATED_AFTER=                           # Inclusive start date (e.g. 2026-01-01)
-MIGRATION_CREATED_BEFORE=                          # Exclusive end date (e.g. 2026-02-01)
-                                                   # Together: migrates data where created >= after AND created < before
-                                                   # - Logs: filters individual events by created date
-                                                   # - Experiments: filters which experiments to migrate
+MIGRATION_CREATED_AFTER=                           # Start date filter (e.g. 2026-01-15)
+                                                   # - Logs: only migrate events created >= this date
+                                                   # - Experiments: only migrate experiments created >= this date
+MIGRATION_CREATED_BEFORE=                          # End date filter (e.g. 2026-01-31)
+                                                   # - Inclusive to end-of-day (23:59:59)
+                                                   # - Logs: only migrate events created <= this date
+                                                   # - Experiments: only migrate experiments created <= this date
+
+# Example: Define a date range by combining both filters
+# MIGRATION_CREATED_AFTER=2026-01-01
+# MIGRATION_CREATED_BEFORE=2026-01-31
+# This migrates only logs/experiments created between Jan 1 and Jan 31, 2026 (inclusive)
 ```
 
 ### Getting API Keys
@@ -230,26 +237,19 @@ braintrust-migrate migrate --dry-run
 
 **Time-based Filtering:**
 ```bash
-# Only migrate data created on or after a certain date (inclusive)
+# Only migrate logs/experiments created on or after a certain date
 braintrust-migrate migrate --created-after 2026-01-15
 
-# Only migrate data created before a certain date (exclusive)
-braintrust-migrate migrate --created-before 2026-02-01
+# Only migrate logs/experiments created on or before a certain date (inclusive to end-of-day)
+braintrust-migrate migrate --created-before 2026-01-31
 
-# Date range: migrate all of January 2026
-# Uses half-open interval: [created-after, created-before)
-braintrust-migrate migrate --created-after 2026-01-01 --created-before 2026-02-01
+# Combine both to define a date range
+braintrust-migrate migrate --created-after 2026-01-01 --created-before 2026-01-31
 
 # Applies to:
 # - Logs: filters individual events by created date
 # - Experiments: filters which experiments to migrate (all their events are included)
 ```
-
-**Date Filter Semantics:**
-- `--created-after`: **Inclusive** — `created >= value`
-- `--created-before`: **Exclusive** — `created < value`
-
-This half-open interval `[after, before)` makes it easy to specify clean date ranges without overlap or gaps.
 
 ### CLI Reference
 
