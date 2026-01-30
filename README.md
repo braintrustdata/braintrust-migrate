@@ -85,6 +85,83 @@ pytest
 
 ## Configuration
 
+### Configuration Reference
+
+All options can be set via environment variables or CLI flags. CLI flags take precedence over environment variables.
+
+#### Required Settings
+
+| Environment Variable | CLI Flag | Default | Description |
+|---------------------|----------|---------|-------------|
+| `BT_SOURCE_API_KEY` | — | — | **Required.** API key for source organization |
+| `BT_SOURCE_URL` | — | `https://api.braintrust.dev` | Source Braintrust API URL |
+| `BT_DEST_API_KEY` | — | — | **Required.** API key for destination organization |
+| `BT_DEST_URL` | — | `https://api.braintrust.dev` | Destination Braintrust API URL |
+
+#### Migration Scope
+
+| Environment Variable | CLI Flag | Default | Description |
+|---------------------|----------|---------|-------------|
+| `MIGRATION_RESOURCES` | `--resources`, `-r` | `all` | Comma-separated list of resources to migrate. Options: `all`, `ai_secrets`, `roles`, `groups`, `datasets`, `project_tags`, `span_iframes`, `functions`, `prompts`, `project_scores`, `experiments`, `logs`, `views` |
+| `MIGRATION_PROJECTS` | `--projects`, `-p` | *(all projects)* | Comma-separated list of project names to migrate |
+| `MIGRATION_CREATED_AFTER` | `--created-after` | *(none)* | Only migrate data created on or after this date (**inclusive**: `>=`). Format: `YYYY-MM-DD` or ISO-8601 |
+| `MIGRATION_CREATED_BEFORE` | `--created-before` | *(none)* | Only migrate data created before this date (**exclusive**: `<`). Format: `YYYY-MM-DD` or ISO-8601 |
+
+#### Logging
+
+| Environment Variable | CLI Flag | Default | Description |
+|---------------------|----------|---------|-------------|
+| `LOG_LEVEL` | `--log-level`, `-l` | `INFO` | Log verbosity. Options: `DEBUG`, `INFO`, `WARNING`, `ERROR`, `CRITICAL` |
+| `LOG_FORMAT` | `--log-format`, `-f` | `text` | Log output format. Options: `json`, `text` |
+
+#### State & Checkpoints
+
+| Environment Variable | CLI Flag | Default | Description |
+|---------------------|----------|---------|-------------|
+| `MIGRATION_STATE_DIR` | `--state-dir`, `-s` | `./checkpoints` | Directory for migration state and checkpoints. Can be a root dir, run dir, or project dir (see Resume section) |
+
+#### Performance Tuning
+
+| Environment Variable | CLI Flag | Default | Description |
+|---------------------|----------|---------|-------------|
+| `MIGRATION_BATCH_SIZE` | — | `100` | Number of resources to process per batch |
+| `MIGRATION_RETRY_ATTEMPTS` | — | `3` | Number of retry attempts for failed operations (0 = no retries) |
+| `MIGRATION_RETRY_DELAY` | — | `1.0` | Initial retry delay in seconds (exponential backoff) |
+| `MIGRATION_MAX_CONCURRENT` | — | `10` | Maximum concurrent operations |
+| `MIGRATION_CHECKPOINT_INTERVAL` | — | `50` | Write checkpoint every N successful operations |
+
+#### Streaming Migration (Logs, Experiments, Datasets)
+
+These settings control BTQL-based streaming for high-volume resources.
+
+| Environment Variable | CLI Flag | Default | Description |
+|---------------------|----------|---------|-------------|
+| `MIGRATION_EVENTS_FETCH_LIMIT` | — | `1000` | BTQL fetch page size (rows per query) |
+| `MIGRATION_EVENTS_INSERT_BATCH_SIZE` | — | `200` | Events per insert API call |
+| `MIGRATION_EVENTS_USE_SEEN_DB` | — | `true` | Use SQLite store for deduplication |
+| `MIGRATION_LOGS_FETCH_LIMIT` | `--logs-fetch-limit` | *(inherits)* | Override fetch limit for logs only |
+| `MIGRATION_LOGS_INSERT_BATCH_SIZE` | `--logs-insert-batch-size` | *(inherits)* | Override insert batch size for logs only |
+
+Resource-specific overrides follow the pattern `MIGRATION_{RESOURCE}_FETCH_LIMIT`, `MIGRATION_{RESOURCE}_INSERT_BATCH_SIZE`, `MIGRATION_{RESOURCE}_USE_SEEN_DB` where `{RESOURCE}` is `LOGS`, `EXPERIMENT_EVENTS`, or `DATASET_EVENTS`.
+
+#### Insert Request Sizing
+
+| Environment Variable | CLI Flag | Default | Description |
+|---------------------|----------|---------|-------------|
+| `MIGRATION_INSERT_MAX_REQUEST_BYTES` | — | `6291456` (6MB) | Maximum HTTP request payload size |
+| `MIGRATION_INSERT_REQUEST_HEADROOM_RATIO` | — | `0.75` | Target ratio of max size (0.75 = ~4.5MB effective limit) |
+
+#### Other Options
+
+| Environment Variable | CLI Flag | Default | Description |
+|---------------------|----------|---------|-------------|
+| — | `--dry-run`, `-n` | `false` | Validate configuration without making changes |
+| — | `--config`, `-c` | *(none)* | Path to YAML/JSON configuration file |
+| `MIGRATION_COPY_ATTACHMENTS` | — | `false` | Copy Braintrust-managed attachments between orgs |
+| `MIGRATION_ATTACHMENT_MAX_BYTES` | — | `52428800` (50MB) | Maximum attachment size to copy |
+
+---
+
 ### Environment Variables
 
 Create a `.env` file with your configuration:
@@ -94,72 +171,23 @@ Create a `.env` file with your configuration:
 cp .env.example .env
 ```
 
-**Required Configuration:**
+**Example `.env` file:**
 ```bash
-# Source organization (where you're migrating FROM)
+# Required: API keys
 BT_SOURCE_API_KEY=your_source_api_key_here
-BT_SOURCE_URL=https://api.braintrust.dev
-
-# Destination organization (where you're migrating TO)  
 BT_DEST_API_KEY=your_destination_api_key_here
-BT_DEST_URL=https://api.braintrust.dev
-```
 
-**Optional Configuration:**
-```bash
-# Logging
-LOG_LEVEL=INFO                    # DEBUG, INFO, WARNING, ERROR
-LOG_FORMAT=json                   # json, text
+# Optional: Custom URLs (defaults to https://api.braintrust.dev)
+# BT_SOURCE_URL=https://api.braintrust.dev
+# BT_DEST_URL=https://api.braintrust.dev
 
-# Optional CLI defaults (can also be passed as flags)
-# - MIGRATION_RESOURCES: comma-separated list (e.g. "logs,experiments")
-# - MIGRATION_PROJECTS: comma-separated list of project names
-MIGRATION_RESOURCES=all
-MIGRATION_PROJECTS=
+# Optional: Logging
+LOG_LEVEL=INFO
+LOG_FORMAT=text
 
-# Performance tuning
-MIGRATION_BATCH_SIZE=100          # Resources per batch
-MIGRATION_RETRY_ATTEMPTS=3        # Retry failed operations
-MIGRATION_RETRY_DELAY=1.0         # Initial retry delay (seconds)
-MIGRATION_MAX_CONCURRENT=10       # Concurrent operations
-MIGRATION_CHECKPOINT_INTERVAL=50  # Checkpoint frequency
-
-# Storage
-MIGRATION_STATE_DIR=./checkpoints # Checkpoint directory
-
-# (Advanced) Explicitly resume from a timestamped run directory.
-# Prefer passing MIGRATION_STATE_DIR as the run directory instead.
-MIGRATION_RESUME_RUN_DIR=
-
-# Streaming migration tuning (high-volume resources: logs, experiments, datasets)
-# All streaming resources use BTQL sorted pagination for scalability.
-# Unified env vars apply to all; resource-specific vars override if set.
-MIGRATION_EVENTS_FETCH_LIMIT=1000          # BTQL fetch page size (rows/spans)
-MIGRATION_EVENTS_INSERT_BATCH_SIZE=200     # Insert batch size
-MIGRATION_EVENTS_USE_SEEN_DB=true          # SQLite deduplication store
-
-# Resource-specific overrides (optional - only if one resource needs different settings)
-# MIGRATION_LOGS_FETCH_LIMIT=500           # Override just for logs
-# MIGRATION_EXPERIMENT_EVENTS_INSERT_BATCH_SIZE=100  # Override just for experiments
-# MIGRATION_DATASET_EVENTS_USE_SEEN_DB=false         # Override just for datasets
-
-# Insert request sizing (for large events with attachments)
-MIGRATION_INSERT_MAX_REQUEST_BYTES=6291456  # 6MB max request size (default)
-MIGRATION_INSERT_REQUEST_HEADROOM_RATIO=0.75  # Use 75% of max → ~4.5MB effective limit
-
-# Optional time-based filtering (date range)
-MIGRATION_CREATED_AFTER=                           # Start date filter (e.g. 2026-01-15)
-                                                   # - Logs: only migrate events created >= this date
-                                                   # - Experiments: only migrate experiments created >= this date
-MIGRATION_CREATED_BEFORE=                          # End date filter (e.g. 2026-01-31)
-                                                   # - Inclusive to end-of-day (23:59:59)
-                                                   # - Logs: only migrate events created <= this date
-                                                   # - Experiments: only migrate experiments created <= this date
-
-# Example: Define a date range by combining both filters
+# Optional: Date filtering
 # MIGRATION_CREATED_AFTER=2026-01-01
-# MIGRATION_CREATED_BEFORE=2026-01-31
-# This migrates only logs/experiments created between Jan 1 and Jan 31, 2026 (inclusive)
+# MIGRATION_CREATED_BEFORE=2026-02-01
 ```
 
 ### Getting API Keys
@@ -237,19 +265,17 @@ braintrust-migrate migrate --dry-run
 
 **Time-based Filtering:**
 ```bash
-# Only migrate logs/experiments created on or after a certain date
+# Migrate data from a specific date onward (inclusive: >=)
 braintrust-migrate migrate --created-after 2026-01-15
 
-# Only migrate logs/experiments created on or before a certain date (inclusive to end-of-day)
-braintrust-migrate migrate --created-before 2026-01-31
+# Migrate data before a specific date (exclusive: <)
+braintrust-migrate migrate --created-before 2026-02-01
 
-# Combine both to define a date range
-braintrust-migrate migrate --created-after 2026-01-01 --created-before 2026-01-31
-
-# Applies to:
-# - Logs: filters individual events by created date
-# - Experiments: filters which experiments to migrate (all their events are included)
+# Date range: migrate all of January 2026
+braintrust-migrate migrate --created-after 2026-01-01 --created-before 2026-02-01
 ```
+
+> **Semantics:** `--created-after` is inclusive (`>=`), `--created-before` is exclusive (`<`). This half-open interval `[after, before)` makes date ranges intuitive—e.g., "all of January" is `--created-after 2026-01-01 --created-before 2026-02-01`.
 
 ### CLI Reference
 
