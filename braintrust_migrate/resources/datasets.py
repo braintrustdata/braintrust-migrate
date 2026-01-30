@@ -681,6 +681,9 @@ class DatasetMigrator(ResourceMigrator[dict]):
                 incr_skipped_seen=lambda n: setattr(
                     state, "skipped_seen", int(state.skipped_seen) + int(n)
                 ),
+                incr_skipped_oversize=lambda n: setattr(
+                    state, "skipped_oversize", int(state.skipped_oversize) + int(n)
+                ),
                 incr_attachments_copied=lambda n: setattr(
                     state,
                     "attachments_copied",
@@ -702,6 +705,7 @@ class DatasetMigrator(ResourceMigrator[dict]):
                             "inserted_bytes_total": state.inserted_bytes,
                             "skipped_deleted_total": state.skipped_deleted,
                             "skipped_seen_total": state.skipped_seen,
+                            "skipped_oversize_total": state.skipped_oversize,
                             "attachments_copied_total": state.attachments_copied,
                             "cursor": (
                                 (state.btql_min_pagination_key[:16] + "…")

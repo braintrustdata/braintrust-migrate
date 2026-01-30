@@ -347,6 +347,8 @@ class BraintrustClient:
         attempts = int(self.migration_config.retry_attempts) + 1
         base_delay = float(self.migration_config.retry_delay)
         max_delay = 60.0
+        # For 429 rate limits, retry many more times (up to ~30 min of waiting)
+        rate_limit_max_attempts = 30
 
         HTTP_STATUS_TOO_MANY_REQUESTS = 429
 
@@ -384,7 +386,8 @@ class BraintrustClient:
                 retry_after = _parse_retry_after_seconds(exc.response)
                 if status == HTTP_STATUS_TOO_MANY_REQUESTS:
                     return True, status, retry_after
-                if status in {408, 409, 425, 500, 502, 503, 504}:
+                # 413 is retryable - bisect logic in insert_bisect.py will handle splitting batches
+                if status in {408, 409, 413, 425, 500, 502, 503, 504}:
                     return True, status, retry_after
                 return False, status, retry_after
             if isinstance(exc, httpx.RequestError):
@@ -416,7 +419,8 @@ class BraintrustClient:
             return ctx
 
         last_exc: Exception | None = None
-        for attempt in range(1, attempts + 1):
+        attempt = 1
+        while True:
             try:
                 self._logger.debug(
                     "Executing operation",
@@ -433,12 +437,18 @@ class BraintrustClient:
                 retryable, status, retry_after = _classify_exception(e)
                 exc_ctx = _exc_context(e)
 
-                if not retryable or attempt >= attempts:
+                # For 429 rate limits, be much more persistent
+                is_rate_limit = status == HTTP_STATUS_TOO_MANY_REQUESTS
+                effective_max_attempts = (
+                    rate_limit_max_attempts if is_rate_limit else attempts
+                )
+
+                if not retryable or attempt >= effective_max_attempts:
                     self._logger.error(
                         "Operation failed",
                         operation=operation_name,
                         attempt=attempt,
-                        max_attempts=attempts,
+                        max_attempts=effective_max_attempts,
                         status_code=status,
                         error=str(e),
                         **exc_ctx,
@@ -446,26 +456,31 @@ class BraintrustClient:
                     raise
 
                 exp_delay = min(max_delay, base_delay * (2 ** (attempt - 1)))
-                # small jitter to avoid thundering herd
-                jitter = random.uniform(0, min(1.0, exp_delay * 0.1))
-                delay = min(max_delay, exp_delay + jitter)
-                if retry_after is not None:
-                    delay = min(max_delay, max(delay, retry_after))
 
-                # Concise message for rate limits (expected behavior), verbose for other errors
-                if status == HTTP_STATUS_TOO_MANY_REQUESTS:
+                if is_rate_limit:
+                    # For rate limits: use full retry_after, add significant jitter
+                    # to spread out requests and avoid thundering herd
+                    base_wait = retry_after if retry_after is not None else 60.0
+                    # Add 10-50% jitter to spread out concurrent requests
+                    jitter = random.uniform(base_wait * 0.1, base_wait * 0.5)
+                    delay = min(base_wait + jitter, max_delay)
                     self._logger.warning(
                         "Rate limited, retrying",
                         operation=operation_name,
                         retry_in_seconds=round(delay, 1),
-                        attempt=f"{attempt}/{attempts}",
+                        attempt=f"{attempt}/{effective_max_attempts}",
                     )
                 else:
+                    # For other errors: use exponential backoff with small jitter
+                    jitter = random.uniform(0, min(1.0, exp_delay * 0.1))
+                    delay = min(max_delay, exp_delay + jitter)
+                    if retry_after is not None:
+                        delay = min(max_delay, max(delay, retry_after))
                     self._logger.warning(
                         "Operation failed, backing off and retrying",
                         operation=operation_name,
                         attempt=attempt,
-                        max_attempts=attempts,
+                        max_attempts=effective_max_attempts,
                         status_code=status,
                         retry_after_seconds=retry_after,
                         sleep_seconds=delay,
@@ -473,8 +488,9 @@ class BraintrustClient:
                         **exc_ctx,
                     )
                 await asyncio.sleep(delay)
+                attempt += 1
 
-        # Should be unreachable
+        # Should be unreachable - loop exits via return or raise
         if last_exc is not None:
             raise last_exc
         raise BraintrustAPIError(f"{operation_name} failed with unknown error")

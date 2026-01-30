@@ -23,12 +23,19 @@ async def insert_with_413_bisect(
     is_http_413: Callable[[Exception], bool],
     on_success: Callable[[list[T], R], Awaitable[None]] | None = None,
     on_single_413: Callable[[T, Exception], Awaitable[None]] | None = None,
-) -> None:
+    skip_single_413: bool = False,
+) -> list[T]:
     """Insert items, bisecting on 413 to isolate oversized payloads.
 
     - Preserves the original item order by always processing the left half first.
-    - If a singleton batch triggers 413, invokes `on_single_413` (if provided) and re-raises.
+    - If a singleton batch triggers 413, invokes `on_single_413` (if provided).
+    - If `skip_single_413` is True, the oversized item is skipped and migration
+      continues. If False (default), the exception is re-raised.
+
+    Returns:
+        List of items that were skipped due to being oversized (empty if none).
     """
+    skipped_oversize: list[T] = []
     stack: list[list[T]] = [items]
     while stack:
         batch = stack.pop()
@@ -43,6 +50,9 @@ async def insert_with_413_bisect(
                 if len(batch) == 1:
                     if on_single_413 is not None:
                         await on_single_413(batch[0], e)
+                    if skip_single_413:
+                        skipped_oversize.append(batch[0])
+                        continue
                     raise
                 mid = math.ceil(len(batch) / 2)
                 left = batch[:mid]
@@ -52,3 +62,4 @@ async def insert_with_413_bisect(
                 stack.append(left)
                 continue
             raise
+    return skipped_oversize

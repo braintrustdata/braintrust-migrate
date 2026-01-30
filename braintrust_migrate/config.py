@@ -15,8 +15,8 @@ load_dotenv()
 _DATE_ONLY_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
 
-def _canonicalize_datetime(value: str, field_name: str) -> str:
-    """Normalize a user-supplied datetime string for BTQL filters.
+def canonicalize_created_after(value: str) -> str:
+    """Normalize a user-supplied datetime string for BTQL `created >= ...` filters.
 
     Accepts:
     - YYYY-MM-DD (treated as midnight UTC)
@@ -26,7 +26,7 @@ def _canonicalize_datetime(value: str, field_name: str) -> str:
     """
     v = (value or "").strip()
     if not v:
-        raise ValueError(f"{field_name} cannot be empty")
+        raise ValueError("created_after cannot be empty")
 
     if _DATE_ONLY_RE.match(v):
         dt = datetime.fromisoformat(v).replace(tzinfo=UTC)
@@ -37,7 +37,7 @@ def _canonicalize_datetime(value: str, field_name: str) -> str:
         dt = datetime.fromisoformat(v_for_parse)
     except Exception as e:
         raise ValueError(
-            f"Invalid {field_name} date (expected YYYY-MM-DD like 2026-01-15): {value!r}"
+            f"Invalid created_after date (expected YYYY-MM-DD like 2026-01-15): {value!r}"
         ) from e
 
     if dt.tzinfo is None:
@@ -46,14 +46,38 @@ def _canonicalize_datetime(value: str, field_name: str) -> str:
     return dt.isoformat().replace("+00:00", "Z")
 
 
-def canonicalize_created_after(value: str) -> str:
-    """Normalize a user-supplied datetime string for BTQL `created >= ...` filters."""
-    return _canonicalize_datetime(value, "created_after")
-
-
 def canonicalize_created_before(value: str) -> str:
-    """Normalize a user-supplied datetime string for BTQL `created < ...` filters."""
-    return _canonicalize_datetime(value, "created_before")
+    """Normalize a user-supplied datetime string for BTQL `created <= ...` filters.
+
+    Accepts:
+    - YYYY-MM-DD (treated as end-of-day 23:59:59.999999 UTC for inclusive range)
+    - ISO-8601 datetimes, with or without timezone (naive treated as UTC)
+
+    Returns a canonical UTC ISO-8601 string ending in 'Z'.
+    """
+    v = (value or "").strip()
+    if not v:
+        raise ValueError("created_before cannot be empty")
+
+    if _DATE_ONLY_RE.match(v):
+        # For date-only, use end-of-day to make it inclusive of the full day
+        dt = datetime.fromisoformat(v).replace(
+            hour=23, minute=59, second=59, microsecond=999999, tzinfo=UTC
+        )
+        return dt.isoformat().replace("+00:00", "Z")
+
+    v_for_parse = v[:-1] + "+00:00" if v.endswith("Z") else v
+    try:
+        dt = datetime.fromisoformat(v_for_parse)
+    except Exception as e:
+        raise ValueError(
+            f"Invalid created_before date (expected YYYY-MM-DD like 2026-01-15): {value!r}"
+        ) from e
+
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=UTC)
+    dt = dt.astimezone(UTC)
+    return dt.isoformat().replace("+00:00", "Z")
 
 
 class BraintrustOrgConfig(BaseModel):
@@ -156,10 +180,10 @@ class MigrationConfig(BaseModel):
         default=None,
         description=(
             "Optional ISO-8601 timestamp filter. When set: "
-            "(1) project logs migration only migrates events with created < created_before, "
-            "(2) experiments migration only migrates experiments with created < created_before "
+            "(1) project logs migration only migrates events with created <= created_before, "
+            "(2) experiments migration only migrates experiments with created <= created_before "
             "(and all their events). "
-            "Use with created_after for date ranges (e.g., --created-after 2026-01-01 --created-before 2026-02-01)."
+            "Can be combined with created_after to define a date range."
         ),
     )
 
