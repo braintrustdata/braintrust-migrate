@@ -2,7 +2,7 @@
 
 > **⚠️ WARNING: Large-scale migrations (especially logs/experiments) can be extremely expensive and operationally risky. This tool includes streaming + resumable migration for high-volume event streams, but TB-scale migrations have not been fully soak-tested in production-like conditions. Use with caution and test on a subset first.**
 
-A Python CLI & library for migrating Braintrust organizations with maximum fidelity, leveraging the official `braintrust-api-py` SDK.
+A Python CLI & library for migrating Braintrust organizations with maximum fidelity, using direct HTTP requests (via `httpx`) against the Braintrust REST API.
 
 ## Overview
 

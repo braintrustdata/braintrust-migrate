@@ -1,5 +1,5 @@
 version = 1
-revision = 2
+revision = 3
 requires-python = ">=3.12"
 
 [[package]]
@@ -26,28 +26,10 @@ wheels = [
 ]
 
 [[package]]
-name = "braintrust-api"
-version = "0.6.0"
-source = { registry = "https://pypi.org/simple" }
-dependencies = [
-    { name = "anyio" },
-    { name = "distro" },
-    { name = "httpx" },
-    { name = "pydantic" },
-    { name = "sniffio" },
-    { name = "typing-extensions" },
-]
-sdist = { url = "https://files.pythonhosted.org/packages/2a/37/f79b259b038a8c0554ed99bd061e4e02b46effadae6742b1c25c24112906/braintrust_api-0.6.0.tar.gz", hash = "sha256:8f33639be6bd80063cb63e3be14f24d29c02860abe77319cda6ea06326ae12f8", size = 185903, upload-time = "2024-11-28T20:16:23.567Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/5c/42/b3cbdeda7c6843f6804587a06404e8ddde28e9a3b384fc9222c54dbb5215/braintrust_api-0.6.0-py3-none-any.whl", hash = "sha256:30b67dac746805a1fe0134a4311896eb9f4289b963cd18dd51edc2b099569bdf", size = 268967, upload-time = "2024-11-28T20:16:21.51Z" },
-]
-
-[[package]]
 name = "braintrust-migrate"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [
-    { name = "braintrust-api" },
     { name = "httpx" },
     { name = "pydantic" },
     { name = "python-dotenv" },
@@ -71,7 +53,6 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "braintrust-api", specifier = ">=0.6.0" },
     { name = "httpx", specifier = ">=0.25.0" },
     { name = "mypy", marker = "extra == 'dev'", specifier = ">=1.7.0" },
     { name = "pydantic", specifier = ">=2.5.0" },
@@ -160,15 +141,6 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/22/5e/7053b71462e970e869111c1853afd642212568a350eba796deefdfbd0770/coverage-7.8.2-cp313-cp313t-win_amd64.whl", hash = "sha256:2c08b05ee8d7861e45dc5a2cc4195c8c66dca5ac613144eb6ebeaff2d502e73d", size = 216268, upload-time = "2025-05-23T11:39:28.429Z" },
     { url = "https://files.pythonhosted.org/packages/07/69/afa41aa34147655543dbe96994f8a246daf94b361ccf5edfd5df62ce066a/coverage-7.8.2-cp313-cp313t-win_arm64.whl", hash = "sha256:1e1448bb72b387755e1ff3ef1268a06617afd94188164960dba8d0245a46004b", size = 214071, upload-time = "2025-05-23T11:39:30.55Z" },
     { url = "https://files.pythonhosted.org/packages/a0/1a/0b9c32220ad694d66062f571cc5cedfa9997b64a591e8a500bb63de1bd40/coverage-7.8.2-py3-none-any.whl", hash = "sha256:726f32ee3713f7359696331a18daf0c3b3a70bb0ae71141b9d3c52be7c595e32", size = 203623, upload-time = "2025-05-23T11:39:53.846Z" },
-]
-
-[[package]]
-name = "distro"
-version = "1.9.0"
-source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/fc/f8/98eea607f65de6527f8a2e8885fc8015d3e6f5775df186e443e0964a11c3/distro-1.9.0.tar.gz", hash = "sha256:2fa77c6fd8940f116ee1d6b94a2f90b13b5ea8d019b98bc8bafdcabcdd9bdbed", size = 60722, upload-time = "2023-12-24T09:54:32.31Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/12/b3/231ffd4ab1fc9d679809f356cebee130ac7daa00d6d6f3206dd4fd137e9e/distro-1.9.0-py3-none-any.whl", hash = "sha256:7bffd925d65168f85027d8da9af6bddab658135b840670a223589bc0c8ef02b2", size = 20277, upload-time = "2023-12-24T09:54:30.421Z" },
 ]
 
 [[package]]

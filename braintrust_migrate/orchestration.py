@@ -8,7 +8,6 @@ from pathlib import Path
 from typing import Any, ClassVar, TypeVar, cast
 
 import structlog
-from braintrust_api.types import Project
 
 from braintrust_migrate.client import BraintrustClient, create_client_pair
 from braintrust_migrate.config import Config
@@ -304,21 +303,26 @@ class MigrationOrchestrator:
         """
         self._logger.info("Discovering projects")
 
-        # List projects from source
-        source_projects = await source_client.with_retry(
-            "list_source_projects", lambda: source_client.client.projects.list()
+        # List projects from source (REST: GET /v1/project)
+        raw_projects = cast(
+            list[dict[str, Any]],
+            await source_client.with_retry(
+                "list_source_projects", lambda: source_client.list_projects()
+            ),
         )
-
-        projects = []
-
-        if source_projects is None:
-            projects = []
-        # Convert to list if it's an async iterator
-        elif hasattr(source_projects, "__aiter__"):
-            async for project in source_projects:
-                projects.append(project)
-        else:
-            projects = list(source_projects)
+        # Ensure we have basic required fields.
+        projects: list[dict[str, Any]] = []
+        for p in raw_projects:
+            pid = p.get("id")
+            name = p.get("name")
+            if isinstance(pid, str) and pid and isinstance(name, str) and name:
+                projects.append(p)
+            else:
+                self._logger.warning(
+                    "Skipping malformed project record",
+                    project_id=pid,
+                    project_name=name,
+                )
 
         # Filter projects if project_names is specified
         if self.config.project_names:
@@ -326,18 +330,18 @@ class MigrationOrchestrator:
             project_names_set = set(self.config.project_names)
 
             for project in projects:
-                if project.name in project_names_set:
+                if project.get("name") in project_names_set:
                     filtered_projects.append(project)
 
             # Log which projects were found and which were not
-            found_names = {project.name for project in filtered_projects}
+            found_names = {cast(str, project.get("name")) for project in filtered_projects}
             missing_names = project_names_set - found_names
 
             if missing_names:
                 self._logger.warning(
                     "Some specified projects were not found in source organization",
                     missing_projects=list(missing_names),
-                    available_projects=[p.name for p in projects],
+                    available_projects=[p.get("name") for p in projects],
                 )
 
             self._logger.info(
@@ -356,10 +360,10 @@ class MigrationOrchestrator:
             dest_project_id = await self._ensure_project_exists(project, dest_client)
             project_mappings.append(
                 {
-                    "source_id": project.id,
+                    "source_id": cast(str, project.get("id")),
                     "dest_id": dest_project_id,
-                    "name": project.name,
-                    "description": getattr(project, "description", None),
+                    "name": cast(str, project.get("name")),
+                    "description": project.get("description"),
                 }
             )
 
@@ -367,7 +371,7 @@ class MigrationOrchestrator:
 
     async def _ensure_project_exists(
         self,
-        source_project: Project,
+        source_project: dict[str, Any],
         dest_client: BraintrustClient,
     ) -> str:
         """Ensure a project exists in the destination organization.
@@ -381,56 +385,50 @@ class MigrationOrchestrator:
         """
         try:
             # Check if project already exists
-            dest_projects = await dest_client.with_retry(
-                "list_dest_projects", lambda: dest_client.client.projects.list()
+            dest_projects = cast(
+                list[dict[str, Any]],
+                await dest_client.with_retry(
+                    "list_dest_projects", lambda: dest_client.list_projects()
+                ),
             )
 
-            # Convert to list and check if project exists
-            existing_project = None
-            if dest_projects is None:
-                existing_project = None
-            elif hasattr(dest_projects, "__aiter__"):
-                async for dest_project in dest_projects:
-                    if dest_project.name == source_project.name:
-                        existing_project = dest_project
-                        break
-            else:
-                for dest_project in dest_projects:
-                    if dest_project.name == source_project.name:
-                        existing_project = dest_project
-                        break
+            existing_project: dict[str, Any] | None = None
+            for dest_project in dest_projects:
+                if dest_project.get("name") == source_project.get("name"):
+                    existing_project = dest_project
+                    break
 
             if existing_project:
                 self._logger.debug(
                     "Project already exists in destination",
-                    project_name=source_project.name,
-                    dest_id=existing_project.id,
+                    project_name=source_project.get("name"),
+                    dest_id=existing_project.get("id"),
                 )
-                return existing_project.id
+                return cast(str, existing_project.get("id"))
 
             # Create project in destination
-            create_params = {"name": source_project.name}
-            description = cast(str | None, getattr(source_project, "description", None))
+            create_params = {"name": source_project.get("name")}
+            description = cast(str | None, source_project.get("description"))
             if description:
                 create_params["description"] = description
 
             new_project = cast(
-                Any,
+                dict[str, Any],
                 await dest_client.with_retry(
                     "create_project",
-                    # braintrust-api client is dynamically generated; use Any to avoid type noise
-                    lambda: cast(Any, dest_client.client.projects).create(
-                        **create_params
+                    lambda: dest_client.create_project(
+                        name=cast(str, create_params["name"]),
+                        description=cast(str | None, create_params.get("description")),
                     ),
                 ),
             )
 
-            new_project_id = cast(str, new_project.id)
+            new_project_id = cast(str, new_project.get("id"))
 
             self._logger.info(
                 "Created project in destination",
-                project_name=source_project.name,
-                source_id=source_project.id,
+                project_name=source_project.get("name"),
+                source_id=source_project.get("id"),
                 dest_id=new_project_id,
             )
 
@@ -439,7 +437,7 @@ class MigrationOrchestrator:
         except Exception as e:
             self._logger.error(
                 "Failed to ensure project exists",
-                project_name=source_project.name,
+                project_name=source_project.get("name"),
                 error=str(e),
             )
             raise
