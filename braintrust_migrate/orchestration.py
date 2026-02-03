@@ -409,10 +409,8 @@ class MigrationOrchestrator:
                 return existing_project.id
 
             # Create project in destination
+            # Note: description parameter is not supported by projects.create() in braintrust-api
             create_params = {"name": source_project.name}
-            description = cast(str | None, getattr(source_project, "description", None))
-            if description:
-                create_params["description"] = description
 
             new_project = cast(
                 Any,
