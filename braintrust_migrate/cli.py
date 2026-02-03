@@ -1267,7 +1267,7 @@ async def _test_resource_discovery(
 
                 # Create temporary migrator for testing
                 temp_dir = config.state_dir / "dry_run_temp"
-                temp_dir.mkdir(exist_ok=True)
+                temp_dir.mkdir(parents=True, exist_ok=True)
 
                 migrator = migrator_class(source_client, dest_client, temp_dir)
 
