@@ -3,9 +3,11 @@
 import tempfile
 from contextlib import asynccontextmanager
 from pathlib import Path
+from typing import cast
 from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
+from pydantic import HttpUrl
 
 from braintrust_migrate.config import BraintrustOrgConfig, Config, MigrationConfig
 from braintrust_migrate.orchestration import MigrationOrchestrator
@@ -23,12 +25,14 @@ def config(temp_checkpoint_dir):
     """Create a test configuration."""
     return Config(
         source=BraintrustOrgConfig(
-            api_key="source-key", url="https://source.braintrust.dev"
+            api_key="source-key",
+            url=cast(HttpUrl, HttpUrl("https://source.braintrust.dev")),
         ),
         destination=BraintrustOrgConfig(
-            api_key="dest-key", url="https://dest.braintrust.dev"
+            api_key="dest-key",
+            url=cast(HttpUrl, HttpUrl("https://dest.braintrust.dev")),
         ),
-        migration=MigrationConfig(batch_size=10, max_retries=2),
+        migration=MigrationConfig(batch_size=10, retry_attempts=2),
         state_dir=temp_checkpoint_dir,
         resources=["datasets"],  # Only test datasets for simplicity
     )
@@ -71,58 +75,25 @@ class TestMigrationFlow:
             source_mock = Mock()
             dest_mock = Mock()
 
-            # Create mock client attributes
             for mock_client, is_source in [(source_mock, True), (dest_mock, False)]:
-                mock_client_attr = Mock()
-                mock_projects = Mock()
-                mock_projects.list = AsyncMock(return_value=[])
-                mock_client_attr.projects = mock_projects
-                mock_client.client = mock_client_attr
+                # Projects are now handled via REST helpers, not the SDK.
+                mock_client.list_projects = AsyncMock(
+                    return_value=[mock_project_data] if is_source else []
+                )
+                mock_client.create_project = AsyncMock(return_value=mock_project_data)
 
-                async def mock_with_retry(op_name, coro_func, is_source=is_source):
-                    # Call the lambda function to get the coroutine, then return mock data
-                    try:
-                        # Call the function to get the coroutine (but don't await it)
-                        coro = coro_func()
-                        if hasattr(coro, "__await__"):
-                            await coro  # Consume the coroutine
-                    except Exception:
-                        # If it fails, just ignore - we're mocking anyway
-                        pass
-
-                    # Return different data based on operation name and client type
-                    if is_source and "list_source_projects" in op_name:
-                        # Return a mock project object with the expected attributes
-                        mock_project = Mock()
-                        mock_project.id = mock_project_data["id"]
-                        mock_project.name = mock_project_data["name"]
-                        mock_project.description = mock_project_data.get("description")
-                        return [mock_project]
-                    elif not is_source and "list_dest_projects" in op_name:
-                        return []
-                    elif not is_source and "create_project" in op_name:
-                        # Return a mock project object with the expected attributes
-                        mock_project = Mock()
-                        mock_project.id = mock_project_data["id"]
-                        mock_project.name = mock_project_data["name"]
-                        mock_project.description = mock_project_data.get("description")
-                        return mock_project
-                    elif "list_datasets" in op_name:
-                        # raw_request returns dict with objects key
-                        return {"objects": []}
-                    elif "list_experiments" in op_name:
-                        # raw_request returns dict with objects key
-                        return {"objects": []}
-                    elif "list_functions" in op_name:
-                        # raw_request returns dict with objects key
-                        return {"objects": []}
-                    else:
-                        return []
+                async def mock_with_retry(_op_name, coro_func):
+                    res = coro_func()
+                    if hasattr(res, "__await__"):
+                        return await res
+                    return res
 
                 mock_client.with_retry = mock_with_retry
 
-                # Mock raw_request to return empty objects
                 async def mock_raw_request(method, path, **kwargs):
+                    # All resource list calls return empty for this integration test.
+                    assert method.upper() in {"GET", "POST"}
+                    assert path.startswith("/v1/")
                     return {"objects": []}
 
                 mock_client.raw_request = mock_raw_request

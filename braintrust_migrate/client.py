@@ -12,7 +12,6 @@ from typing import Any
 
 import httpx
 import structlog
-from braintrust_api import AsyncBraintrust
 
 from braintrust_migrate.config import BraintrustOrgConfig, MigrationConfig
 
@@ -41,7 +40,7 @@ class BraintrustAPIError(BraintrustClientError):
 
 
 class BraintrustClient:
-    """Thin wrapper around braintrust-api-py AsyncClient with additional features.
+    """Thin wrapper around httpx.AsyncClient with additional features.
 
     Provides:
     - Health checks and connectivity validation
@@ -66,7 +65,6 @@ class BraintrustClient:
         self.org_config = org_config
         self.migration_config = migration_config
         self.org_name = org_name
-        self._client: AsyncBraintrust | None = None
         self._http_client: httpx.AsyncClient | None = None
         self._logger = logger.bind(org=org_name, url=str(org_config.url))
         self._org_id: str | None = None
@@ -86,23 +84,16 @@ class BraintrustClient:
         Raises:
             BraintrustConnectionError: If connection fails.
         """
-        if self._client is not None:
+        if self._http_client is not None:
             return
 
         try:
             self._logger.info("Connecting to Braintrust API")
 
-            # Create HTTP client for auxiliary requests
+            # Create HTTP client for requests
             self._http_client = httpx.AsyncClient(
                 timeout=httpx.Timeout(30.0),
                 limits=httpx.Limits(max_connections=20, max_keepalive_connections=5),
-            )
-
-            # Create Braintrust API client
-            self._client = AsyncBraintrust(
-                api_key=self.org_config.api_key,
-                base_url=str(self.org_config.url),
-                http_client=self._http_client,
             )
 
             # Perform health check
@@ -119,14 +110,6 @@ class BraintrustClient:
 
     async def close(self) -> None:
         """Close the connection to Braintrust API."""
-        if self._client is not None:
-            try:
-                await self._client.close()
-            except Exception as e:
-                self._logger.warning("Error closing Braintrust client", error=str(e))
-            finally:
-                self._client = None
-
         if self._http_client is not None:
             try:
                 await self._http_client.aclose()
@@ -136,6 +119,83 @@ class BraintrustClient:
                 self._http_client = None
 
         self._logger.info("Closed connection to Braintrust API")
+
+    async def list_projects(
+        self,
+        *,
+        limit: int | None = None,
+        project_name: str | None = None,
+        org_name: str | None = None,
+        page_size: int = 100,
+    ) -> list[dict[str, Any]]:
+        """List projects in this organization.
+
+        Uses GET /v1/project and paginates via `starting_after`.
+
+        Args:
+            limit: Optional max number of projects to return (client-side cap).
+            project_name: Optional exact-name filter (server-side).
+            org_name: Optional org name filter (server-side).
+            page_size: Page size to request when paginating.
+        """
+        effective_page_size = page_size
+        if limit is not None:
+            effective_page_size = max(1, min(page_size, limit))
+
+        projects: list[dict[str, Any]] = []
+        starting_after: str | None = None
+
+        while True:
+            params: dict[str, Any] = {"limit": effective_page_size}
+            if starting_after is not None:
+                params["starting_after"] = starting_after
+            if project_name is not None:
+                params["project_name"] = project_name
+            if org_name is not None:
+                params["org_name"] = org_name
+
+            resp = await self.raw_request("GET", "/v1/project", params=params)
+            if not isinstance(resp, dict):
+                raise BraintrustAPIError(f"Unexpected project list response: {type(resp)}")
+            objs = resp.get("objects")
+            if not isinstance(objs, list):
+                raise BraintrustAPIError(
+                    f"Unexpected project list response shape: {resp!r}"
+                )
+
+            batch: list[dict[str, Any]] = []
+            for obj in objs:
+                if isinstance(obj, dict):
+                    batch.append(obj)
+
+            projects.extend(batch)
+
+            if limit is not None and len(projects) >= limit:
+                return projects[:limit]
+
+            # No more pages.
+            if len(objs) < effective_page_size or not objs:
+                return projects
+
+            # Continue with pagination cursor.
+            last = batch[-1] if batch else None
+            last_id = last.get("id") if isinstance(last, dict) else None
+            if not isinstance(last_id, str) or not last_id:
+                return projects
+            starting_after = last_id
+
+    async def create_project(
+        self, *, name: str, description: str | None = None
+    ) -> dict[str, Any]:
+        """Create (or return existing) project by name via POST /v1/project."""
+        payload: dict[str, Any] = {"name": name}
+        if description:
+            payload["description"] = description
+
+        resp = await self.raw_request("POST", "/v1/project", json=payload)
+        if not isinstance(resp, dict):
+            raise BraintrustAPIError(f"Unexpected create project response: {type(resp)}")
+        return resp
 
     async def raw_request(
         self,
@@ -148,9 +208,9 @@ class BraintrustClient:
     ) -> Any:
         """Perform a raw HTTP request against the Braintrust API.
 
-        This is useful for endpoints that are not ergonomically exposed by the
-        generated `braintrust-api` client, or when we need tight control over
-        request/response behavior (e.g. cursor-pagination for large logs).
+        This is useful when we need tight control over request/response behavior
+        (e.g. cursor-pagination for large logs) or want to avoid additional SDK
+        dependencies.
 
         Args:
             method: HTTP method (GET/POST/etc).
@@ -269,20 +329,6 @@ class BraintrustClient:
             f"{last_err}"
         )
 
-    @property
-    def client(self) -> AsyncBraintrust:
-        """Get the underlying Braintrust API client.
-
-        Returns:
-            The AsyncBraintrust client instance.
-
-        Raises:
-            BraintrustConnectionError: If not connected.
-        """
-        if self._client is None:
-            raise BraintrustConnectionError(f"Not connected to {self.org_name}")
-        return self._client
-
     async def health_check(self) -> dict[str, Any]:
         """Perform health check against the Braintrust API.
 
@@ -292,12 +338,12 @@ class BraintrustClient:
         Raises:
             BraintrustConnectionError: If health check fails.
         """
-        if self._client is None:
+        if self._http_client is None:
             raise BraintrustConnectionError(f"Not connected to {self.org_name}")
 
         try:
-            # Try to list projects as a health check
-            await self._client.projects.list(limit=1)
+            # List projects as a lightweight health check.
+            await self.list_projects(limit=1)
 
             health_data = {
                 "status": "healthy",
