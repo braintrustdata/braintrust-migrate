@@ -268,7 +268,7 @@ class LogsMigrator(ResourceMigrator[dict[str, Any]]):
         project_id: str,
         limit: int,
     ) -> dict[str, Any]:
-        """Fetch one page via POST /btql using SQL syntax, sorted by _pagination_key.
+        """Fetch one page via POST /btql using native BTQL syntax, sorted by _pagination_key.
 
         This exists to allow inserting logs in created-ascending order, which makes
         destination `_xact_id` (and thus UI default ordering by `_pagination_key`)
@@ -280,8 +280,8 @@ class LogsMigrator(ResourceMigrator[dict[str, Any]]):
         #   For sorted pagination, we must do offset-based pagination by filtering on
         #   the last sort key values from the previous page.
 
-        # Use SQL syntax for BTQL. This is simpler and tends to be more robust across
-        # deployments than multi-clause BTQL text generation.
+        # Use native BTQL syntax (select:/from:/filter:/sort:/limit:) for compatibility
+        # with data planes that don't yet support SQL mode.
         last_pagination_key = self._stream_state.btql_min_pagination_key
         last_pagination_key_inclusive = bool(
             self._stream_state.btql_min_pagination_key_inclusive
@@ -289,7 +289,7 @@ class LogsMigrator(ResourceMigrator[dict[str, Any]]):
         created_after = self._stream_state.created_after
         created_before = self._stream_state.created_before
 
-        from_expr = f"project_logs('{btql_quote(project_id)}', shape => 'spans')"
+        from_expr = f"project_logs('{btql_quote(project_id)}') spans"
 
         def _query_text_for_limit(n: int) -> str:
             return build_btql_sorted_page_query(
@@ -522,7 +522,7 @@ class LogsMigrator(ResourceMigrator[dict[str, Any]]):
                 start_pk = await find_first_pagination_key_for_created_after(
                     client=self.source_client,
                     from_expr=(
-                        f"project_logs('{btql_quote(source_project_id)}', shape => 'spans')"
+                        f"project_logs('{btql_quote(source_project_id)}') spans"
                     ),
                     created_after=self._stream_state.created_after,
                     operation="btql_project_logs_created_after_start_pk",
