@@ -29,24 +29,24 @@ class _SourceBtqlClient:
         _ = kwargs
         assert method.upper() == "POST"
         assert path == "/btql"
-        # We don't fully parse SQL/BTQL, but we do validate that the migrator is using
+        # We don't fully parse BTQL, but we do validate that the migrator is using
         # sorted + offset-based pagination (filter on the last _pagination_key), not cursor.
         q = (json or {}).get("query")
         assert isinstance(q, str)
-        assert "SELECT *" in q
-        assert "FROM project_logs('proj-source', shape => 'spans')" in q
-        assert "ORDER BY _pagination_key" in q
-        assert "LIMIT" in q
+        assert "select:" in q
+        assert "from: project_logs('proj-source') spans" in q
+        assert "sort: _pagination_key" in q
+        assert "limit:" in q
         assert "cursor:" not in q  # cursor pagination doesn't work with sort
         self._calls += 1
         PAGE_ONE = 1
         PAGE_TWO = 2
         # Page 1 should have no WHERE filter (start of stream).
         if self._calls == PAGE_ONE:
-            assert "WHERE _pagination_key >" not in q
+            assert "_pagination_key >" not in q
         # Page 2 should filter on the last row of page 1 (pk=2).
         if self._calls == PAGE_TWO:
-            assert "WHERE _pagination_key > '2'" in q
+            assert "_pagination_key > '2'" in q
 
         if self._pages:
             return {"data": self._pages.pop(0)}
@@ -77,8 +77,8 @@ class _SourceBtqlClient500ThenOK:
         assert isinstance(q, str)
         self.queries.append(q)
 
-        # Simulate the backend error you saw: LIMIT 1000 fails, smaller LIMIT succeeds.
-        if "LIMIT 1000" in q:
+        # Simulate the backend error you saw: limit: 1000 fails, smaller limit succeeds.
+        if "limit: 1000" in q:
             import httpx
 
             req = httpx.Request("POST", "https://api.braintrust.dev/btql")
@@ -141,6 +141,7 @@ class _SourceBtqlClientCreatedAfter:
         self.queries: list[str] = []
         self._fetch_calls = 0
         self._preflight_calls = 0
+        self._SECOND_CALL = 2
 
     async def with_retry(self, _operation_name: str, coro_func):
         res = coro_func()
@@ -159,31 +160,28 @@ class _SourceBtqlClientCreatedAfter:
         self.queries.append(q)
 
         # Preflight query selects only _pagination_key.
-        if "SELECT _pagination_key" in q:
+        if "select: _pagination_key" in q:
             self._preflight_calls += 1
-            assert "FROM project_logs('proj-source', shape => 'spans')" in q
-            assert "WHERE created >= '2020-01-02T00:00:00Z'" in q
-            assert "ORDER BY _pagination_key ASC" in q
-            assert "LIMIT 1" in q
+            assert "from: project_logs('proj-source') spans" in q
+            assert "filter: created >= '2020-01-02T00:00:00Z'" in q
+            assert "sort: _pagination_key asc" in q
+            assert "limit: 1" in q
             # Start at pk=2 (row "b")
             return {"data": [{"_pagination_key": "2"}]}
 
         # Fetch queries select full rows.
-        assert "SELECT *" in q
-        assert "FROM project_logs('proj-source', shape => 'spans')" in q
-        assert "ORDER BY _pagination_key" in q
+        assert "select: *" in q
+        assert "from: project_logs('proj-source') spans" in q
+        assert "sort: _pagination_key asc" in q
         assert "cursor:" not in q
 
         self._fetch_calls += 1
         if self._fetch_calls == 1:
-            assert (
-                "WHERE created >= '2020-01-02T00:00:00Z' AND _pagination_key >= '2'"
-                in q
-            )
-        if self._fetch_calls == 2:
-            assert (
-                "WHERE created >= '2020-01-02T00:00:00Z' AND _pagination_key > '2'" in q
-            )
+            assert "filter: created >= '2020-01-02T00:00:00Z'" in q
+            assert "_pagination_key >= '2'" in q
+        if self._fetch_calls == self._SECOND_CALL:
+            assert "filter: created >= '2020-01-02T00:00:00Z'" in q
+            assert "_pagination_key > '2'" in q
 
         if self._pages:
             return {"data": self._pages.pop(0)}
@@ -254,10 +252,10 @@ async def test_logs_btql_fetch_retries_smaller_limit_on_500(tmp_path: Path) -> N
 
     assert res["migrated"] == 1
     assert dest.inserted_ids == ["a"]
-    # Verify we tried LIMIT 1000, then retried with a smaller limit (500 is first).
+    # Verify we tried limit: 1000, then retried with a smaller limit (500 is first).
     combined = "\n".join(source.queries)
-    assert "LIMIT 1000" in combined
-    assert "LIMIT 500" in combined
+    assert "limit: 1000" in combined
+    assert "limit: 500" in combined
 
 
 @pytest.mark.asyncio
@@ -293,7 +291,8 @@ async def test_logs_created_after_uses_preflight_and_inclusive_start_pk(
     migrator.set_destination_project_id("proj-dest")
     res = await migrator.migrate_all("proj-source")
 
-    assert res["migrated"] == 2
+    EXPECTED_MIGRATED = 2
+    assert res["migrated"] == EXPECTED_MIGRATED
     assert dest.inserted_ids == ["b", "c"]
 
 

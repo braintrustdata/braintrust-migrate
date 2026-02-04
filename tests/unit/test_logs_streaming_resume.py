@@ -38,12 +38,14 @@ class _StubClient:
         assert method.lower() == "post"
 
         if path == "/btql":
-            assert json is not None and isinstance(json.get("query"), str)
+            assert json is not None
+            assert isinstance(json.get("query"), str)
             q = json.get("query")
             assert isinstance(q, str)
-            if "WHERE _pagination_key > 'p1'" in q:
+            # Native BTQL syntax uses `filter:` instead of SQL `WHERE`.
+            if "_pagination_key > 'p1'" in q:
                 return {"data": self._page2}
-            if "WHERE _pagination_key > 'p2'" in q:
+            if "_pagination_key > 'p2'" in q:
                 return {"data": []}
             return {"data": self._page1}
 

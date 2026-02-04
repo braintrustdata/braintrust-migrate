@@ -478,12 +478,12 @@ class DatasetMigrator(ResourceMigrator[dict]):
         limit: int,
         state: EventsStreamState,
     ) -> dict[str, Any]:
-        """Fetch one page via POST /btql using SQL syntax, sorted by _pagination_key."""
+        """Fetch one page via POST /btql using native BTQL syntax, sorted by _pagination_key."""
         last_pagination_key = state.btql_min_pagination_key
 
         def _query_text_for_limit(n: int) -> str:
             return build_btql_sorted_page_query(
-                from_expr=f"dataset('{btql_quote(dataset_id)}', shape => 'spans')",
+                from_expr=f"dataset('{btql_quote(dataset_id)}') spans",
                 limit=n,
                 last_pagination_key=last_pagination_key,
                 select="*",

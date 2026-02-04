@@ -116,10 +116,13 @@ def build_btql_sorted_page_query(
     created_before: str | None = None,
     select: str = "*",
 ) -> str:
-    """Build a BTQL SQL query for stable sorted paging on `_pagination_key`.
+    """Build a native BTQL query for stable sorted paging on `_pagination_key`.
+
+    Uses native BTQL syntax (select:/from:/filter:/sort:/limit:) instead of SQL
+    for compatibility with data planes that don't yet support SQL mode.
 
     Args:
-        from_expr: The FROM expression (e.g., "project_logs('...', shape => 'spans')")
+        from_expr: The FROM expression (e.g., "project_logs('...') spans")
         limit: Maximum number of rows to return
         last_pagination_key: Resume pagination from this key
         last_pagination_key_inclusive: If True, use >= instead of > for pagination key
@@ -128,7 +131,7 @@ def build_btql_sorted_page_query(
         select: Fields to select (default "*")
 
     Returns:
-        BTQL SQL query string
+        Native BTQL query string
     """
     conditions: list[str] = []
     if isinstance(created_after, str) and created_after:
@@ -138,14 +141,14 @@ def build_btql_sorted_page_query(
     if isinstance(last_pagination_key, str) and last_pagination_key:
         op = ">=" if last_pagination_key_inclusive else ">"
         conditions.append(f"_pagination_key {op} '{btql_quote(last_pagination_key)}'")
-    where = f"WHERE {' AND '.join(conditions)}\n" if conditions else ""
+    filter_clause = f"filter: {' and '.join(conditions)}\n" if conditions else ""
 
     return (
-        f"SELECT {select}\n"
-        f"FROM {from_expr}\n"
-        f"{where}"
-        "ORDER BY _pagination_key ASC\n"
-        f"LIMIT {int(limit)}"
+        f"select: {select}\n"
+        f"from: {from_expr}\n"
+        f"{filter_clause}"
+        "sort: _pagination_key asc\n"
+        f"limit: {int(limit)}"
     )
 
 

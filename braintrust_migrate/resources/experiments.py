@@ -481,7 +481,7 @@ class ExperimentMigrator(ResourceMigrator[dict]):
     ) -> None:
         """Migrate events from source experiment to destination experiment.
 
-        This uses BTQL (SQL) pagination ordered by `_pagination_key` and bounded inserts
+        This uses native BTQL pagination ordered by `_pagination_key` and bounded inserts
         so it can scale to very large experiments (potentially comparable to project logs).
 
         Deleted events (`_object_delete=true`) are skipped.
@@ -555,12 +555,12 @@ class ExperimentMigrator(ResourceMigrator[dict]):
         limit: int,
         state: EventsStreamState,
     ) -> dict[str, Any]:
-        """Fetch one page via POST /btql using SQL syntax, sorted by _pagination_key."""
+        """Fetch one page via POST /btql using native BTQL syntax, sorted by _pagination_key."""
         last_pagination_key = state.btql_min_pagination_key
 
         def _query_text_for_limit(n: int) -> str:
             return build_btql_sorted_page_query(
-                from_expr=f"experiment('{btql_quote(experiment_id)}', shape => 'spans')",
+                from_expr=f"experiment('{btql_quote(experiment_id)}') spans",
                 limit=n,
                 last_pagination_key=last_pagination_key,
                 select="*",
