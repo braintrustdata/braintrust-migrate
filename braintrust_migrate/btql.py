@@ -1,8 +1,11 @@
 """BTQL helpers (query execution + resilient paging).
 
-Streaming migrators use BTQL (SQL) queries sorted by `_pagination_key` and need
+Streaming migrators use native BTQL queries sorted by `_pagination_key` and need
 to be resilient to backend timeouts (504) and internal errors (500) that
 correlate with large LIMIT values.
+
+Native BTQL syntax is used instead of SQL for compatibility with data planes
+that don't yet support SQL mode.
 """
 
 from __future__ import annotations
@@ -38,11 +41,11 @@ async def find_first_pagination_key_for_created_after(
 
     def _query_text_for_limit(n: int) -> str:
         return (
-            "SELECT _pagination_key\n"
-            f"FROM {from_expr}\n"
-            f"WHERE created >= '{btql_quote(created_after)}'\n"
-            "ORDER BY _pagination_key ASC\n"
-            f"LIMIT {int(n)}"
+            "select: _pagination_key\n"
+            f"from: {from_expr}\n"
+            f"filter: created >= '{btql_quote(created_after)}'\n"
+            "sort: _pagination_key asc\n"
+            f"limit: {int(n)}"
         )
 
     out = await fetch_btql_sorted_page_with_retries(
