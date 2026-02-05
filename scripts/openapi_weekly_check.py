@@ -8,6 +8,7 @@ import json
 import os
 import sys
 import textwrap
+import time
 import urllib.error
 import urllib.request
 from pathlib import Path
@@ -17,6 +18,10 @@ from deepdiff import DeepDiff
 
 DEFAULT_SPEC_URL = "https://raw.githubusercontent.com/braintrustdata/braintrust-openapi/refs/heads/main/openapi/spec.json"
 OPENAI_MODEL = "gpt-4.1"
+SUMMARY_MAX_CHARS = 3500
+OPENAI_TIMEOUT_SECS = 60
+OPENAI_MAX_RETRIES = 3
+OPENAI_RETRY_BACKOFF_SECS = 2
 
 
 def _fetch_json(url: str) -> tuple[dict[str, Any], bytes]:
@@ -44,7 +49,7 @@ def _truncate_value(value: Any, limit: int = 160) -> str:
 def _collect_paths(section: Any) -> list[str]:
     if isinstance(section, dict):
         return list(section.keys())
-    if isinstance(section, (list, set, tuple)):
+    if isinstance(section, list | set | tuple):
         return list(section)
     return []
 
@@ -139,9 +144,23 @@ def _call_openai(prompt: str, model: str) -> str:
             "Authorization": f"Bearer {api_key}",
         },
     )
-    with urllib.request.urlopen(request, timeout=30) as response:
-        body = json.loads(response.read().decode())
-    return body["choices"][0]["message"]["content"].strip()
+    last_error: Exception | None = None
+    for attempt in range(1, OPENAI_MAX_RETRIES + 1):
+        try:
+            with urllib.request.urlopen(
+                request, timeout=OPENAI_TIMEOUT_SECS
+            ) as response:
+                body = json.loads(response.read().decode())
+            return body["choices"][0]["message"]["content"].strip()
+        except (TimeoutError, urllib.error.URLError, OSError, json.JSONDecodeError) as exc:
+            last_error = exc
+            if attempt == OPENAI_MAX_RETRIES:
+                break
+            time.sleep(OPENAI_RETRY_BACKOFF_SECS * attempt)
+
+    raise RuntimeError(
+        f"OpenAI request failed after {OPENAI_MAX_RETRIES} attempts: {last_error}"
+    ) from last_error
 
 
 def _fallback_summary(summary: dict[str, Any]) -> str:
@@ -190,25 +209,31 @@ def main() -> int:
         diff_summary = _build_diff_summary(diff)
         prompt = textwrap.dedent(
             f"""
-            Summarize the changes between the previous and latest Braintrust OpenAPI spec.
+            Summarize changes between the previous and latest Braintrust OpenAPI spec.
+
+            Focus on:
+            - Completely new or deleted resources, endpoints, or schemas.
+            - New required fields or breaking changes for create/update payloads.
+            - Changes that could cause migration failures or data loss.
+
+            De-emphasize:
+            - Enum expansions or relaxed optionality unless we validate values (we don't).
+            - Purely additive optional fields unless they affect creation.
 
             Provide:
-            - Key additions/removals/updates
-            - Potential impacts on the migration tool (resource names, endpoints, schemas)
-            - Suggested follow-ups (tests or code changes)
+            - A short list of top-impact changes (most important first).
+            - Explicit callout of new/deleted resources.
+            - Recommended follow-ups if any (tests or code updates).
 
             Diff summary (JSON paths, truncated):
             {_format_for_prompt(diff_summary)}
             """
         ).strip()
 
-        try:
-            summary_text = _call_openai(prompt, OPENAI_MODEL)
-        except (RuntimeError, urllib.error.URLError, KeyError, json.JSONDecodeError):
-            summary_text = _fallback_summary(diff_summary)
+        summary_text = _call_openai(prompt, OPENAI_MODEL)
 
-        if len(summary_text) > 3500:
-            summary_text = summary_text[:3497] + "..."
+        if len(summary_text) > SUMMARY_MAX_CHARS:
+            summary_text = summary_text[: SUMMARY_MAX_CHARS - 3] + "..."
 
         if args.write_updated:
             local_path.write_bytes(latest_raw)
