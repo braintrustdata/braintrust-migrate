@@ -391,7 +391,7 @@ class ResourceMigrator(ABC, Generic[T]):
             List of resources as dicts from raw API
         """
         try:
-            # Build parameters
+            # Build base parameters
             params = {}
             if project_id and not client_side_filter_field:
                 # Use server-side filtering if no client-side field specified
@@ -402,28 +402,65 @@ class ResourceMigrator(ABC, Generic[T]):
             # Convert resource_type to API path (e.g., 'datasets' -> 'dataset')
             api_path = resource_type.rstrip("s")
 
-            # Make the API call using raw_request
-            response = await client.with_retry(
-                f"list_{resource_type}",
-                lambda: client.raw_request(
-                    "GET",
-                    f"/v1/{api_path}",
-                    params=params,
-                ),
-            )
+            # Paginate through all results
+            all_resources = []
+            starting_after = None
+            page_num = 0
 
-            # Extract objects from response
-            resources = response.get("objects", [])
+            while True:
+                page_num += 1
+                page_params = {**params}
+
+                # Set a large limit to minimize number of pages
+                page_params["limit"] = 1000
+
+                if starting_after is not None:
+                    page_params["starting_after"] = starting_after
+
+                # Make the API call using raw_request
+                # Use a default parameter to capture page_params at definition time
+                response = await client.with_retry(
+                    f"list_{resource_type}",
+                    lambda p=page_params: client.raw_request(
+                        "GET",
+                        f"/v1/{api_path}",
+                        params=p,
+                    ),
+                )
+
+                # Extract objects from response
+                page_resources = response.get("objects", [])
+
+                if page_resources:
+                    all_resources.extend(page_resources)
+                    self._logger.info(
+                        f"Fetched {resource_type} page",
+                        page_num=page_num,
+                        page_size=len(page_resources),
+                        total_fetched=len(all_resources),
+                        project_id=project_id,
+                    )
+
+                    # Get the last item's ID for pagination
+                    last_item = page_resources[-1]
+                    starting_after = last_item.get("id")
+
+                    # If we got fewer items than the limit, we're done
+                    if len(page_resources) < page_params["limit"]:
+                        break
+                else:
+                    # No more results
+                    break
 
             # Apply client-side filtering if needed (for dicts)
             if project_id and client_side_filter_field:
-                resources = [
+                all_resources = [
                     resource
-                    for resource in resources
+                    for resource in all_resources
                     if resource.get(client_side_filter_field) == project_id
                 ]
 
-            return resources
+            return all_resources
 
         except Exception as e:
             self._logger.error(

@@ -66,15 +66,14 @@ class _PaginatedListClient:
     async def raw_request(
         self, method: str, path: str, *, params: dict[str, Any] | None = None, **kwargs
     ):
-        """Mock raw_request that returns all experiment dicts in one call."""
+        """Mock raw_request that properly simulates pagination."""
         assert method.upper() == "GET"
         assert path == "/v1/experiment"
 
         self.list_calls += 1
         self.call_params.append(params or {})
 
-        # Return ALL experiments from all pages in a single call
-        # (The real API would handle pagination internally)
+        # Build full list of experiments
         all_objects = []
         for page in self._all_pages:
             for exp in page:
@@ -94,7 +93,20 @@ class _PaginatedListClient:
         if project_id:
             all_objects = [e for e in all_objects if e.get("project_id") == project_id]
 
-        return {"objects": all_objects}
+        # Handle pagination with starting_after
+        starting_after = params.get("starting_after") if params else None
+        if starting_after:
+            # Find the index after the starting_after ID
+            start_idx = 0
+            for idx, obj in enumerate(all_objects):
+                if obj["id"] == starting_after:
+                    start_idx = idx + 1
+                    break
+            all_objects = all_objects[start_idx:]
+
+        # Apply limit
+        limit = params.get("limit", 1000) if params else 1000
+        return {"objects": all_objects[:limit]}
 
 
 class _PaginatedResponse:
@@ -130,13 +142,15 @@ async def test_experiment_list_paginates_through_all_pages(tmp_path: Path) -> No
 
     experiments = await migrator.list_source_resources(project_id="proj-1")
 
-    # Should have fetched all 5 experiments in one call
-    # (pagination is handled internally by the SDK)
+    # Should have fetched all 5 experiments
+    # With limit=1000, all 5 experiments fit in one page
     assert len(experiments) == 5
-    assert client.list_calls == 1  # Single call to list()
+    assert client.list_calls == 1  # Single page needed
 
     # Verify the project_id filter was passed
     assert client.call_params[0].get("project_id") == "proj-1"
+    # Verify limit was set
+    assert client.call_params[0].get("limit") == 1000
 
 
 @pytest.mark.asyncio
@@ -174,6 +188,50 @@ async def test_experiment_list_early_stop_with_created_after(tmp_path: Path) -> 
     # (In production, the API would filter by created_after)
     assert len(experiments) == 5  # All experiments returned by mock
     assert client.list_calls == 1  # Single call to list()
+
+
+@pytest.mark.asyncio
+async def test_experiment_list_paginates_large_result_sets(tmp_path: Path) -> None:
+    """Test that pagination properly fetches all experiments when there are >1000."""
+    # Create 2500 experiments to test multi-page pagination
+    all_pages = []
+    for i in range(25):
+        page = []
+        for j in range(100):
+            exp_num = i * 100 + j + 1
+            page.append(
+                _MockExperiment(
+                    f"exp-{exp_num:04d}",
+                    f"Exp {exp_num}",
+                    f"2026-01-{(20 - i):02d}T{j:02d}:00:00Z",
+                )
+            )
+        all_pages.append(page)
+
+    cfg = MigrationConfig()
+    client = _PaginatedListClient(all_pages, cfg)
+
+    migrator = ExperimentMigrator(
+        client,  # type: ignore
+        client,  # type: ignore
+        tmp_path,
+        batch_size=10,
+    )
+
+    experiments = await migrator.list_source_resources(project_id="proj-1")
+
+    # Should have fetched all 2500 experiments across 3 pages (1000 + 1000 + 500)
+    assert len(experiments) == 2500
+    assert client.list_calls == 3  # Three pages: 1000 + 1000 + 500
+
+    # Verify all calls had the correct parameters
+    assert all(params.get("project_id") == "proj-1" for params in client.call_params)
+    assert all(params.get("limit") == 1000 for params in client.call_params)
+
+    # Verify starting_after was used for subsequent pages
+    assert client.call_params[0].get("starting_after") is None
+    assert client.call_params[1].get("starting_after") == "exp-1000"
+    assert client.call_params[2].get("starting_after") == "exp-2000"
 
 
 @pytest.mark.asyncio
