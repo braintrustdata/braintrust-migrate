@@ -7,6 +7,7 @@ from .experiments import ExperimentMigrator
 from .functions import FunctionMigrator
 from .groups import GroupMigrator
 from .logs import LogsMigrator
+from .project_automations import ProjectAutomationMigrator
 from .project_scores import ProjectScoreMigrator
 from .project_tags import ProjectTagMigrator
 from .prompts import PromptMigrator
@@ -22,6 +23,7 @@ __all__ = [
     "FunctionMigrator",
     "GroupMigrator",
     "LogsMigrator",
+    "ProjectAutomationMigrator",
     "ProjectScoreMigrator",
     "ProjectTagMigrator",
     "PromptMigrator",

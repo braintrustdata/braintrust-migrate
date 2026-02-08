@@ -18,6 +18,7 @@ from braintrust_migrate.resources import (
     FunctionMigrator,
     GroupMigrator,
     LogsMigrator,
+    ProjectAutomationMigrator,
     ProjectScoreMigrator,
     ProjectTagMigrator,
     PromptMigrator,
@@ -95,6 +96,10 @@ class MigrationOrchestrator:
         ("experiments", ExperimentMigrator),
         ("logs", LogsMigrator),
         ("views", ViewMigrator),
+        (
+            "project_automations",
+            ProjectAutomationMigrator,
+        ),  # Automations (alerts, exports) - no cross-resource dependencies
         # ("acls", ACLMigrator),  # Last - depends on all other resources
     ]
 
