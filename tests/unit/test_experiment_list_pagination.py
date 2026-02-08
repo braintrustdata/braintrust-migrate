@@ -6,6 +6,7 @@ from typing import Any
 import pytest
 
 from braintrust_migrate.config import MigrationConfig
+from braintrust_migrate.resources.base import DEFAULT_LIST_PAGE_SIZE
 from braintrust_migrate.resources.experiments import ExperimentMigrator
 
 
@@ -105,7 +106,7 @@ class _PaginatedListClient:
             all_objects = all_objects[start_idx:]
 
         # Apply limit
-        limit = params.get("limit", 1000) if params else 1000
+        limit = params.get("limit", DEFAULT_LIST_PAGE_SIZE) if params else DEFAULT_LIST_PAGE_SIZE
         return {"objects": all_objects[:limit]}
 
 
@@ -143,14 +144,14 @@ async def test_experiment_list_paginates_through_all_pages(tmp_path: Path) -> No
     experiments = await migrator.list_source_resources(project_id="proj-1")
 
     # Should have fetched all 5 experiments
-    # With limit=1000, all 5 experiments fit in one page
+    # With DEFAULT_LIST_PAGE_SIZE, all 5 experiments fit in one page
     assert len(experiments) == 5
     assert client.list_calls == 1  # Single page needed
 
     # Verify the project_id filter was passed
     assert client.call_params[0].get("project_id") == "proj-1"
     # Verify limit was set
-    assert client.call_params[0].get("limit") == 1000
+    assert client.call_params[0].get("limit") == DEFAULT_LIST_PAGE_SIZE
 
 
 @pytest.mark.asyncio
@@ -226,7 +227,7 @@ async def test_experiment_list_paginates_large_result_sets(tmp_path: Path) -> No
 
     # Verify all calls had the correct parameters
     assert all(params.get("project_id") == "proj-1" for params in client.call_params)
-    assert all(params.get("limit") == 1000 for params in client.call_params)
+    assert all(params.get("limit") == DEFAULT_LIST_PAGE_SIZE for params in client.call_params)
 
     # Verify starting_after was used for subsequent pages
     assert client.call_params[0].get("starting_after") is None

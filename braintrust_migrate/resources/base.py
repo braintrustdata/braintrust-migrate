@@ -15,6 +15,9 @@ logger = structlog.get_logger(__name__)
 
 T = TypeVar("T")  # Type variable for resource data
 
+# Maximum number of resources to request per page when listing via the API.
+DEFAULT_LIST_PAGE_SIZE: int = 1000
+
 
 @dataclass(slots=True)
 class MigrationResult:
@@ -412,7 +415,7 @@ class ResourceMigrator(ABC, Generic[T]):
                 page_params = {**params}
 
                 # Set a large limit to minimize number of pages
-                page_params["limit"] = 1000
+                page_params["limit"] = DEFAULT_LIST_PAGE_SIZE
 
                 if starting_after is not None:
                     page_params["starting_after"] = starting_after
