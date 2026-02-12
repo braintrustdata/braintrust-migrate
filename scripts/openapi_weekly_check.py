@@ -23,6 +23,63 @@ OPENAI_TIMEOUT_SECS = 60
 OPENAI_MAX_RETRIES = 3
 OPENAI_RETRY_BACKOFF_SECS = 2
 
+# ---------------------------------------------------------------------------
+# Migration tool API usage context
+# ---------------------------------------------------------------------------
+# This tells the LLM exactly how the migration tool uses the Braintrust API
+# so it can accurately assess whether a spec change actually impacts the tool.
+# Update this when adding new migrators or changing API usage patterns.
+# ---------------------------------------------------------------------------
+
+TOOL_USAGE_CONTEXT = """
+## How the migration tool uses the Braintrust API
+
+### Endpoint usage
+
+The tool uses these REST endpoints:
+- GET  /v1/{resource}  — list resources (datasets, experiments, functions, prompts, etc.)
+  Always passes explicit `limit=1000` and paginates via `starting_after`. Never relies on server default limit.
+- POST /v1/{resource}  — create resources (one at a time)
+- POST /v1/project     — create/get project (only sends `name` and `description`)
+- POST /btql           — BTQL queries for streaming event pagination (logs, dataset events, experiment events)
+- POST /v1/project_logs/{id}/insert   — bulk insert log events
+- POST /v1/dataset/{id}/insert        — bulk insert dataset events
+- POST /v1/experiment/{id}/insert     — bulk insert experiment events
+
+### Schema usage (what matters for create payloads)
+
+The tool uses `openapi_utils.get_resource_create_fields()` to read the **top-level property names** from these Create* schemas and uses them as a field-name allowlist:
+- CreateDataset, CreateExperiment, CreateFunction, CreatePrompt
+- CreateProjectScore, CreateProjectTag, CreateView, CreateGroup, CreateRole
+- CreateAISecret, CreateSpanIframe, CreateProjectAutomation
+
+This is a **field-name filter only** — it checks which keys to include in the POST body.
+It does NOT validate field values, nested object structure, enum values, or required-ness.
+
+### What the tool does NOT use
+
+- ProjectSettings, remote_eval_sources — never read or written. Project creation only uses name + description.
+- TopicMapData — nested inside function_data; passed through as an opaque blob from source to destination.
+- Patch* / Update* schemas — the tool only creates, never updates.
+- Any enum validation — enum values are passed through verbatim from source to destination.
+- Server-side default for `limit` parameter — always sends explicit limit=1000.
+
+### Streaming events (logs, datasets, experiments)
+
+Events are copied via BTQL sorted pagination (sorted by `_pagination_key`).
+Insert payloads are filtered using InsertDatasetEvent / InsertExperimentEvent / InsertProjectLogsEvent
+schemas (top-level field names only). Nested fields (span_attributes, metadata, etc.) pass through as-is.
+
+### General patterns
+
+- Source data is treated as opaque — the tool reads from source and writes to destination with minimal transformation.
+- Only field-name filtering is applied (via OpenAPI Create* schemas). No value validation.
+- ID remapping is done for foreign keys (project_id, dataset_id, base_exp_id, function references).
+- The tool handles HTTP 413 (payload too large) by bisecting batches.
+- The tool handles HTTP 429 (rate limit) with exponential backoff and Retry-After.
+""".strip()
+
+
 
 def _fetch_json(url: str) -> tuple[dict[str, Any], bytes]:
     with urllib.request.urlopen(url, timeout=20) as response:
@@ -121,10 +178,10 @@ def _call_openai(prompt: str, model: str) -> str:
             {
                 "role": "system",
                 "content": (
-                    "You summarize OpenAPI spec diffs for maintainers of a migration tool. "
-                    "Focus on additions/removals/updates that impact migration resources, "
-                    "schema names, and create/update payload fields. Provide a brief impact "
-                    "assessment and recommended follow-ups."
+                    "You assess OpenAPI spec diffs for maintainers of a Braintrust migration tool. "
+                    "You have detailed context about exactly how the tool uses the API. "
+                    "Only flag changes that ACTUALLY affect the tool based on its real usage patterns. "
+                    "Be precise: say 'NO IMPACT' when the tool doesn't use the affected schema/endpoint."
                 ),
             },
             {
@@ -209,21 +266,38 @@ def main() -> int:
         diff_summary = _build_diff_summary(diff)
         prompt = textwrap.dedent(
             f"""
-            Summarize changes between the previous and latest Braintrust OpenAPI spec.
+            You are assessing OpenAPI spec changes for a Braintrust **migration tool**.
+            Your job is to determine whether each change ACTUALLY impacts the tool,
+            not whether it COULD impact a generic API consumer.
 
-            Focus on:
-            - Completely new or deleted resources, endpoints, or schemas.
-            - New required fields or breaking changes for create/update payloads.
-            - Changes that could cause migration failures or data loss.
+            {TOOL_USAGE_CONTEXT}
 
-            De-emphasize:
-            - Enum expansions or relaxed optionality unless we validate values (we don't).
-            - Purely additive optional fields unless they affect creation.
+            ---
 
-            Provide:
-            - A short list of top-impact changes (most important first).
-            - Explicit callout of new/deleted resources.
-            - Recommended follow-ups if any (tests or code updates).
+            Given the above context about how the tool uses the API, summarize the
+            following spec diff. For each change, explicitly state whether it impacts
+            the migration tool and why/why not.
+
+            Classification guide:
+            - **IMPACTS TOOL**: Change affects a Create* schema the tool uses, an endpoint
+              the tool calls, or a field the tool reads/writes. Requires code changes.
+            - **NO IMPACT**: Change is to a schema/field/endpoint the tool doesn't use,
+              or is a relaxation (removed required field, added optional field, enum expansion)
+              that makes the API more permissive.
+            - **MONITOR**: Change doesn't break anything today but could matter if the tool
+              adds support for that resource/field in the future.
+
+            Format your response as:
+
+            ### Impact Assessment
+            For each notable change: one line with [IMPACTS TOOL / NO IMPACT / MONITOR],
+            the change description, and a brief reason.
+
+            ### New/Deleted Resources
+            Any completely new or removed API endpoints or top-level schemas.
+
+            ### Action Items
+            Only list items classified as IMPACTS TOOL. If none, say "No action required."
 
             Diff summary (JSON paths, truncated):
             {_format_for_prompt(diff_summary)}

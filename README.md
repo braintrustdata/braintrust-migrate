@@ -29,6 +29,7 @@ This tool provides migration capabilities for Braintrust organizations, handling
 - **Dependency-Aware Migration**: Resources are migrated in an order that respects dependencies (see below)
 - **Organization Scoping**: AI secrets, roles, and groups migrated once at org level
 - **Batch Processing**: Configurable batch sizes for optimal performance
+- **Multi-Level Parallelization**: Concurrent resource types, concurrent items within a type, and pipelined event streaming (see [Parallelization](#parallelization) below)
 
 ### Reliability Features
 - **Retry Logic**: Adaptive retries with exponential backoff + jitter; respects `Retry-After` when rate-limited (429)
@@ -127,8 +128,16 @@ All options can be set via environment variables or CLI flags. CLI flags take pr
 | `MIGRATION_BATCH_SIZE` | — | `100` | Number of resources to process per batch |
 | `MIGRATION_RETRY_ATTEMPTS` | — | `3` | Number of retry attempts for failed operations (0 = no retries) |
 | `MIGRATION_RETRY_DELAY` | — | `1.0` | Initial retry delay in seconds (exponential backoff) |
-| `MIGRATION_MAX_CONCURRENT` | — | `10` | Maximum concurrent operations |
+| `MIGRATION_MAX_CONCURRENT` | — | `10` | Maximum concurrent **projects** (bounded project-level parallelism) |
 | `MIGRATION_CHECKPOINT_INTERVAL` | — | `50` | Write checkpoint every N successful operations |
+
+#### Parallelization Tuning
+
+| Environment Variable | CLI Flag | Default | Description |
+|---------------------|----------|---------|-------------|
+| `MIGRATION_MAX_CONCURRENT_RESOURCES` | — | `5` | Max concurrent items within a resource type (e.g. 5 experiments migrating at once). Also controls concurrent event streams for datasets/experiments. Range: 1–50 |
+| `MIGRATION_STREAMING_PIPELINE` | — | `true` | Prefetch the next BTQL page while inserting the current batch, overlapping source reads with destination writes |
+| `MIGRATION_MAX_CONCURRENT_REQUESTS` | — | `20` | Global cap on concurrent HTTP requests per client (source and destination independently). Prevents API overwhelm when multiple parallelization layers are active. Range: 1–200 |
 
 #### Streaming Migration (Logs, Experiments, Datasets)
 
@@ -140,7 +149,7 @@ These settings control BTQL-based streaming for high-volume resources.
 | `MIGRATION_EVENTS_INSERT_BATCH_SIZE` | — | `200` | Events per insert API call |
 | `MIGRATION_EVENTS_USE_SEEN_DB` | — | `true` | Use SQLite store for deduplication |
 | `MIGRATION_LOGS_FETCH_LIMIT` | `--logs-fetch-limit` | *(inherits)* | Override fetch limit for logs only |
-| `MIGRATION_LOGS_INSERT_BATCH_SIZE` | `--logs-insert-batch-size` | *(inherits)* | Override insert batch size for logs only |
+| `MIGRATION_LOGS_INSERT_BATCH_SIZE` | `--logs-insert-batch-size` | *(inherits)* | Override insert batch size for logs only |`
 
 Resource-specific overrides follow the pattern `MIGRATION_{RESOURCE}_FETCH_LIMIT`, `MIGRATION_{RESOURCE}_INSERT_BATCH_SIZE`, `MIGRATION_{RESOURCE}_USE_SEEN_DB` where `{RESOURCE}` is `LOGS`, `EXPERIMENT_EVENTS`, or `DATASET_EVENTS`.
 
@@ -292,23 +301,27 @@ braintrust-migrate validate --help
 
 ### Resource Migration Order
 
-The migration follows a dependency-aware order:
+The migration follows a dependency-aware order. Within each phase, **independent resource types run concurrently** (DAG-scheduled), and dependent types start as soon as their prerequisites finish.
 
-#### Organization-Scoped Resources (Migrated Once)
-1. **AI Secrets** - AI provider credentials (OpenAI, Anthropic, etc.)
-2. **Roles** - Organization-level role definitions  
-3. **Groups** - Organization-level user groups
+#### Organization-Scoped Resources (Migrated Once, Concurrently)
+- **AI Secrets** - AI provider credentials (OpenAI, Anthropic, etc.)
+- **Roles** - Organization-level role definitions  
+- **Groups** - Organization-level user groups
 
-#### Project-Scoped Resources (Migrated Per Project)
-4. **Datasets** - Training and evaluation data
-5. **Project Tags** - Project-level metadata tags
-6. **Span Iframes** - Custom span visualization components
-7. **Functions** - Tools, scorers, tasks, and LLMs (migrated before prompts)
-8. **Prompts** - Template definitions that can use functions as tools
-9. **Project Scores** - Scoring configurations
-10. **Experiments** - Experiment metadata + event streams (BTQL sorted pagination)
-11. **Logs** - Project logs / traces (BTQL sorted pagination)
-12. **Views** - Custom project views
+These three are independent and run in parallel.
+
+#### Project-Scoped Resources (Migrated Per Project, DAG-Scheduled)
+
+Resource types are arranged in a dependency graph. Types in the same tier run concurrently:
+
+```
+Tier 0 (no deps):      Datasets, Project Tags, Span Iframes, Logs, Project Automations
+Tier 1 (needs Tier 0): Functions, Experiments
+Tier 2 (needs Tier 1): Prompts, Project Scores
+Tier 3 (needs above):  Views
+```
+
+For example: Datasets, Project Tags, Span Iframes, Logs, and Project Automations all start at the same time. Functions and Experiments start as soon as Datasets finishes. Prompts and Project Scores start as soon as Functions finishes. Views starts once both Datasets and Experiments are done.
 
 ### Smart Dependency Handling
 
@@ -358,6 +371,102 @@ The tool uses **two-level checkpointing** for streaming resources (logs, experim
 
 On resume: skips 1-30 (done), resumes experiment 31 from saved `_pagination_key`, continues with 32-100.
 
+## Parallelization
+
+The migration tool uses **three levels of parallelization** that work together to reduce migration time. All levels are enabled by default and are controlled by the three env vars described in [Parallelization Tuning](#parallelization-tuning).
+
+### How It Works
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│ Level 1: Inter-Project (MIGRATION_MAX_CONCURRENT=10)        │
+│   Projects migrate concurrently (up to 10 at a time)        │
+│                                                             │
+│ ┌─────────────────────────────────────────────────────────┐ │
+│ │ Level 2: Inter-Resource-Type (DAG scheduler)            │ │
+│ │   Within each project, independent resource types       │ │
+│ │   (e.g. Datasets + Tags + Iframes) run concurrently.   │ │
+│ │   Dependent types wait for prerequisites to finish.     │ │
+│ │                                                         │ │
+│ │ ┌─────────────────────────────────────────────────────┐ │ │
+│ │ │ Level 3: Intra-Resource-Type                        │ │ │
+│ │ │   Within each type, individual items migrate        │ │ │
+│ │ │   concurrently (MIGRATION_MAX_CONCURRENT_RESOURCES) │ │ │
+│ │ │                                                     │ │ │
+│ │ │   For streaming resources (logs/datasets/exps):     │ │ │
+│ │ │   - Multiple event streams run in parallel          │ │ │
+│ │ │   - Each stream prefetches the next page while      │ │ │
+│ │ │     inserting the current (STREAMING_PIPELINE)      │ │ │
+│ │ └─────────────────────────────────────────────────────┘ │ │
+│ └─────────────────────────────────────────────────────────┘ │
+└─────────────────────────────────────────────────────────────┘
+```
+
+### Level Details
+
+**Inter-Project Concurrency** (`MIGRATION_MAX_CONCURRENT`, default 10)
+Multiple projects migrate at the same time. Each project runs its own DAG-scheduled resource pipeline independently. This was the only parallelism the tool had before the current changes.
+
+**Inter-Resource-Type Concurrency** (automatic, DAG-based)
+Within each project, resource types are organized in a dependency graph. Types whose dependencies are satisfied start immediately instead of waiting in a fixed sequence. For example, Datasets, Project Tags, and Span Iframes all start at the same time because they have no mutual dependencies.
+
+**Intra-Resource-Type Concurrency** (`MIGRATION_MAX_CONCURRENT_RESOURCES`, default 5)
+Within a single resource type, multiple individual items migrate concurrently. For example, if a project has 50 functions, up to 5 are created at once instead of one-by-one. For streaming resources (datasets, experiments), this also controls how many event streams run in parallel -- e.g. events for 5 datasets copy simultaneously.
+
+**Pipelined Event Streaming** (`MIGRATION_STREAMING_PIPELINE`, default true)
+For each individual event stream (logs, dataset records, experiment events), the next BTQL page is prefetched from the source while the current page's batches are being inserted into the destination. This overlaps source reads with destination writes, reducing idle time for large migrations.
+
+### Safety Mechanisms
+
+All parallelization levels are bounded by a **global HTTP request semaphore** (`MIGRATION_MAX_CONCURRENT_REQUESTS`, default 20) on each client. This prevents overwhelming the Braintrust API even when multiple parallelism layers are active simultaneously. The connection pool is automatically sized to match.
+
+State mutations (ID mappings, checkpoint files) are protected by `asyncio.Lock` so concurrent tasks don't corrupt shared data.
+
+### When to Tune
+
+| Scenario | Recommended Settings |
+|----------|---------------------|
+| **Small migration** (<5 projects, <100 resources) | Defaults work well. No tuning needed. |
+| **Many small projects** (50+ projects, small data) | Increase `MIGRATION_MAX_CONCURRENT=20` for more project-level parallelism. |
+| **Few projects with many resources** (e.g. 500 experiments in one project) | Increase `MIGRATION_MAX_CONCURRENT_RESOURCES=10` for more intra-type parallelism. |
+| **Large event streams** (TB-scale logs) | Defaults are good. Pipeline is on by default. Consider increasing `MIGRATION_MAX_CONCURRENT_REQUESTS=40` if the API can handle it. |
+| **Rate-limited API** (frequent 429s) | *Decrease* `MIGRATION_MAX_CONCURRENT_RESOURCES=2` and `MIGRATION_MAX_CONCURRENT_REQUESTS=10`. The tool handles 429s with backoff, but fewer concurrent requests reduces throttling. |
+| **Debugging or sequential run** | Set `MIGRATION_MAX_CONCURRENT_RESOURCES=1` and `MIGRATION_STREAMING_PIPELINE=false` for deterministic, sequential execution. |
+
+### Example: Tuning for a Large Migration
+
+```bash
+# .env for a large migration with many projects and big event streams
+BT_SOURCE_API_KEY=...
+BT_DEST_API_KEY=...
+
+# 15 projects at a time
+MIGRATION_MAX_CONCURRENT=15
+
+# 8 resources/event-streams per type
+MIGRATION_MAX_CONCURRENT_RESOURCES=8
+
+# Allow more HTTP connections (API can handle it)
+MIGRATION_MAX_CONCURRENT_REQUESTS=40
+
+# Pipeline is on by default, but explicit for clarity
+MIGRATION_STREAMING_PIPELINE=true
+```
+
+```bash
+# .env for a rate-limited or cautious migration
+BT_SOURCE_API_KEY=...
+BT_DEST_API_KEY=...
+
+# Conservative parallelism
+MIGRATION_MAX_CONCURRENT=5
+MIGRATION_MAX_CONCURRENT_RESOURCES=2
+MIGRATION_MAX_CONCURRENT_REQUESTS=10
+
+# Disable pipeline for simpler debugging
+MIGRATION_STREAMING_PIPELINE=false
+```
+
 ## Resource Types
 
 The following resource types are supported:
@@ -405,6 +514,13 @@ export MIGRATION_BATCH_SIZE=25
 # Increase retry delay
 export MIGRATION_RETRY_DELAY=2.0
 
+# Reduce parallelism if hitting rate limits
+export MIGRATION_MAX_CONCURRENT_RESOURCES=2
+export MIGRATION_MAX_CONCURRENT_REQUESTS=10
+
+# Disable pipelining for simpler debugging
+export MIGRATION_STREAMING_PIPELINE=false
+
 # Migrate incrementally
 braintrust-migrate migrate --resources ai_secrets,datasets
 braintrust-migrate migrate --resources prompts,functions
@@ -412,7 +528,7 @@ braintrust-migrate migrate --resources prompts,functions
 
 **4. Network Issues**
 - **Timeouts**: Increase retry attempts and delay
-- **Rate Limits**: Reduce batch size and concurrent operations; the client respects `Retry-After` when throttled (429)
+- **Rate Limits**: Reduce `MIGRATION_MAX_CONCURRENT_RESOURCES` and `MIGRATION_MAX_CONCURRENT_REQUESTS`; the client respects `Retry-After` when throttled (429)
 - **Connectivity**: Verify firewall and proxy settings
 
 > **Tip:** If you want rate-limit retries/backoff to actually happen, ensure `MIGRATION_RETRY_ATTEMPTS` is **greater than 0**. If it is set to `0`, the tool will fail fast on 429/5xx without retrying.
@@ -679,4 +795,5 @@ braintrust-migrate migrate --resources ai_secrets,datasets  # Selective migratio
 - **Dependency Order**: Functions are migrated before prompts; all dependencies are resolved via ID mapping
 - **Organization Scope**: Some resources migrated once, others per project
 - **Resume Capability**: Interrupted migrations automatically resume from checkpoints
+- **Parallelization**: Resource types, individual resources, and event streams run concurrently by default. See the [Parallelization](#parallelization) section for tuning.
 - **Not for Large-Scale Data**: This tool is not thoroughly tested for large-scale logs or experiments. Use for POC/test data only. 
