@@ -68,6 +68,9 @@ class BraintrustClient:
         self._http_client: httpx.AsyncClient | None = None
         self._logger = logger.bind(org=org_name, url=str(org_config.url))
         self._org_id: str | None = None
+        self._request_semaphore = asyncio.Semaphore(
+            int(self.migration_config.max_concurrent_requests)
+        )
 
     async def __aenter__(self) -> "BraintrustClient":
         """Async context manager entry."""
@@ -91,9 +94,13 @@ class BraintrustClient:
             self._logger.info("Connecting to Braintrust API")
 
             # Create HTTP client for requests
+            max_concurrent_requests = int(self.migration_config.max_concurrent_requests)
             self._http_client = httpx.AsyncClient(
                 timeout=httpx.Timeout(30.0),
-                limits=httpx.Limits(max_connections=20, max_keepalive_connections=5),
+                limits=httpx.Limits(
+                    max_connections=max_concurrent_requests,
+                    max_keepalive_connections=max(5, max_concurrent_requests),
+                ),
             )
 
             # Perform health check
@@ -198,6 +205,28 @@ class BraintrustClient:
         return resp
 
     async def raw_request(
+        self,
+        method: str,
+        path: str,
+        *,
+        params: dict[str, Any] | None = None,
+        json: Any | None = None,
+        timeout: float | None = None,
+    ) -> Any:
+        """Perform a raw HTTP request against the Braintrust API.
+
+        This method is concurrency-limited by a per-client request semaphore.
+        """
+        async with self._request_semaphore:
+            return await self._raw_request_inner(
+                method,
+                path,
+                params=params,
+                json=json,
+                timeout=timeout,
+            )
+
+    async def _raw_request_inner(
         self,
         method: str,
         path: str,

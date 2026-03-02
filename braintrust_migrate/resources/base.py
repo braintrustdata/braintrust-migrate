@@ -1,5 +1,6 @@
 """Abstract base class for Braintrust resource migrators."""
 
+import asyncio
 import json
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
@@ -863,18 +864,19 @@ class ResourceMigrator(ABC, Generic[T]):
 
         return resolved
 
-    async def migrate_batch(self, resources: list[T]) -> list[MigrationResult]:
+    async def migrate_batch(
+        self, resources: list[T], max_concurrent: int | None = None
+    ) -> list[MigrationResult]:
         """Migrate a batch of resources.
 
         Args:
             resources: List of resources to migrate.
+            max_concurrent: Optional concurrency cap for this batch.
 
         Returns:
             List of migration results.
         """
-        results = []
-
-        for resource in resources:
+        async def _migrate_single(resource: T) -> MigrationResult:
             source_id = None  # Initialize source_id before try block
             try:
                 source_id = self.get_resource_id(resource)
@@ -890,21 +892,18 @@ class ResourceMigrator(ABC, Generic[T]):
                         name=resource_name,
                     )
 
-                    results.append(
-                        MigrationResult(
-                            success=True,
-                            source_id=source_id,
-                            dest_id=dest_id,
-                            skipped=True,
-                            metadata={
-                                "name": resource_name,
-                                "skip_reason": "already_migrated",
-                            }
-                            if resource_name
-                            else {"skip_reason": "already_migrated"},
-                        )
+                    return MigrationResult(
+                        success=True,
+                        source_id=source_id,
+                        dest_id=dest_id,
+                        skipped=True,
+                        metadata={
+                            "name": resource_name,
+                            "skip_reason": "already_migrated",
+                        }
+                        if resource_name
+                        else {"skip_reason": "already_migrated"},
                     )
-                    continue
 
                 # Check dependencies
                 dependencies = await self.get_dependencies(resource)
@@ -916,14 +915,11 @@ class ResourceMigrator(ABC, Generic[T]):
                     except ValueError as e:
                         # This should rarely happen now with strict=False, but keep as fallback
                         self.record_failure(source_id, str(e))
-                        results.append(
-                            MigrationResult(
-                                success=False,
-                                source_id=source_id,
-                                error=str(e),
-                            )
+                        return MigrationResult(
+                            success=False,
+                            source_id=source_id,
+                            error=str(e),
                         )
-                        continue
 
                 # Perform migration
                 dest_id = await self.migrate_resource(resource)
@@ -938,13 +934,11 @@ class ResourceMigrator(ABC, Generic[T]):
                 )
 
                 self.record_success(source_id, dest_id, resource)
-                results.append(
-                    MigrationResult(
-                        success=True,
-                        source_id=source_id,
-                        dest_id=dest_id,
-                        metadata={"name": resource_name} if resource_name else {},
-                    )
+                return MigrationResult(
+                    success=True,
+                    source_id=source_id,
+                    dest_id=dest_id,
+                    metadata={"name": resource_name} if resource_name else {},
                 )
 
             except Exception as e:
@@ -952,21 +946,41 @@ class ResourceMigrator(ABC, Generic[T]):
                 # Use source_id if available, otherwise use a fallback
                 resource_id = source_id if source_id else f"unknown_{id(resource)}"
                 self.record_failure(resource_id, error_msg)
-                results.append(
-                    MigrationResult(
-                        success=False,
-                        source_id=resource_id,
-                        error=error_msg,
-                    )
+                return MigrationResult(
+                    success=False,
+                    source_id=resource_id,
+                    error=error_msg,
                 )
 
-        return results
+        if not resources:
+            return []
 
-    async def migrate_all(self, project_id: str | None = None) -> dict[str, Any]:
+        effective_max = (
+            int(max_concurrent) if max_concurrent is not None else len(resources)
+        )
+        if effective_max <= 1:
+            results: list[MigrationResult] = []
+            for resource in resources:
+                results.append(await _migrate_single(resource))
+            return results
+
+        semaphore = asyncio.Semaphore(effective_max)
+
+        async def _run_with_limit(resource: T) -> MigrationResult:
+            async with semaphore:
+                return await _migrate_single(resource)
+
+        tasks = [asyncio.create_task(_run_with_limit(r)) for r in resources]
+        return await asyncio.gather(*tasks)
+
+    async def migrate_all(
+        self, project_id: str | None = None, max_concurrent: int | None = None
+    ) -> dict[str, Any]:
         """Migrate all resources of this type.
 
         Args:
             project_id: Optional project ID to filter resources.
+            max_concurrent: Optional concurrency cap to pass to each batch.
 
         Returns:
             Summary of migration results.
@@ -1007,7 +1021,12 @@ class ResourceMigrator(ABC, Generic[T]):
                 batch_size=len(batch),
             )
 
-            batch_results = await self.migrate_batch(batch)
+            if max_concurrent is None:
+                batch_results = await self.migrate_batch(batch)
+            else:
+                batch_results = await self.migrate_batch(
+                    batch, max_concurrent=max_concurrent
+                )
 
             # Aggregate results with details
             for result in batch_results:
