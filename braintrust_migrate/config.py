@@ -226,6 +226,14 @@ class MigrationConfig(BaseModel):
         default=False,
         description="If acl_map_users is enabled and a user is missing in destination, invite them to destination org before creating user ACL.",
     )
+    group_map_users: bool = Field(
+        default=False,
+        description="Attempt to map group member_users entries between source and destination users by email.",
+    )
+    group_auto_invite_users: bool = Field(
+        default=False,
+        description="If group_map_users is enabled and a user is missing in destination, invite them to destination org before adding group membership.",
+    )
 
     @field_validator("created_after")
     def validate_created_after(cls, v: str | None) -> str | None:
@@ -245,6 +253,10 @@ class MigrationConfig(BaseModel):
         if self.acl_auto_invite_users and not self.acl_map_users:
             raise ValueError(
                 "acl_auto_invite_users requires acl_map_users to also be enabled"
+            )
+        if self.group_auto_invite_users and not self.group_map_users:
+            raise ValueError(
+                "group_auto_invite_users requires group_map_users to also be enabled"
             )
         return self
 
@@ -444,6 +456,22 @@ class Config(BaseModel):
             "y",
             "on",
         }
+        group_map_users = os.getenv("MIGRATION_GROUP_MAP_USERS", "false").lower() in {
+            "1",
+            "true",
+            "yes",
+            "y",
+            "on",
+        }
+        group_auto_invite_users = os.getenv(
+            "MIGRATION_GROUP_AUTO_INVITE_USERS", "false"
+        ).lower() in {
+            "1",
+            "true",
+            "yes",
+            "y",
+            "on",
+        }
 
         # Logging settings
         log_level = os.getenv("LOG_LEVEL", "INFO")
@@ -487,6 +515,8 @@ class Config(BaseModel):
                 attachment_max_bytes=attachment_max_bytes,
                 acl_map_users=acl_map_users,
                 acl_auto_invite_users=acl_auto_invite_users,
+                group_map_users=group_map_users,
+                group_auto_invite_users=group_auto_invite_users,
             ),
             logging=LoggingConfig(
                 level=log_level,

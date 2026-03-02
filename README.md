@@ -192,6 +192,10 @@ Resource-specific overrides follow the pattern `MIGRATION_{RESOURCE}_FETCH_LIMIT
 | — | `--config`, `-c` | *(none)* | Path to YAML/JSON configuration file |
 | `MIGRATION_COPY_ATTACHMENTS` | — | `false` | Copy Braintrust-managed attachments between orgs |
 | `MIGRATION_ATTACHMENT_MAX_BYTES` | — | `52428800` (50MB) | Maximum attachment size to copy |
+| `MIGRATION_ACL_MAP_USERS` | `--acl-map-users` | `false` | Map ACL `user_id` by matching source/destination users on email |
+| `MIGRATION_ACL_AUTO_INVITE_USERS` | `--acl-auto-invite-users` | `false` | If ACL user mapping is enabled, invite missing users and retry mapping |
+| `MIGRATION_GROUP_MAP_USERS` | `--group-map-users` | `false` | Map group `member_users` by matching source/destination users on email |
+| `MIGRATION_GROUP_AUTO_INVITE_USERS` | `--group-auto-invite-users` | `false` | If group user mapping is enabled, invite missing users and retry mapping |
 
 ---
 
@@ -358,6 +362,10 @@ After all projects finish, **ACLs** run once as a global post-project phase so A
 - **ACLs**: Migrated in a final post-project global phase after resource ID mappings are established. ACLs targeting users or unsupported object types are skipped with explicit reasons.
   - Optional user ACL mapping: set `MIGRATION_ACL_MAP_USERS=true` to map `user_id` ACLs by matching source/destination users on email.
   - Optional auto-invite fallback: set `MIGRATION_ACL_AUTO_INVITE_USERS=true` (with user mapping enabled) to invite missing users to the destination org and retry ACL user mapping.
+- **Groups**: Group definitions and `member_groups` inheritance are migrated by default.
+  - Optional group member user mapping: set `MIGRATION_GROUP_MAP_USERS=true` to map `member_users` by matching source/destination users on email.
+  - Optional auto-invite fallback: set `MIGRATION_GROUP_AUTO_INVITE_USERS=true` (with group mapping enabled) to invite missing users to destination and retry membership mapping.
+  - Caveat: group member user mapping is applied in the create-group payload. If a destination group already exists and is returned unchanged by create, this flow does not currently issue a follow-up patch to reconcile `member_users`.
 - **Agents and users**: Not supported for migration (users are org-specific; agents are not present in the codebase).
 
 ### Progress Monitoring
