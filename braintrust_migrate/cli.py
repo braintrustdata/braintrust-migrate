@@ -1174,8 +1174,6 @@ async def _run_dry_run(config: Config) -> None:
     Args:
         config: Migration configuration.
     """
-    from braintrust_migrate.orchestration import MigrationOrchestrator
-
     console.print("\n[cyan]🔍 Performing dry run validation...[/cyan]")
 
     with Progress(
@@ -1195,8 +1193,7 @@ async def _run_dry_run(config: Config) -> None:
             await _test_connectivity(config)
             progress.update(validation_task, description="✅ Connectivity validated")
 
-            # Create orchestrator to validate migration setup
-            orchestrator = MigrationOrchestrator(config)
+            # Validate migration setup configuration path.
             progress.update(
                 validation_task, description="✅ Migration orchestrator initialized"
             )
@@ -1214,9 +1211,11 @@ async def _run_dry_run(config: Config) -> None:
                 config.destination,
                 config.migration,
             ) as (source_client, dest_client):
-                # Discover projects
-                projects = await orchestrator._discover_projects(
-                    source_client, dest_client
+                # Discover projects in read-only mode (do not create missing dest projects).
+                projects = await _discover_projects_read_only(
+                    source_client,
+                    dest_client,
+                    config.project_names,
                 )
                 progress.update(
                     validation_task,
@@ -1247,6 +1246,56 @@ async def _run_dry_run(config: Config) -> None:
             progress.update(validation_task, description="❌ Dry run failed")
             console.print(f"\n[red]❌ Dry run failed: {e}[/red]")
             raise
+
+
+async def _discover_projects_read_only(
+    source_client,
+    dest_client,
+    project_names: list[str] | None = None,
+) -> list[dict[str, str]]:
+    """Discover projects without mutating destination organization.
+
+    Returns mappings with source IDs and best-effort destination IDs by name match.
+    Destination IDs are empty strings when no matching destination project exists.
+    """
+    source_projects = await source_client.with_retry(
+        "list_source_projects_read_only", lambda: source_client.list_projects()
+    )
+    dest_projects = await dest_client.with_retry(
+        "list_dest_projects_read_only", lambda: dest_client.list_projects()
+    )
+
+    source_list = [p for p in source_projects if isinstance(p, dict)]
+    dest_list = [p for p in dest_projects if isinstance(p, dict)]
+    dest_id_by_name = {
+        p.get("name"): p.get("id")
+        for p in dest_list
+        if isinstance(p.get("name"), str) and isinstance(p.get("id"), str)
+    }
+
+    selected_names = set(project_names or [])
+    mappings: list[dict[str, str]] = []
+    for project in source_list:
+        source_id = project.get("id")
+        name = project.get("name")
+        if not isinstance(source_id, str) or not source_id:
+            continue
+        if not isinstance(name, str) or not name:
+            continue
+        if selected_names and name not in selected_names:
+            continue
+
+        dest_id_raw = dest_id_by_name.get(name)
+        dest_id = dest_id_raw if isinstance(dest_id_raw, str) else ""
+        mappings.append(
+            {
+                "source_id": source_id,
+                "dest_id": dest_id,
+                "name": name,
+            }
+        )
+
+    return mappings
 
 
 async def _test_resource_discovery(
@@ -1303,7 +1352,11 @@ async def _test_resource_discovery(
 
                 # Test with first project if available
                 project_id = projects[0]["source_id"] if projects else None
-                if hasattr(migrator, "set_destination_project_id") and projects:
+                if (
+                    hasattr(migrator, "set_destination_project_id")
+                    and projects
+                    and projects[0].get("dest_id")
+                ):
                     migrator.set_destination_project_id(projects[0]["dest_id"])
 
                 # Test resource discovery (read-only)
