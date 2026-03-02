@@ -50,6 +50,22 @@ This tool provides migration capabilities for Braintrust organizations, handling
 - **API Keys** for source and destination Braintrust organizations
 - **Network Access** to Braintrust API endpoints
 
+### Stable Install (Recommended)
+
+Install a pinned release from PyPI:
+
+```bash
+pip install "braintrust-migrate==0.1.0"
+```
+
+Install from a pinned git tag:
+
+```bash
+pip install "git+https://github.com/braintrustdata/braintrust-migrate.git@v0.1.0"
+```
+
+> Avoid installing directly from `main` in production workflows.
+
 ### Quick Start
 
 ```bash
@@ -70,6 +86,14 @@ pip install -e .
 # Verify installation
 braintrust-migrate --help
 ```
+
+## Releases And Pinning
+
+- Stable releases are published as SemVer tags (`vX.Y.Z`) and PyPI versions (`X.Y.Z`).
+- `main` may contain unreleased changes.
+- Use pinned versions in automation and production migrations.
+
+Release process details are documented in [RELEASING.md](RELEASING.md).
 
 ### Development Setup
 
