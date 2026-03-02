@@ -1,6 +1,7 @@
 """Abstract base class for Braintrust resource migrators."""
 
 import asyncio
+import inspect
 import json
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
@@ -1021,7 +1022,10 @@ class ResourceMigrator(ABC, Generic[T]):
                 batch_size=len(batch),
             )
 
-            if max_concurrent is None:
+            supports_max_concurrent = (
+                "max_concurrent" in inspect.signature(self.migrate_batch).parameters
+            )
+            if max_concurrent is None or not supports_max_concurrent:
                 batch_results = await self.migrate_batch(batch)
             else:
                 batch_results = await self.migrate_batch(
