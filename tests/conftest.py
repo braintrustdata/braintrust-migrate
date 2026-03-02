@@ -1,5 +1,6 @@
 """Shared pytest fixtures for the migration tool tests."""
 
+import inspect
 from unittest.mock import AsyncMock, Mock
 
 import pytest
@@ -27,8 +28,15 @@ def migration_config() -> MigrationConfig:
 
 def _make_mock_client() -> Mock:
     client = Mock()
-    client.with_retry = AsyncMock()
-    client.raw_request = AsyncMock()
+
+    async def _with_retry(_operation_name, coro_func):
+        result = coro_func()
+        if inspect.isawaitable(result):
+            return await result
+        return result
+
+    client.with_retry = AsyncMock(side_effect=_with_retry)
+    client.raw_request = AsyncMock(return_value={"objects": []})
     return client
 
 

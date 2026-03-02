@@ -69,6 +69,14 @@ class TestMigrationConfig:
         with pytest.raises(ValueError, match="batch_size"):
             MigrationConfig(batch_size=2000)  # Above maximum
 
+    def test_acl_auto_invite_requires_acl_map_users(self):
+        """Test ACL auto-invite cannot be enabled without ACL user mapping."""
+        with pytest.raises(
+            ValueError,
+            match="acl_auto_invite_users requires acl_map_users",
+        ):
+            MigrationConfig(acl_auto_invite_users=True, acl_map_users=False)
+
 
 class TestConfig:
     """Test main configuration class."""
@@ -112,6 +120,8 @@ class TestConfigFromEnv:
         monkeypatch.setenv("BT_SOURCE_URL", "https://source.example.com")
         monkeypatch.setenv("BT_DEST_URL", "https://dest.example.com")
         monkeypatch.setenv("MIGRATION_BATCH_SIZE", "50")
+        monkeypatch.setenv("MIGRATION_ACL_MAP_USERS", "true")
+        monkeypatch.setenv("MIGRATION_ACL_AUTO_INVITE_USERS", "true")
         monkeypatch.setenv("LOG_LEVEL", "DEBUG")
 
         config = Config.from_env()
@@ -121,4 +131,6 @@ class TestConfigFromEnv:
         assert str(config.source.url) == "https://source.example.com/"
         assert str(config.destination.url) == "https://dest.example.com/"
         assert config.migration.batch_size == TEST_BATCH_SIZE
+        assert config.migration.acl_map_users is True
+        assert config.migration.acl_auto_invite_users is True
         assert config.logging.level == "DEBUG"

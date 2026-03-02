@@ -80,7 +80,7 @@ def migrate(
         typer.Option(
             "--resources",
             "-r",
-            help="Comma-separated list of resources to migrate (all,datasets,prompts,tools,agents,experiments,logs,views)",
+            help="Comma-separated list of resources to migrate (all,ai_secrets,roles,groups,datasets,project_tags,span_iframes,functions,prompts,project_scores,experiments,logs,views,acls)",
             envvar="MIGRATION_RESOURCES",
         ),
     ] = "all",
@@ -183,6 +183,26 @@ def migrate(
             envvar="MIGRATION_CREATED_BEFORE",
         ),
     ] = None,
+    acl_map_users: Annotated[
+        bool | None,
+        typer.Option(
+            "--acl-map-users/--no-acl-map-users",
+            help=(
+                "When migrating ACLs, map user_id by matching source and destination users on email."
+            ),
+            envvar="MIGRATION_ACL_MAP_USERS",
+        ),
+    ] = None,
+    acl_auto_invite_users: Annotated[
+        bool | None,
+        typer.Option(
+            "--acl-auto-invite-users/--no-acl-auto-invite-users",
+            help=(
+                "When ACL user mapping is enabled, invite missing users into destination org and retry mapping."
+            ),
+            envvar="MIGRATION_ACL_AUTO_INVITE_USERS",
+        ),
+    ] = None,
 ) -> None:
     """Migrate resources from source to destination Braintrust organization.
 
@@ -211,6 +231,8 @@ def migrate(
             logs_insert_batch_size,
             created_after,
             created_before,
+            acl_map_users,
+            acl_auto_invite_users,
         )
     )
 
@@ -228,6 +250,8 @@ async def _migrate_main(
     logs_insert_batch_size: int | None,
     created_after: str | None,
     created_before: str | None,
+    acl_map_users: bool | None,
+    acl_auto_invite_users: bool | None,
 ) -> None:
     """Async implementation of the migrate command."""
     setup_logging(log_level, log_format)
@@ -291,6 +315,10 @@ async def _migrate_main(
             config.migration.created_after = canonicalize_created_after(created_after)
         if created_before is not None:
             config.migration.created_before = canonicalize_created_before(created_before)
+        if acl_map_users is not None:
+            config.migration.acl_map_users = acl_map_users
+        if acl_auto_invite_users is not None:
+            config.migration.acl_auto_invite_users = acl_auto_invite_users
 
         logger.info(
             "Starting migration",
@@ -304,6 +332,8 @@ async def _migrate_main(
             logs_insert_batch_size=config.migration.logs_insert_batch_size,
             created_after=config.migration.created_after,
             created_before=config.migration.created_before,
+            acl_map_users=config.migration.acl_map_users,
+            acl_auto_invite_users=config.migration.acl_auto_invite_users,
             resume_run_dir=str(resume_run_dir) if resume_run_dir is not None else None,
             inferred_project=inferred_project,
         )

@@ -12,6 +12,7 @@ import structlog
 from braintrust_migrate.client import BraintrustClient, create_client_pair
 from braintrust_migrate.config import Config
 from braintrust_migrate.resources import (
+    ACLMigrator,
     AISecretMigrator,
     DatasetMigrator,
     ExperimentMigrator,
@@ -95,12 +96,18 @@ class MigrationOrchestrator:
         ("experiments", ExperimentMigrator),
         ("logs", LogsMigrator),
         ("views", ViewMigrator),
-        # ("acls", ACLMigrator),  # Last - depends on all other resources
+    ]
+
+    # Global resources that must run after both org- and project-scoped phases.
+    POST_PROJECT_GLOBAL_RESOURCES: ClassVar[list[tuple[str, type]]] = [
+        ("acls", ACLMigrator),
     ]
 
     # Combined migration order for backward compatibility and resource filtering
     MIGRATION_ORDER: ClassVar[list[tuple[str, type]]] = (
-        ORGANIZATION_SCOPED_RESOURCES + PROJECT_SCOPED_RESOURCES
+        ORGANIZATION_SCOPED_RESOURCES
+        + PROJECT_SCOPED_RESOURCES
+        + POST_PROJECT_GLOBAL_RESOURCES
     )
 
     def __init__(self, config: Config) -> None:
@@ -249,6 +256,47 @@ class MigrationOrchestrator:
                         "failed_resources", 0
                     )
                     summary["errors"].extend(project_results.get("errors", []))
+
+                # STEP 3: Migrate post-project global resources (e.g., ACLs)
+                self._logger.info("Migrating post-project global resources")
+                post_project_results = await self._migrate_post_project_global_resources(
+                    source_client,
+                    dest_client,
+                    checkpoint_dir,
+                    global_id_mappings,
+                )
+
+                # Merge into organization resource section in final report
+                org_resources = total_results.setdefault("organization_resources", {})
+                org_resources.setdefault("resources", {}).update(
+                    post_project_results.get("resources", {})
+                )
+                for key in (
+                    "total_resources",
+                    "migrated_resources",
+                    "skipped_resources",
+                    "failed_resources",
+                ):
+                    org_resources[key] = int(org_resources.get(key, 0)) + int(
+                        post_project_results.get(key, 0)
+                    )
+                org_resources.setdefault("errors", []).extend(
+                    post_project_results.get("errors", [])
+                )
+
+                summary["total_resources"] += post_project_results.get(
+                    "total_resources", 0
+                )
+                summary["migrated_resources"] += post_project_results.get(
+                    "migrated_resources", 0
+                )
+                summary["skipped_resources"] += post_project_results.get(
+                    "skipped_resources", 0
+                )
+                summary["failed_resources"] += post_project_results.get(
+                    "failed_resources", 0
+                )
+                summary["errors"].extend(post_project_results.get("errors", []))
 
         except Exception as e:
             self._logger.error("Migration failed", error=str(e))
@@ -720,6 +768,15 @@ class MigrationOrchestrator:
                 r for r in self.config.resources if r in available_project_resources
             ]
 
+    def _get_post_project_resources_to_migrate(self) -> list[str]:
+        """Get list of post-project global resource types to migrate."""
+        if "all" in self.config.resources:
+            return [name for name, _ in self.POST_PROJECT_GLOBAL_RESOURCES]
+        available_post_project_resources = {
+            name for name, _ in self.POST_PROJECT_GLOBAL_RESOURCES
+        }
+        return [r for r in self.config.resources if r in available_post_project_resources]
+
     def _get_resources_to_migrate(self) -> list[str]:
         """Get list of resource types to migrate based on configuration.
 
@@ -1138,3 +1195,83 @@ class MigrationOrchestrator:
         )
 
         return org_results
+
+    async def _migrate_post_project_global_resources(
+        self,
+        source_client: BraintrustClient,
+        dest_client: BraintrustClient,
+        checkpoint_dir: Path,
+        global_id_mappings: dict[str, str],
+    ) -> dict[str, Any]:
+        """Migrate global resources that require project-level mappings first."""
+        self._logger.info("Starting post-project global resource migration")
+
+        post_checkpoint_dir = checkpoint_dir / "post_project_global"
+        post_checkpoint_dir.mkdir(parents=True, exist_ok=True)
+
+        post_results = {
+            "resources": {},
+            "total_resources": 0,
+            "migrated_resources": 0,
+            "skipped_resources": 0,
+            "failed_resources": 0,
+            "errors": [],
+        }
+
+        resources_to_migrate = self._get_post_project_resources_to_migrate()
+        shared_dependency_cache = {}
+
+        for resource_name, migrator_class in self.POST_PROJECT_GLOBAL_RESOURCES:
+            if resource_name not in resources_to_migrate:
+                self._logger.debug(f"Skipping {resource_name} (not in migration list)")
+                continue
+
+            try:
+                self._logger.info(f"Migrating post-project resource: {resource_name}")
+                migrator = migrator_class(
+                    source_client,
+                    dest_client,
+                    post_checkpoint_dir,
+                    self.config.migration.batch_size,
+                )
+                migrator.set_destination_project_id(None)
+                migrator.update_id_mappings(global_id_mappings)
+
+                await migrator.populate_dependency_mappings(
+                    source_client,
+                    dest_client,
+                    None,
+                    shared_dependency_cache,
+                )
+
+                resource_results = await migrator.migrate_all(None)
+                global_id_mappings.update(migrator.state.id_mapping)
+
+                post_results["resources"][resource_name] = resource_results
+                post_results["total_resources"] += resource_results["total"]
+                post_results["migrated_resources"] += resource_results["migrated"]
+                post_results["skipped_resources"] += resource_results["skipped"]
+                post_results["failed_resources"] += resource_results["failed"]
+                post_results["errors"].extend(resource_results["errors"])
+
+            except Exception as e:
+                error_msg = (
+                    f"Failed to migrate post-project resource {resource_name}: {e}"
+                )
+                self._logger.error(error_msg, resource=resource_name, error=str(e))
+                post_results["errors"].append(
+                    {
+                        "resource_type": resource_name,
+                        "error": error_msg,
+                    }
+                )
+
+        self._logger.info(
+            "Completed post-project global resource migration",
+            total_resources=post_results["total_resources"],
+            migrated=post_results["migrated_resources"],
+            skipped=post_results["skipped_resources"],
+            failed=post_results["failed_resources"],
+        )
+
+        return post_results

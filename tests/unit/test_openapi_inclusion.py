@@ -129,6 +129,22 @@ class TestOpenAPIInclusion:
 
         assert allowed == expected_allowed
 
+    def test_openapi_acl_field_extraction_accuracy(self):
+        """Test ACL create fields are resolved via AclItem special-case mapping."""
+        allowed = get_resource_create_fields("ACL")
+
+        expected_allowed = {
+            "object_type",
+            "object_id",
+            "user_id",
+            "group_id",
+            "permission",
+            "restrict_object_type",
+            "role_id",
+        }
+
+        assert allowed == expected_allowed
+
     def test_openapi_handles_missing_schema_gracefully(self):
         """Test that missing schemas are handled gracefully."""
         # Try to get fields for a non-existent schema

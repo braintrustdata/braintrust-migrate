@@ -91,6 +91,7 @@ class OpenAPISchemaManager:
             "Log": "InsertProjectLogsEvent",
             "ExperimentEvent": "InsertExperimentEvent",
             "DatasetEvent": "InsertDatasetEvent",
+            "ACL": "AclItem",
         }
 
         create_schema_name = special_cases.get(resource_type, f"Create{resource_type}")

@@ -323,13 +323,17 @@ Tier 3 (needs above):  Views
 
 For example: Datasets, Project Tags, Span Iframes, Logs, and Project Automations all start at the same time. Functions and Experiments start as soon as Datasets finishes. Prompts and Project Scores start as soon as Functions finishes. Views starts once both Datasets and Experiments are done.
 
+After all projects finish, **ACLs** run once as a global post-project phase so ACL object references can be remapped using the complete source→destination ID map.
+
 ### Smart Dependency Handling
 
 - **Functions are migrated before prompts** to ensure all function references in prompts can be resolved.
 - **Experiments** handle dependencies on datasets and other experiments (via `base_exp_id`) in a single pass with dependency-aware ordering.
 - **ID mapping and dependency resolution** are used throughout to ensure references are updated to the new organization/project.
 - **Prompts** are migrated in a single pass; prompt origins and tool/function references are remapped via ID mappings.
-- **ACLs**: Support is present in the codebase but may be experimental or disabled by default.
+- **ACLs**: Migrated in a final post-project global phase after resource ID mappings are established. ACLs targeting users or unsupported object types are skipped with explicit reasons.
+  - Optional user ACL mapping: set `MIGRATION_ACL_MAP_USERS=true` to map `user_id` ACLs by matching source/destination users on email.
+  - Optional auto-invite fallback: set `MIGRATION_ACL_AUTO_INVITE_USERS=true` (with user mapping enabled) to invite missing users to the destination org and retry ACL user mapping.
 - **Agents and users**: Not supported for migration (users are org-specific; agents are not present in the codebase).
 
 ### Progress Monitoring
@@ -483,7 +487,7 @@ The following resource types are supported:
 - **Experiments**
 - **Logs**
 - **Views**
-- **ACLs** (experimental; may be disabled)
+- **ACLs** (post-project global phase; unsupported object types are skipped, and user ACLs are skipped only when user mapping is disabled or unresolved)
 
 > **Note:** Agents and users are not supported for migration.
 

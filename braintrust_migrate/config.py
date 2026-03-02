@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import cast
 
 from dotenv import load_dotenv
-from pydantic import BaseModel, Field, HttpUrl, field_validator
+from pydantic import BaseModel, Field, HttpUrl, field_validator, model_validator
 
 # Load environment variables from .env file if it exists
 load_dotenv()
@@ -218,6 +218,14 @@ class MigrationConfig(BaseModel):
         le=2_000_000_000,
         description="Maximum size (bytes) of a single attachment to copy. Larger attachments will error/skip depending on migrator behavior.",
     )
+    acl_map_users: bool = Field(
+        default=False,
+        description="Attempt to map ACL user_id entries between source and destination users by email.",
+    )
+    acl_auto_invite_users: bool = Field(
+        default=False,
+        description="If acl_map_users is enabled and a user is missing in destination, invite them to destination org before creating user ACL.",
+    )
 
     @field_validator("created_after")
     def validate_created_after(cls, v: str | None) -> str | None:
@@ -230,6 +238,15 @@ class MigrationConfig(BaseModel):
         if v is None:
             return None
         return canonicalize_created_before(v)
+
+    @model_validator(mode="after")
+    def validate_acl_user_mapping_flags(self) -> "MigrationConfig":
+        """Ensure ACL auto-invite is only enabled with user mapping."""
+        if self.acl_auto_invite_users and not self.acl_map_users:
+            raise ValueError(
+                "acl_auto_invite_users requires acl_map_users to also be enabled"
+            )
+        return self
 
 
 class LoggingConfig(BaseModel):
@@ -411,6 +428,22 @@ class Config(BaseModel):
         attachment_max_bytes = int(
             os.getenv("MIGRATION_ATTACHMENT_MAX_BYTES", str(50 * 1024 * 1024))
         )
+        acl_map_users = os.getenv("MIGRATION_ACL_MAP_USERS", "false").lower() in {
+            "1",
+            "true",
+            "yes",
+            "y",
+            "on",
+        }
+        acl_auto_invite_users = os.getenv(
+            "MIGRATION_ACL_AUTO_INVITE_USERS", "false"
+        ).lower() in {
+            "1",
+            "true",
+            "yes",
+            "y",
+            "on",
+        }
 
         # Logging settings
         log_level = os.getenv("LOG_LEVEL", "INFO")
@@ -452,6 +485,8 @@ class Config(BaseModel):
                 dataset_events_use_seen_db=dataset_events_use_seen_db,
                 copy_attachments=copy_attachments,
                 attachment_max_bytes=attachment_max_bytes,
+                acl_map_users=acl_map_users,
+                acl_auto_invite_users=acl_auto_invite_users,
             ),
             logging=LoggingConfig(
                 level=log_level,

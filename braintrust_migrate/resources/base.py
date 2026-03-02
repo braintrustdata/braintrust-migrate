@@ -682,7 +682,10 @@ class ResourceMigrator(ABC, Generic[T]):
                 self._dependency_cache[dest_cache_key] = dest_resources
 
             # Look for a matching resource in destination by name
-            source_name = getattr(source_resource, "name", None)
+            if type(source_resource) is dict:
+                source_name = source_resource.get("name")
+            else:
+                source_name = getattr(source_resource, "name", None)
             if not source_name:
                 self._logger.warning(
                     "Source dependency resource has no name field for matching",
@@ -692,9 +695,15 @@ class ResourceMigrator(ABC, Generic[T]):
                 return None
 
             for dest_resource in dest_resources:
-                dest_name = getattr(dest_resource, "name", None)
+                if type(dest_resource) is dict:
+                    dest_name = dest_resource.get("name")
+                    dest_id = dest_resource.get("id")
+                else:
+                    dest_name = getattr(dest_resource, "name", None)
+                    dest_id = getattr(dest_resource, "id", None)
                 if dest_name == source_name:
-                    dest_id = dest_resource.id
+                    if not isinstance(dest_id, str) or not dest_id:
+                        continue
                     # Add to mapping
                     self.state.id_mapping[dependency_id] = dest_id
                     self._save_state()
@@ -713,7 +722,10 @@ class ResourceMigrator(ABC, Generic[T]):
                 dependency_id=dependency_id,
                 source_name=source_name,
                 available_dest_names=[
-                    getattr(r, "name", None) for r in dest_resources[:5]
+                    r.get("name")
+                    if type(r) is dict
+                    else getattr(r, "name", None)
+                    for r in dest_resources[:5]
                 ],  # Show first 5 destination names
                 total_dest_resources=len(dest_resources),
             )
