@@ -34,6 +34,21 @@ MAX_SUMMARY_ITEMS_PER_REASON: int = 10
 
 T = TypeVar("T")
 
+# Project-scoped resource dependency graph used by DAG scheduler unit tests.
+# This graph is intentionally kept as module-level compatibility surface.
+RESOURCE_TYPE_DEPENDENCIES: dict[str, set[str]] = {
+    "datasets": set(),
+    "project_tags": set(),
+    "span_iframes": set(),
+    "logs": set(),
+    "project_automations": set(),
+    "functions": {"datasets"},
+    "experiments": {"datasets"},
+    "prompts": {"functions"},
+    "project_scores": {"functions"},
+    "views": {"datasets", "experiments"},
+}
+
 
 async def _gather_with_concurrency(
     coros: Sequence[Awaitable[T]], *, max_concurrent: int
@@ -53,6 +68,59 @@ async def _gather_with_concurrency(
         list[T | Exception],
         await asyncio.gather(*(_run(c) for c in coros), return_exceptions=True),
     )
+
+
+async def _run_dag_schedule(
+    resources: Sequence[str],
+    run_fn: Callable[[str], Awaitable[None]],
+) -> None:
+    """Run resources in dependency order with per-tier concurrency.
+
+    Dependencies not present in `resources` are ignored. A failed resource causes
+    dependents to be skipped; the first raised exception is re-raised after all
+    runnable resources complete.
+    """
+    run_set = set(resources)
+    if not run_set:
+        return
+
+    dep_graph: dict[str, set[str]] = {
+        name: RESOURCE_TYPE_DEPENDENCIES.get(name, set()) & run_set
+        for name in run_set
+    }
+
+    completed: set[str] = set()
+    failed: set[str] = set()
+    pending: set[str] = set(run_set)
+    first_error: Exception | None = None
+
+    while pending:
+        ready = [
+            name
+            for name in pending
+            if dep_graph.get(name, set()).issubset(completed)
+        ]
+        if not ready:
+            break
+
+        tier_results = await asyncio.gather(
+            *(run_fn(name) for name in ready),
+            return_exceptions=True,
+        )
+
+        for name, result in zip(ready, tier_results, strict=True):
+            pending.discard(name)
+            if isinstance(result, Exception):
+                failed.add(name)
+                if first_error is None:
+                    first_error = result
+            else:
+                completed.add(name)
+
+    # Drop resources that cannot run due to failed/missing prerequisites.
+    # These are intentionally skipped rather than treated as direct failures.
+    if first_error is not None:
+        raise first_error
 
 
 class MigrationOrchestrator:
