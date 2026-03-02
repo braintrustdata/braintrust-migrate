@@ -203,6 +203,26 @@ def migrate(
             envvar="MIGRATION_ACL_AUTO_INVITE_USERS",
         ),
     ] = None,
+    group_map_users: Annotated[
+        bool | None,
+        typer.Option(
+            "--group-map-users/--no-group-map-users",
+            help=(
+                "When migrating groups, map member_users by matching source and destination users on email."
+            ),
+            envvar="MIGRATION_GROUP_MAP_USERS",
+        ),
+    ] = None,
+    group_auto_invite_users: Annotated[
+        bool | None,
+        typer.Option(
+            "--group-auto-invite-users/--no-group-auto-invite-users",
+            help=(
+                "When group user mapping is enabled, invite missing users into destination org and retry mapping."
+            ),
+            envvar="MIGRATION_GROUP_AUTO_INVITE_USERS",
+        ),
+    ] = None,
 ) -> None:
     """Migrate resources from source to destination Braintrust organization.
 
@@ -233,6 +253,8 @@ def migrate(
             created_before,
             acl_map_users,
             acl_auto_invite_users,
+            group_map_users,
+            group_auto_invite_users,
         )
     )
 
@@ -252,6 +274,8 @@ async def _migrate_main(
     created_before: str | None,
     acl_map_users: bool | None,
     acl_auto_invite_users: bool | None,
+    group_map_users: bool | None,
+    group_auto_invite_users: bool | None,
 ) -> None:
     """Async implementation of the migrate command."""
     setup_logging(log_level, log_format)
@@ -319,6 +343,10 @@ async def _migrate_main(
             config.migration.acl_map_users = acl_map_users
         if acl_auto_invite_users is not None:
             config.migration.acl_auto_invite_users = acl_auto_invite_users
+        if group_map_users is not None:
+            config.migration.group_map_users = group_map_users
+        if group_auto_invite_users is not None:
+            config.migration.group_auto_invite_users = group_auto_invite_users
 
         logger.info(
             "Starting migration",
@@ -334,6 +362,8 @@ async def _migrate_main(
             created_before=config.migration.created_before,
             acl_map_users=config.migration.acl_map_users,
             acl_auto_invite_users=config.migration.acl_auto_invite_users,
+            group_map_users=config.migration.group_map_users,
+            group_auto_invite_users=config.migration.group_auto_invite_users,
             resume_run_dir=str(resume_run_dir) if resume_run_dir is not None else None,
             inferred_project=inferred_project,
         )

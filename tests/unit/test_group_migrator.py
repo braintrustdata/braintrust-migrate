@@ -4,6 +4,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
+from braintrust_migrate.config import MigrationConfig
 from braintrust_migrate.resources.groups import GroupMigrator
 
 
@@ -272,6 +273,77 @@ class TestGroupMigrator:
 
         # Should succeed - member_users are logged and skipped
         assert result == "new-group-no-users"
+
+    async def test_migrate_resource_with_member_users_mapped_by_email(
+        self,
+        mock_source_client,
+        mock_dest_client,
+        temp_checkpoint_dir,
+        group_with_inheritance,
+    ):
+        """Test member_users are mapped by email when group mapping is enabled."""
+        mock_source_client.migration_config = MigrationConfig(group_map_users=True)
+        mock_source_client.raw_request = AsyncMock(
+            side_effect=[
+                {"id": "user-123", "email": "analyst@example.com"},
+                {"id": "user-456", "email": "reviewer@example.com"},
+            ]
+        )
+        mock_dest_client.raw_request = AsyncMock(
+            side_effect=[
+                {"objects": [{"id": "dest-user-1", "email": "analyst@example.com"}]},
+                {"objects": [{"id": "dest-user-2", "email": "reviewer@example.com"}]},
+                {"id": "new-group-with-users", "name": "Child Group"},
+            ]
+        )
+
+        migrator = GroupMigrator(
+            mock_source_client, mock_dest_client, temp_checkpoint_dir
+        )
+
+        result = await migrator.migrate_resource(group_with_inheritance)
+
+        assert result == "new-group-with-users"
+        create_call = mock_dest_client.raw_request.call_args_list[-1]
+        payload = create_call.kwargs["json"]
+        assert payload["member_users"] == ["dest-user-1", "dest-user-2"]
+        assert migrator.state.id_mapping["user-123"] == "dest-user-1"
+        assert migrator.state.id_mapping["user-456"] == "dest-user-2"
+
+    async def test_migrate_resource_with_member_users_auto_invite(
+        self,
+        mock_source_client,
+        mock_dest_client,
+        temp_checkpoint_dir,
+        group_without_inheritance,
+    ):
+        """Test group member auto-invite fallback when destination user is missing."""
+        mock_source_client.migration_config = MigrationConfig(
+            group_map_users=True,
+            group_auto_invite_users=True,
+        )
+        mock_source_client.raw_request = AsyncMock(
+            return_value={"id": "user-123", "email": "newuser@example.com"}
+        )
+        mock_dest_client.raw_request = AsyncMock(
+            side_effect=[
+                {"objects": []},  # initial lookup
+                {"status": "success"},  # invite
+                {"objects": [{"id": "dest-user-321", "email": "newuser@example.com"}]},  # lookup after invite
+                {"id": "new-group-invite", "name": "Independent Group"},  # create group
+            ]
+        )
+
+        migrator = GroupMigrator(
+            mock_source_client, mock_dest_client, temp_checkpoint_dir
+        )
+
+        result = await migrator.migrate_resource(group_without_inheritance)
+
+        assert result == "new-group-invite"
+        create_call = mock_dest_client.raw_request.call_args_list[-1]
+        payload = create_call.kwargs["json"]
+        assert payload["member_users"] == ["dest-user-321"]
 
     async def test_migrate_resource_creation_error(
         self,

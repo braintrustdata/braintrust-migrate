@@ -77,6 +77,14 @@ class TestMigrationConfig:
         ):
             MigrationConfig(acl_auto_invite_users=True, acl_map_users=False)
 
+    def test_group_auto_invite_requires_group_map_users(self):
+        """Test group auto-invite cannot be enabled without group user mapping."""
+        with pytest.raises(
+            ValueError,
+            match="group_auto_invite_users requires group_map_users",
+        ):
+            MigrationConfig(group_auto_invite_users=True, group_map_users=False)
+
 
 class TestConfig:
     """Test main configuration class."""
@@ -122,6 +130,8 @@ class TestConfigFromEnv:
         monkeypatch.setenv("MIGRATION_BATCH_SIZE", "50")
         monkeypatch.setenv("MIGRATION_ACL_MAP_USERS", "true")
         monkeypatch.setenv("MIGRATION_ACL_AUTO_INVITE_USERS", "true")
+        monkeypatch.setenv("MIGRATION_GROUP_MAP_USERS", "true")
+        monkeypatch.setenv("MIGRATION_GROUP_AUTO_INVITE_USERS", "true")
         monkeypatch.setenv("LOG_LEVEL", "DEBUG")
 
         config = Config.from_env()
@@ -133,4 +143,6 @@ class TestConfigFromEnv:
         assert config.migration.batch_size == TEST_BATCH_SIZE
         assert config.migration.acl_map_users is True
         assert config.migration.acl_auto_invite_users is True
+        assert config.migration.group_map_users is True
+        assert config.migration.group_auto_invite_users is True
         assert config.logging.level == "DEBUG"
