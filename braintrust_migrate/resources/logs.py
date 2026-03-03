@@ -406,7 +406,10 @@ class LogsMigrator(ResourceMigrator[dict[str, Any]]):
                 cursor=cursor,
             )
 
-    async def migrate_all(self, project_id: str | None = None) -> dict[str, Any]:
+    async def migrate_all(
+        self, project_id: str | None = None, max_concurrent: int | None = None
+    ) -> dict[str, Any]:
+        _ = max_concurrent
         if not project_id:
             return {
                 "resource_type": self.resource_name,
