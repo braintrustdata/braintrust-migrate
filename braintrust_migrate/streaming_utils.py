@@ -199,6 +199,7 @@ async def stream_btql_sorted_events(
     incr_skipped_deleted: Callable[[int], None] | None,
     incr_skipped_seen: Callable[[int], None] | None,
     incr_attachments_copied: Callable[[int], None] | None,
+    pipeline: bool = False,
     # Optional progress hooks
     hooks: StreamHooks | None = None,
 ) -> None:
@@ -214,6 +215,7 @@ async def stream_btql_sorted_events(
     - Advancing pagination key only after successful inserts
     """
 
+    _ = pipeline
     page_num = 0
     while True:
         page_num += 1

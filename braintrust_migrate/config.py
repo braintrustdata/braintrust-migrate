@@ -97,6 +97,22 @@ class MigrationConfig(BaseModel):
     max_concurrent: int = Field(
         default=10, ge=1, le=50, description="Maximum number of concurrent operations"
     )
+    max_concurrent_resources: int = Field(
+        default=5,
+        ge=1,
+        le=50,
+        description="Maximum number of resources migrated concurrently within a batch",
+    )
+    streaming_pipeline: bool = Field(
+        default=True,
+        description="Enable pipelined page prefetch during streaming event migrations",
+    )
+    max_concurrent_requests: int = Field(
+        default=20,
+        ge=1,
+        le=200,
+        description="Maximum number of concurrent in-flight HTTP requests per API client",
+    )
     checkpoint_interval: int = Field(
         default=50, ge=1, description="Write checkpoint every N successful operations"
     )
@@ -336,6 +352,19 @@ class Config(BaseModel):
         retry_attempts = int(os.getenv("MIGRATION_RETRY_ATTEMPTS", "3"))
         retry_delay = float(os.getenv("MIGRATION_RETRY_DELAY", "1.0"))
         max_concurrent = int(os.getenv("MIGRATION_MAX_CONCURRENT", "10"))
+        max_concurrent_resources = int(
+            os.getenv("MIGRATION_MAX_CONCURRENT_RESOURCES", "5")
+        )
+        streaming_pipeline = os.getenv("MIGRATION_STREAMING_PIPELINE", "true").lower() in {
+            "1",
+            "true",
+            "yes",
+            "y",
+            "on",
+        }
+        max_concurrent_requests = int(
+            os.getenv("MIGRATION_MAX_CONCURRENT_REQUESTS", "20")
+        )
         checkpoint_interval = int(os.getenv("MIGRATION_CHECKPOINT_INTERVAL", "50"))
 
         insert_max_request_bytes = int(
@@ -494,6 +523,9 @@ class Config(BaseModel):
                 retry_attempts=retry_attempts,
                 retry_delay=retry_delay,
                 max_concurrent=max_concurrent,
+                max_concurrent_resources=max_concurrent_resources,
+                streaming_pipeline=streaming_pipeline,
+                max_concurrent_requests=max_concurrent_requests,
                 checkpoint_interval=checkpoint_interval,
                 insert_max_request_bytes=insert_max_request_bytes,
                 insert_request_headroom_ratio=insert_request_headroom_ratio,

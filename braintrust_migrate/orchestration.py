@@ -699,7 +699,12 @@ class MigrationOrchestrator:
                 )
 
                 # Perform migration
-                resource_results = await migrator.migrate_all(source_project_id)
+                resource_results = await migrator.migrate_all(
+                    source_project_id,
+                    max_concurrent=int(
+                        self.config.migration.max_concurrent_resources
+                    ),
+                )
 
                 # Collect ID mappings from this migrator and add to global registry
                 new_mappings = {
@@ -1208,7 +1213,12 @@ class MigrationOrchestrator:
                 )
 
                 # Perform migration (project_id=None for org-scoped)
-                resource_results = await migrator.migrate_all(None)
+                resource_results = await migrator.migrate_all(
+                    None,
+                    max_concurrent=int(
+                        self.config.migration.max_concurrent_resources
+                    ),
+                )
 
                 # Collect ID mappings from this migrator and add to global registry
                 new_mappings = {
@@ -1312,7 +1322,12 @@ class MigrationOrchestrator:
                     shared_dependency_cache,
                 )
 
-                resource_results = await migrator.migrate_all(None)
+                resource_results = await migrator.migrate_all(
+                    None,
+                    max_concurrent=int(
+                        self.config.migration.max_concurrent_resources
+                    ),
+                )
                 global_id_mappings.update(migrator.state.id_mapping)
 
                 post_results["resources"][resource_name] = resource_results
