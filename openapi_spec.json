@@ -285,6 +285,10 @@
         "type": "string",
         "description": "Retrieve prompt at a specific version.\n\nThe version id can either be a transaction id (e.g. '1000192656880881099') or a version identifier (e.g. '81cd05ee665fdfb3')."
       },
+      "PromptEnvironment": {
+        "type": "string",
+        "description": "Filter by environment slug. Cannot be used together with `version`.\n\nFor `GET /v1/prompt`, environment resolution currently requires the request to match a single prompt. If multiple prompts match, the endpoint returns `400` (for example when `limit=1` is not set). Use `limit=1` or other filters (for example `slug`, `project_id`) to narrow results."
+      },
       "SummarizeScores": {
         "type": "boolean",
         "nullable": true,
@@ -514,6 +518,7 @@
           "classifier",
           "tag",
           "parameters",
+          "sandbox",
           null
         ],
         "default": "scorer",
@@ -4212,6 +4217,7 @@
           "classifier",
           "tag",
           "parameters",
+          "sandbox",
           null
         ]
       },
@@ -4945,6 +4951,330 @@
         ],
         "description": "The object type that the retention policy applies to"
       },
+      "TopicMapFunctionAutomation": {
+        "type": "object",
+        "properties": {
+          "function": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/SavedFunctionId"
+              },
+              {
+                "anyOf": [
+                  {
+                    "type": "object",
+                    "properties": {
+                      "type": {
+                        "type": "string",
+                        "enum": [
+                          "function"
+                        ]
+                      },
+                      "id": {
+                        "type": "string"
+                      },
+                      "version": {
+                        "type": "string",
+                        "description": "The version of the function"
+                      }
+                    },
+                    "required": [
+                      "type",
+                      "id"
+                    ],
+                    "title": "function"
+                  },
+                  {
+                    "type": "object",
+                    "properties": {
+                      "type": {
+                        "type": "string",
+                        "enum": [
+                          "global"
+                        ]
+                      },
+                      "name": {
+                        "type": "string"
+                      },
+                      "function_type": {
+                        "$ref": "#/components/schemas/FunctionTypeEnum"
+                      }
+                    },
+                    "required": [
+                      "type",
+                      "name"
+                    ],
+                    "title": "global"
+                  }
+                ],
+                "description": "Topic map function"
+              }
+            ]
+          },
+          "btql_filter": {
+            "type": "string",
+            "nullable": true,
+            "description": "Per-topic-map BTQL filter. For trace scope, a topic map runs when max(filter) over the trace is truthy. For span scope, it runs when the current span matches."
+          }
+        },
+        "required": [
+          "function"
+        ]
+      },
+      "SpanScope": {
+        "type": "object",
+        "properties": {
+          "type": {
+            "type": "string",
+            "enum": [
+              "span"
+            ]
+          }
+        },
+        "required": [
+          "type"
+        ],
+        "description": "Process individual spans"
+      },
+      "TraceScope": {
+        "type": "object",
+        "properties": {
+          "type": {
+            "type": "string",
+            "enum": [
+              "trace"
+            ]
+          },
+          "idle_seconds": {
+            "type": "number",
+            "description": "Consider trace complete after this many seconds of inactivity (default: 30)"
+          }
+        },
+        "required": [
+          "type"
+        ],
+        "description": "Process entire traces (all spans sharing the same root_span_id)"
+      },
+      "GroupScope": {
+        "type": "object",
+        "properties": {
+          "type": {
+            "type": "string",
+            "enum": [
+              "group"
+            ]
+          },
+          "group_by": {
+            "type": "string",
+            "description": "Field path to group by, e.g. metadata.session_id"
+          },
+          "idle_seconds": {
+            "type": "number",
+            "description": "Optional: trigger after this many seconds of inactivity"
+          }
+        },
+        "required": [
+          "type",
+          "group_by"
+        ],
+        "description": "Process spans/traces grouped by a field (e.g., session_id)"
+      },
+      "TopicAutomationDataScope": {
+        "anyOf": [
+          {
+            "type": "object",
+            "properties": {
+              "type": {
+                "type": "string",
+                "enum": [
+                  "project_logs"
+                ]
+              }
+            },
+            "required": [
+              "type"
+            ]
+          },
+          {
+            "type": "object",
+            "properties": {
+              "type": {
+                "type": "string",
+                "enum": [
+                  "project_experiments"
+                ]
+              }
+            },
+            "required": [
+              "type"
+            ]
+          },
+          {
+            "type": "object",
+            "properties": {
+              "type": {
+                "type": "string",
+                "enum": [
+                  "experiment"
+                ]
+              },
+              "experiment_id": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "experiment_id"
+            ]
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "description": "Optional data scope for topic automation."
+      },
+      "TopicAutomationConfig": {
+        "type": "object",
+        "properties": {
+          "event_type": {
+            "type": "string",
+            "enum": [
+              "topic"
+            ],
+            "description": "The type of automation."
+          },
+          "sampling_rate": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 1,
+            "description": "The sampling rate for topic automation"
+          },
+          "facet_functions": {
+            "type": "array",
+            "items": {
+              "allOf": [
+                {
+                  "$ref": "#/components/schemas/SavedFunctionId"
+                },
+                {
+                  "anyOf": [
+                    {
+                      "type": "object",
+                      "properties": {
+                        "type": {
+                          "type": "string",
+                          "enum": [
+                            "function"
+                          ]
+                        },
+                        "id": {
+                          "type": "string"
+                        },
+                        "version": {
+                          "type": "string",
+                          "description": "The version of the function"
+                        }
+                      },
+                      "required": [
+                        "type",
+                        "id"
+                      ],
+                      "title": "function"
+                    },
+                    {
+                      "type": "object",
+                      "properties": {
+                        "type": {
+                          "type": "string",
+                          "enum": [
+                            "global"
+                          ]
+                        },
+                        "name": {
+                          "type": "string"
+                        },
+                        "function_type": {
+                          "$ref": "#/components/schemas/FunctionTypeEnum"
+                        }
+                      },
+                      "required": [
+                        "type",
+                        "name"
+                      ],
+                      "title": "global"
+                    }
+                  ]
+                }
+              ]
+            },
+            "description": "Facet functions used by the topic automation"
+          },
+          "topic_map_functions": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/TopicMapFunctionAutomation"
+            },
+            "description": "Topic map functions with optional per-topic-map filters"
+          },
+          "scope": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/SpanScope"
+              },
+              {
+                "$ref": "#/components/schemas/TraceScope"
+              },
+              {
+                "$ref": "#/components/schemas/GroupScope"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Execution scope for topic automation. Defaults to span-level execution."
+          },
+          "data_scope": {
+            "$ref": "#/components/schemas/TopicAutomationDataScope"
+          },
+          "btql_filter": {
+            "type": "string",
+            "nullable": true,
+            "description": "Optional BTQL filter applied before topic automation."
+          },
+          "backfill_time_range": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "from": {
+                    "type": "string"
+                  },
+                  "to": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "from",
+                  "to"
+                ]
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Optional default time range for backfill operations."
+          }
+        },
+        "required": [
+          "event_type",
+          "sampling_rate",
+          "facet_functions",
+          "topic_map_functions"
+        ]
+      },
       "ProjectAutomation": {
         "type": "object",
         "properties": {
@@ -5287,6 +5617,9 @@
                   "event_type",
                   "action"
                 ]
+              },
+              {
+                "$ref": "#/components/schemas/TopicAutomationConfig"
               }
             ],
             "description": "The configuration for the automation rule"
@@ -5624,6 +5957,9 @@
                   "event_type",
                   "action"
                 ]
+              },
+              {
+                "$ref": "#/components/schemas/TopicAutomationConfig"
               }
             ],
             "description": "The configuration for the automation rule"
@@ -5958,6 +6294,9 @@
                 ]
               },
               {
+                "$ref": "#/components/schemas/TopicAutomationConfig"
+              },
+              {
                 "type": "null"
               }
             ],
@@ -6016,64 +6355,6 @@
             "type": "null"
           }
         ]
-      },
-      "SpanScope": {
-        "type": "object",
-        "properties": {
-          "type": {
-            "type": "string",
-            "enum": [
-              "span"
-            ]
-          }
-        },
-        "required": [
-          "type"
-        ],
-        "description": "Process individual spans"
-      },
-      "TraceScope": {
-        "type": "object",
-        "properties": {
-          "type": {
-            "type": "string",
-            "enum": [
-              "trace"
-            ]
-          },
-          "idle_seconds": {
-            "type": "number",
-            "description": "Consider trace complete after this many seconds of inactivity (default: 30)"
-          }
-        },
-        "required": [
-          "type"
-        ],
-        "description": "Process entire traces (all spans sharing the same root_span_id)"
-      },
-      "GroupScope": {
-        "type": "object",
-        "properties": {
-          "type": {
-            "type": "string",
-            "enum": [
-              "group"
-            ]
-          },
-          "group_by": {
-            "type": "string",
-            "description": "Field path to group by, e.g. metadata.session_id"
-          },
-          "idle_seconds": {
-            "type": "number",
-            "description": "Optional: trigger after this many seconds of inactivity"
-          }
-        },
-        "required": [
-          "type",
-          "group_by"
-        ],
-        "description": "Process spans/traces grouped by a field (e.g., session_id)"
       },
       "OnlineScoreConfig": {
         "type": "object",
@@ -6827,11 +7108,86 @@
                   "index"
                 ],
                 "title": "function"
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "type": {
+                    "type": "string",
+                    "enum": [
+                      "sandbox"
+                    ]
+                  },
+                  "sandbox_spec": {
+                    "oneOf": [
+                      {
+                        "type": "object",
+                        "properties": {
+                          "provider": {
+                            "type": "string",
+                            "enum": [
+                              "modal"
+                            ]
+                          },
+                          "snapshot_ref": {
+                            "type": "string",
+                            "description": "sandbox snapshot ref"
+                          }
+                        },
+                        "required": [
+                          "provider",
+                          "snapshot_ref"
+                        ]
+                      },
+                      {
+                        "type": "object",
+                        "properties": {
+                          "provider": {
+                            "type": "string",
+                            "enum": [
+                              "lambda"
+                            ]
+                          }
+                        },
+                        "required": [
+                          "provider"
+                        ]
+                      }
+                    ]
+                  },
+                  "entrypoints": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    },
+                    "description": "Which entrypoints to execute in the sandbox"
+                  },
+                  "eval_name": {
+                    "type": "string"
+                  },
+                  "parameters": {
+                    "type": "object",
+                    "additionalProperties": {
+                      "nullable": true
+                    },
+                    "description": "Parameter values for sandbox eval execution"
+                  },
+                  "evaluator_definition": {
+                    "nullable": true,
+                    "description": "Definition of current evaluator with parameters"
+                  }
+                },
+                "required": [
+                  "type",
+                  "sandbox_spec",
+                  "eval_name"
+                ]
               }
             ]
           },
           "bundle_id": {
-            "type": "string"
+            "type": "string",
+            "nullable": true
           },
           "preview": {
             "type": "string",
@@ -6841,8 +7197,7 @@
         },
         "required": [
           "runtime_context",
-          "location",
-          "bundle_id"
+          "location"
         ]
       },
       "FunctionIdRef": {
@@ -7455,26 +7810,29 @@
           "topic_maps": {
             "type": "object",
             "additionalProperties": {
-              "type": "object",
-              "properties": {
-                "function_name": {
-                  "type": "string",
-                  "description": "The name of the topic map function"
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "function_name": {
+                    "type": "string",
+                    "description": "The name of the topic map function"
+                  },
+                  "topic_map_id": {
+                    "type": "string",
+                    "description": "The id of the topic map function"
+                  },
+                  "topic_map_data": {
+                    "$ref": "#/components/schemas/TopicMapData"
+                  }
                 },
-                "topic_map_id": {
-                  "type": "string",
-                  "description": "The id of the topic map function"
-                },
-                "topic_map_data": {
-                  "$ref": "#/components/schemas/TopicMapData"
-                }
-              },
-              "required": [
-                "function_name",
-                "topic_map_data"
-              ]
+                "required": [
+                  "function_name",
+                  "topic_map_data"
+                ]
+              }
             },
-            "description": "Topic maps that depend on facets in this batch, keyed by source facet name"
+            "description": "Topic maps that depend on facets in this batch, keyed by source facet name. Each source facet can have multiple topic maps."
           }
         },
         "required": [
@@ -8950,6 +9308,10 @@
             "type": "boolean",
             "nullable": true
           },
+          "is_dataplane_private": {
+            "type": "boolean",
+            "nullable": true
+          },
           "proxy_url": {
             "type": "string",
             "nullable": true
@@ -8986,6 +9348,10 @@
             "nullable": true
           },
           "is_universal_api": {
+            "type": "boolean",
+            "nullable": true
+          },
+          "is_dataplane_private": {
             "type": "boolean",
             "nullable": true
           },
@@ -9589,7 +9955,8 @@
             "type": "string",
             "enum": [
               "env_var",
-              "ai_provider"
+              "ai_provider",
+              "sandbox_provider"
             ],
             "default": "env_var",
             "description": "The category of the secret: env_var for regular environment variables, ai_provider for AI provider API keys"
@@ -9699,6 +10066,99 @@
             "type": "string",
             "nullable": true,
             "description": "Textual description of the MCP server"
+          }
+        }
+      },
+      "Environment": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "Unique identifier for the environment"
+          },
+          "org_id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "Unique identifier for the organization that the environment belongs under"
+          },
+          "name": {
+            "type": "string",
+            "description": "Name of the environment"
+          },
+          "slug": {
+            "type": "string",
+            "description": "A url-friendly, unique identifier for the environment within an organization"
+          },
+          "description": {
+            "type": "string",
+            "nullable": true,
+            "description": "Textual description of the environment"
+          },
+          "created": {
+            "type": "string",
+            "nullable": true,
+            "format": "date-time",
+            "description": "Date of environment creation"
+          },
+          "deleted_at": {
+            "type": "string",
+            "nullable": true,
+            "format": "date-time",
+            "description": "Date of environment deletion, or null if the environment is still active"
+          }
+        },
+        "required": [
+          "id",
+          "org_id",
+          "name",
+          "slug"
+        ]
+      },
+      "CreateEnvironment": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string",
+            "description": "Name of the environment"
+          },
+          "slug": {
+            "type": "string",
+            "description": "A url-friendly, unique identifier for the environment within an organization"
+          },
+          "description": {
+            "type": "string",
+            "nullable": true,
+            "description": "Textual description of the environment"
+          },
+          "org_name": {
+            "type": "string",
+            "nullable": true,
+            "description": "For nearly all users, this parameter should be unnecessary. But in the rare case that your API key belongs to multiple organizations, you may specify the name of the organization the environment belongs in."
+          }
+        },
+        "required": [
+          "name",
+          "slug"
+        ]
+      },
+      "PatchEnvironment": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string",
+            "nullable": true,
+            "description": "Name of the environment"
+          },
+          "slug": {
+            "type": "string",
+            "nullable": true,
+            "description": "A url-friendly, unique identifier for the environment within an organization"
+          },
+          "description": {
+            "type": "string",
+            "nullable": true,
+            "description": "Textual description of the environment"
           }
         }
       },
@@ -10264,6 +10724,17 @@
               }
             ],
             "description": "The dataset to use"
+          },
+          "name": {
+            "type": "string",
+            "description": "The name of the eval to run when multiple evals available"
+          },
+          "parameters": {
+            "type": "object",
+            "additionalProperties": {
+              "nullable": true
+            },
+            "description": "Values for any parameters used in the eval"
           },
           "task": {
             "$ref": "#/components/schemas/FunctionId"
@@ -10891,6 +11362,16 @@
         "name": "version",
         "in": "query"
       },
+      "PromptEnvironment": {
+        "schema": {
+          "$ref": "#/components/schemas/PromptEnvironment"
+        },
+        "required": false,
+        "description": "Filter by environment slug. Cannot be used together with `version`.\n\nFor `GET /v1/prompt`, environment resolution currently requires the request to match a single prompt. If multiple prompts match, the endpoint returns `400` (for example when `limit=1` is not set). Use `limit=1` or other filters (for example `slug`, `project_id`) to narrow results.",
+        "name": "environment",
+        "in": "query",
+        "allowReserved": true
+      },
       "SummarizeScores": {
         "schema": {
           "$ref": "#/components/schemas/SummarizeScores"
@@ -11185,6 +11666,13 @@
           },
           "429": {
             "description": "Too many requests hit the API too quickly. We recommend an exponential backoff of your requests",
+            "headers": {
+              "Retry-After": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
             "content": {
               "text/plain": {
                 "schema": {
@@ -11319,6 +11807,13 @@
           },
           "429": {
             "description": "Too many requests hit the API too quickly. We recommend an exponential backoff of your requests",
+            "headers": {
+              "Retry-After": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
             "content": {
               "text/plain": {
                 "schema": {
@@ -11484,6 +11979,13 @@
           },
           "429": {
             "description": "Too many requests hit the API too quickly. We recommend an exponential backoff of your requests",
+            "headers": {
+              "Retry-After": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
             "content": {
               "text/plain": {
                 "schema": {
@@ -11601,6 +12103,13 @@
           },
           "429": {
             "description": "Too many requests hit the API too quickly. We recommend an exponential backoff of your requests",
+            "headers": {
+              "Retry-After": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
             "content": {
               "text/plain": {
                 "schema": {
@@ -11707,6 +12216,13 @@
           },
           "429": {
             "description": "Too many requests hit the API too quickly. We recommend an exponential backoff of your requests",
+            "headers": {
+              "Retry-After": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
             "content": {
               "text/plain": {
                 "schema": {
@@ -11888,6 +12404,13 @@
           },
           "429": {
             "description": "Too many requests hit the API too quickly. We recommend an exponential backoff of your requests",
+            "headers": {
+              "Retry-After": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
             "content": {
               "text/plain": {
                 "schema": {
@@ -12069,6 +12592,13 @@
           },
           "429": {
             "description": "Too many requests hit the API too quickly. We recommend an exponential backoff of your requests",
+            "headers": {
+              "Retry-After": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
             "content": {
               "text/plain": {
                 "schema": {
@@ -12187,6 +12717,13 @@
           },
           "429": {
             "description": "Too many requests hit the API too quickly. We recommend an exponential backoff of your requests",
+            "headers": {
+              "Retry-After": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
             "content": {
               "text/plain": {
                 "schema": {
@@ -12368,6 +12905,13 @@
           },
           "429": {
             "description": "Too many requests hit the API too quickly. We recommend an exponential backoff of your requests",
+            "headers": {
+              "Retry-After": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
             "content": {
               "text/plain": {
                 "schema": {
@@ -12544,6 +13088,13 @@
           },
           "429": {
             "description": "Too many requests hit the API too quickly. We recommend an exponential backoff of your requests",
+            "headers": {
+              "Retry-After": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
             "content": {
               "text/plain": {
                 "schema": {
@@ -12684,6 +13235,13 @@
           },
           "429": {
             "description": "Too many requests hit the API too quickly. We recommend an exponential backoff of your requests",
+            "headers": {
+              "Retry-After": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
             "content": {
               "text/plain": {
                 "schema": {
@@ -12849,6 +13407,13 @@
           },
           "429": {
             "description": "Too many requests hit the API too quickly. We recommend an exponential backoff of your requests",
+            "headers": {
+              "Retry-After": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
             "content": {
               "text/plain": {
                 "schema": {
@@ -12966,6 +13531,13 @@
           },
           "429": {
             "description": "Too many requests hit the API too quickly. We recommend an exponential backoff of your requests",
+            "headers": {
+              "Retry-After": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
             "content": {
               "text/plain": {
                 "schema": {
@@ -13072,6 +13644,13 @@
           },
           "429": {
             "description": "Too many requests hit the API too quickly. We recommend an exponential backoff of your requests",
+            "headers": {
+              "Retry-After": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
             "content": {
               "text/plain": {
                 "schema": {
@@ -13253,6 +13832,13 @@
           },
           "429": {
             "description": "Too many requests hit the API too quickly. We recommend an exponential backoff of your requests",
+            "headers": {
+              "Retry-After": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
             "content": {
               "text/plain": {
                 "schema": {
@@ -13434,6 +14020,13 @@
           },
           "429": {
             "description": "Too many requests hit the API too quickly. We recommend an exponential backoff of your requests",
+            "headers": {
+              "Retry-After": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
             "content": {
               "text/plain": {
                 "schema": {
@@ -13552,6 +14145,13 @@
           },
           "429": {
             "description": "Too many requests hit the API too quickly. We recommend an exponential backoff of your requests",
+            "headers": {
+              "Retry-After": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
             "content": {
               "text/plain": {
                 "schema": {
@@ -13733,6 +14333,13 @@
           },
           "429": {
             "description": "Too many requests hit the API too quickly. We recommend an exponential backoff of your requests",
+            "headers": {
+              "Retry-After": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
             "content": {
               "text/plain": {
                 "schema": {
@@ -13908,6 +14515,13 @@
           },
           "429": {
             "description": "Too many requests hit the API too quickly. We recommend an exponential backoff of your requests",
+            "headers": {
+              "Retry-After": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
             "content": {
               "text/plain": {
                 "schema": {
@@ -14084,6 +14698,13 @@
           },
           "429": {
             "description": "Too many requests hit the API too quickly. We recommend an exponential backoff of your requests",
+            "headers": {
+              "Retry-After": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
             "content": {
               "text/plain": {
                 "schema": {
@@ -14224,6 +14845,13 @@
           },
           "429": {
             "description": "Too many requests hit the API too quickly. We recommend an exponential backoff of your requests",
+            "headers": {
+              "Retry-After": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
             "content": {
               "text/plain": {
                 "schema": {
@@ -14389,6 +15017,13 @@
           },
           "429": {
             "description": "Too many requests hit the API too quickly. We recommend an exponential backoff of your requests",
+            "headers": {
+              "Retry-After": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
             "content": {
               "text/plain": {
                 "schema": {
@@ -14506,6 +15141,13 @@
           },
           "429": {
             "description": "Too many requests hit the API too quickly. We recommend an exponential backoff of your requests",
+            "headers": {
+              "Retry-After": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
             "content": {
               "text/plain": {
                 "schema": {
@@ -14612,6 +15254,13 @@
           },
           "429": {
             "description": "Too many requests hit the API too quickly. We recommend an exponential backoff of your requests",
+            "headers": {
+              "Retry-After": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
             "content": {
               "text/plain": {
                 "schema": {
@@ -14793,6 +15442,13 @@
           },
           "429": {
             "description": "Too many requests hit the API too quickly. We recommend an exponential backoff of your requests",
+            "headers": {
+              "Retry-After": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
             "content": {
               "text/plain": {
                 "schema": {
@@ -14974,6 +15630,13 @@
           },
           "429": {
             "description": "Too many requests hit the API too quickly. We recommend an exponential backoff of your requests",
+            "headers": {
+              "Retry-After": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
             "content": {
               "text/plain": {
                 "schema": {
@@ -15092,6 +15755,13 @@
           },
           "429": {
             "description": "Too many requests hit the API too quickly. We recommend an exponential backoff of your requests",
+            "headers": {
+              "Retry-After": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
             "content": {
               "text/plain": {
                 "schema": {
@@ -15273,6 +15943,13 @@
           },
           "429": {
             "description": "Too many requests hit the API too quickly. We recommend an exponential backoff of your requests",
+            "headers": {
+              "Retry-After": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
             "content": {
               "text/plain": {
                 "schema": {
@@ -15445,6 +16122,13 @@
           },
           "429": {
             "description": "Too many requests hit the API too quickly. We recommend an exponential backoff of your requests",
+            "headers": {
+              "Retry-After": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
             "content": {
               "text/plain": {
                 "schema": {
@@ -15621,6 +16305,13 @@
           },
           "429": {
             "description": "Too many requests hit the API too quickly. We recommend an exponential backoff of your requests",
+            "headers": {
+              "Retry-After": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
             "content": {
               "text/plain": {
                 "schema": {
@@ -15733,6 +16424,13 @@
           },
           "429": {
             "description": "Too many requests hit the API too quickly. We recommend an exponential backoff of your requests",
+            "headers": {
+              "Retry-After": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
             "content": {
               "text/plain": {
                 "schema": {
@@ -15803,6 +16501,9 @@
           },
           {
             "$ref": "#/components/parameters/PromptVersion"
+          },
+          {
+            "$ref": "#/components/parameters/PromptEnvironment"
           },
           {
             "$ref": "#/components/parameters/OrgName"
@@ -15879,6 +16580,13 @@
           },
           "429": {
             "description": "Too many requests hit the API too quickly. We recommend an exponential backoff of your requests",
+            "headers": {
+              "Retry-After": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
             "content": {
               "text/plain": {
                 "schema": {
@@ -15987,6 +16695,9 @@
           },
           {
             "$ref": "#/components/parameters/PromptVersion"
+          },
+          {
+            "$ref": "#/components/parameters/PromptEnvironment"
           }
         ],
         "responses": {
@@ -16047,6 +16758,13 @@
           },
           "429": {
             "description": "Too many requests hit the API too quickly. We recommend an exponential backoff of your requests",
+            "headers": {
+              "Retry-After": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
             "content": {
               "text/plain": {
                 "schema": {
@@ -16164,6 +16882,13 @@
           },
           "429": {
             "description": "Too many requests hit the API too quickly. We recommend an exponential backoff of your requests",
+            "headers": {
+              "Retry-After": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
             "content": {
               "text/plain": {
                 "schema": {
@@ -16270,6 +16995,13 @@
           },
           "429": {
             "description": "Too many requests hit the API too quickly. We recommend an exponential backoff of your requests",
+            "headers": {
+              "Retry-After": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
             "content": {
               "text/plain": {
                 "schema": {
@@ -16446,6 +17178,13 @@
           },
           "429": {
             "description": "Too many requests hit the API too quickly. We recommend an exponential backoff of your requests",
+            "headers": {
+              "Retry-After": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
             "content": {
               "text/plain": {
                 "schema": {
@@ -16558,6 +17297,13 @@
           },
           "429": {
             "description": "Too many requests hit the API too quickly. We recommend an exponential backoff of your requests",
+            "headers": {
+              "Retry-After": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
             "content": {
               "text/plain": {
                 "schema": {
@@ -16692,6 +17438,13 @@
           },
           "429": {
             "description": "Too many requests hit the API too quickly. We recommend an exponential backoff of your requests",
+            "headers": {
+              "Retry-After": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
             "content": {
               "text/plain": {
                 "schema": {
@@ -16857,6 +17610,13 @@
           },
           "429": {
             "description": "Too many requests hit the API too quickly. We recommend an exponential backoff of your requests",
+            "headers": {
+              "Retry-After": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
             "content": {
               "text/plain": {
                 "schema": {
@@ -16974,6 +17734,13 @@
           },
           "429": {
             "description": "Too many requests hit the API too quickly. We recommend an exponential backoff of your requests",
+            "headers": {
+              "Retry-After": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
             "content": {
               "text/plain": {
                 "schema": {
@@ -17080,6 +17847,13 @@
           },
           "429": {
             "description": "Too many requests hit the API too quickly. We recommend an exponential backoff of your requests",
+            "headers": {
+              "Retry-After": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
             "content": {
               "text/plain": {
                 "schema": {
@@ -17256,6 +18030,13 @@
           },
           "429": {
             "description": "Too many requests hit the API too quickly. We recommend an exponential backoff of your requests",
+            "headers": {
+              "Retry-After": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
             "content": {
               "text/plain": {
                 "schema": {
@@ -17368,6 +18149,13 @@
           },
           "429": {
             "description": "Too many requests hit the API too quickly. We recommend an exponential backoff of your requests",
+            "headers": {
+              "Retry-After": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
             "content": {
               "text/plain": {
                 "schema": {
@@ -17502,6 +18290,13 @@
           },
           "429": {
             "description": "Too many requests hit the API too quickly. We recommend an exponential backoff of your requests",
+            "headers": {
+              "Retry-After": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
             "content": {
               "text/plain": {
                 "schema": {
@@ -17667,6 +18462,13 @@
           },
           "429": {
             "description": "Too many requests hit the API too quickly. We recommend an exponential backoff of your requests",
+            "headers": {
+              "Retry-After": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
             "content": {
               "text/plain": {
                 "schema": {
@@ -17784,6 +18586,13 @@
           },
           "429": {
             "description": "Too many requests hit the API too quickly. We recommend an exponential backoff of your requests",
+            "headers": {
+              "Retry-After": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
             "content": {
               "text/plain": {
                 "schema": {
@@ -17890,6 +18699,13 @@
           },
           "429": {
             "description": "Too many requests hit the API too quickly. We recommend an exponential backoff of your requests",
+            "headers": {
+              "Retry-After": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
             "content": {
               "text/plain": {
                 "schema": {
@@ -18066,6 +18882,13 @@
           },
           "429": {
             "description": "Too many requests hit the API too quickly. We recommend an exponential backoff of your requests",
+            "headers": {
+              "Retry-After": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
             "content": {
               "text/plain": {
                 "schema": {
@@ -18178,6 +19001,13 @@
           },
           "429": {
             "description": "Too many requests hit the API too quickly. We recommend an exponential backoff of your requests",
+            "headers": {
+              "Retry-After": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
             "content": {
               "text/plain": {
                 "schema": {
@@ -18327,6 +19157,13 @@
           },
           "429": {
             "description": "Too many requests hit the API too quickly. We recommend an exponential backoff of your requests",
+            "headers": {
+              "Retry-After": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
             "content": {
               "text/plain": {
                 "schema": {
@@ -18492,6 +19329,13 @@
           },
           "429": {
             "description": "Too many requests hit the API too quickly. We recommend an exponential backoff of your requests",
+            "headers": {
+              "Retry-After": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
             "content": {
               "text/plain": {
                 "schema": {
@@ -18598,6 +19442,13 @@
           },
           "429": {
             "description": "Too many requests hit the API too quickly. We recommend an exponential backoff of your requests",
+            "headers": {
+              "Retry-After": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
             "content": {
               "text/plain": {
                 "schema": {
@@ -18774,6 +19625,13 @@
           },
           "429": {
             "description": "Too many requests hit the API too quickly. We recommend an exponential backoff of your requests",
+            "headers": {
+              "Retry-After": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
             "content": {
               "text/plain": {
                 "schema": {
@@ -18918,6 +19776,13 @@
           },
           "429": {
             "description": "Too many requests hit the API too quickly. We recommend an exponential backoff of your requests",
+            "headers": {
+              "Retry-After": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
             "content": {
               "text/plain": {
                 "schema": {
@@ -19176,6 +20041,13 @@
           },
           "429": {
             "description": "Too many requests hit the API too quickly. We recommend an exponential backoff of your requests",
+            "headers": {
+              "Retry-After": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
             "content": {
               "text/plain": {
                 "schema": {
@@ -19341,6 +20213,13 @@
           },
           "429": {
             "description": "Too many requests hit the API too quickly. We recommend an exponential backoff of your requests",
+            "headers": {
+              "Retry-After": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
             "content": {
               "text/plain": {
                 "schema": {
@@ -19517,6 +20396,13 @@
           },
           "429": {
             "description": "Too many requests hit the API too quickly. We recommend an exponential backoff of your requests",
+            "headers": {
+              "Retry-After": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
             "content": {
               "text/plain": {
                 "schema": {
@@ -19629,6 +20515,13 @@
           },
           "429": {
             "description": "Too many requests hit the API too quickly. We recommend an exponential backoff of your requests",
+            "headers": {
+              "Retry-After": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
             "content": {
               "text/plain": {
                 "schema": {
@@ -19763,6 +20656,13 @@
           },
           "429": {
             "description": "Too many requests hit the API too quickly. We recommend an exponential backoff of your requests",
+            "headers": {
+              "Retry-After": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
             "content": {
               "text/plain": {
                 "schema": {
@@ -19928,6 +20828,13 @@
           },
           "429": {
             "description": "Too many requests hit the API too quickly. We recommend an exponential backoff of your requests",
+            "headers": {
+              "Retry-After": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
             "content": {
               "text/plain": {
                 "schema": {
@@ -20045,6 +20952,13 @@
           },
           "429": {
             "description": "Too many requests hit the API too quickly. We recommend an exponential backoff of your requests",
+            "headers": {
+              "Retry-After": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
             "content": {
               "text/plain": {
                 "schema": {
@@ -20151,6 +21065,13 @@
           },
           "429": {
             "description": "Too many requests hit the API too quickly. We recommend an exponential backoff of your requests",
+            "headers": {
+              "Retry-After": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
             "content": {
               "text/plain": {
                 "schema": {
@@ -20327,6 +21248,13 @@
           },
           "429": {
             "description": "Too many requests hit the API too quickly. We recommend an exponential backoff of your requests",
+            "headers": {
+              "Retry-After": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
             "content": {
               "text/plain": {
                 "schema": {
@@ -20439,6 +21367,13 @@
           },
           "429": {
             "description": "Too many requests hit the API too quickly. We recommend an exponential backoff of your requests",
+            "headers": {
+              "Retry-After": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
             "content": {
               "text/plain": {
                 "schema": {
@@ -20582,6 +21517,13 @@
           },
           "429": {
             "description": "Too many requests hit the API too quickly. We recommend an exponential backoff of your requests",
+            "headers": {
+              "Retry-After": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
             "content": {
               "text/plain": {
                 "schema": {
@@ -20747,6 +21689,13 @@
           },
           "429": {
             "description": "Too many requests hit the API too quickly. We recommend an exponential backoff of your requests",
+            "headers": {
+              "Retry-After": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
             "content": {
               "text/plain": {
                 "schema": {
@@ -20864,6 +21813,13 @@
           },
           "429": {
             "description": "Too many requests hit the API too quickly. We recommend an exponential backoff of your requests",
+            "headers": {
+              "Retry-After": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
             "content": {
               "text/plain": {
                 "schema": {
@@ -20970,6 +21926,13 @@
           },
           "429": {
             "description": "Too many requests hit the API too quickly. We recommend an exponential backoff of your requests",
+            "headers": {
+              "Retry-After": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
             "content": {
               "text/plain": {
                 "schema": {
@@ -21146,6 +22109,13 @@
           },
           "429": {
             "description": "Too many requests hit the API too quickly. We recommend an exponential backoff of your requests",
+            "headers": {
+              "Retry-After": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
             "content": {
               "text/plain": {
                 "schema": {
@@ -21258,6 +22228,13 @@
           },
           "429": {
             "description": "Too many requests hit the API too quickly. We recommend an exponential backoff of your requests",
+            "headers": {
+              "Retry-After": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
             "content": {
               "text/plain": {
                 "schema": {
@@ -21398,6 +22375,13 @@
           },
           "429": {
             "description": "Too many requests hit the API too quickly. We recommend an exponential backoff of your requests",
+            "headers": {
+              "Retry-After": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
             "content": {
               "text/plain": {
                 "schema": {
@@ -21563,6 +22547,13 @@
           },
           "429": {
             "description": "Too many requests hit the API too quickly. We recommend an exponential backoff of your requests",
+            "headers": {
+              "Retry-After": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
             "content": {
               "text/plain": {
                 "schema": {
@@ -21680,6 +22671,13 @@
           },
           "429": {
             "description": "Too many requests hit the API too quickly. We recommend an exponential backoff of your requests",
+            "headers": {
+              "Retry-After": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
             "content": {
               "text/plain": {
                 "schema": {
@@ -21786,6 +22784,13 @@
           },
           "429": {
             "description": "Too many requests hit the API too quickly. We recommend an exponential backoff of your requests",
+            "headers": {
+              "Retry-After": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
             "content": {
               "text/plain": {
                 "schema": {
@@ -21962,6 +22967,13 @@
           },
           "429": {
             "description": "Too many requests hit the API too quickly. We recommend an exponential backoff of your requests",
+            "headers": {
+              "Retry-After": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
             "content": {
               "text/plain": {
                 "schema": {
@@ -22074,6 +23086,13 @@
           },
           "429": {
             "description": "Too many requests hit the API too quickly. We recommend an exponential backoff of your requests",
+            "headers": {
+              "Retry-After": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
             "content": {
               "text/plain": {
                 "schema": {
@@ -22208,6 +23227,13 @@
           },
           "429": {
             "description": "Too many requests hit the API too quickly. We recommend an exponential backoff of your requests",
+            "headers": {
+              "Retry-After": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
             "content": {
               "text/plain": {
                 "schema": {
@@ -22373,6 +23399,13 @@
           },
           "429": {
             "description": "Too many requests hit the API too quickly. We recommend an exponential backoff of your requests",
+            "headers": {
+              "Retry-After": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
             "content": {
               "text/plain": {
                 "schema": {
@@ -22490,6 +23523,13 @@
           },
           "429": {
             "description": "Too many requests hit the API too quickly. We recommend an exponential backoff of your requests",
+            "headers": {
+              "Retry-After": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
             "content": {
               "text/plain": {
                 "schema": {
@@ -22596,6 +23636,13 @@
           },
           "429": {
             "description": "Too many requests hit the API too quickly. We recommend an exponential backoff of your requests",
+            "headers": {
+              "Retry-After": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
             "content": {
               "text/plain": {
                 "schema": {
@@ -22772,6 +23819,13 @@
           },
           "429": {
             "description": "Too many requests hit the API too quickly. We recommend an exponential backoff of your requests",
+            "headers": {
+              "Retry-After": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
             "content": {
               "text/plain": {
                 "schema": {
@@ -22884,6 +23938,13 @@
           },
           "429": {
             "description": "Too many requests hit the API too quickly. We recommend an exponential backoff of your requests",
+            "headers": {
+              "Retry-After": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
             "content": {
               "text/plain": {
                 "schema": {
@@ -23018,6 +24079,13 @@
           },
           "429": {
             "description": "Too many requests hit the API too quickly. We recommend an exponential backoff of your requests",
+            "headers": {
+              "Retry-After": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
             "content": {
               "text/plain": {
                 "schema": {
@@ -23183,6 +24251,13 @@
           },
           "429": {
             "description": "Too many requests hit the API too quickly. We recommend an exponential backoff of your requests",
+            "headers": {
+              "Retry-After": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
             "content": {
               "text/plain": {
                 "schema": {
@@ -23300,6 +24375,13 @@
           },
           "429": {
             "description": "Too many requests hit the API too quickly. We recommend an exponential backoff of your requests",
+            "headers": {
+              "Retry-After": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
             "content": {
               "text/plain": {
                 "schema": {
@@ -23406,6 +24488,13 @@
           },
           "429": {
             "description": "Too many requests hit the API too quickly. We recommend an exponential backoff of your requests",
+            "headers": {
+              "Retry-After": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
             "content": {
               "text/plain": {
                 "schema": {
@@ -23582,6 +24671,13 @@
           },
           "429": {
             "description": "Too many requests hit the API too quickly. We recommend an exponential backoff of your requests",
+            "headers": {
+              "Retry-After": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
             "content": {
               "text/plain": {
                 "schema": {
@@ -23694,6 +24790,13 @@
           },
           "429": {
             "description": "Too many requests hit the API too quickly. We recommend an exponential backoff of your requests",
+            "headers": {
+              "Retry-After": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
             "content": {
               "text/plain": {
                 "schema": {
@@ -23764,6 +24867,9 @@
           },
           {
             "$ref": "#/components/parameters/PromptVersion"
+          },
+          {
+            "$ref": "#/components/parameters/PromptEnvironment"
           },
           {
             "$ref": "#/components/parameters/OrgName"
@@ -23840,6 +24946,13 @@
           },
           "429": {
             "description": "Too many requests hit the API too quickly. We recommend an exponential backoff of your requests",
+            "headers": {
+              "Retry-After": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
             "content": {
               "text/plain": {
                 "schema": {
@@ -23948,6 +25061,9 @@
           },
           {
             "$ref": "#/components/parameters/PromptVersion"
+          },
+          {
+            "$ref": "#/components/parameters/PromptEnvironment"
           }
         ],
         "responses": {
@@ -24008,6 +25124,13 @@
           },
           "429": {
             "description": "Too many requests hit the API too quickly. We recommend an exponential backoff of your requests",
+            "headers": {
+              "Retry-After": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
             "content": {
               "text/plain": {
                 "schema": {
@@ -24125,6 +25248,13 @@
           },
           "429": {
             "description": "Too many requests hit the API too quickly. We recommend an exponential backoff of your requests",
+            "headers": {
+              "Retry-After": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
             "content": {
               "text/plain": {
                 "schema": {
@@ -24231,6 +25361,13 @@
           },
           "429": {
             "description": "Too many requests hit the API too quickly. We recommend an exponential backoff of your requests",
+            "headers": {
+              "Retry-After": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
             "content": {
               "text/plain": {
                 "schema": {
@@ -24512,6 +25649,13 @@
           },
           "429": {
             "description": "Too many requests hit the API too quickly. We recommend an exponential backoff of your requests",
+            "headers": {
+              "Retry-After": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
             "content": {
               "text/plain": {
                 "schema": {
@@ -24624,6 +25768,13 @@
           },
           "429": {
             "description": "Too many requests hit the API too quickly. We recommend an exponential backoff of your requests",
+            "headers": {
+              "Retry-After": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
             "content": {
               "text/plain": {
                 "schema": {
@@ -24764,6 +25915,13 @@
           },
           "429": {
             "description": "Too many requests hit the API too quickly. We recommend an exponential backoff of your requests",
+            "headers": {
+              "Retry-After": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
             "content": {
               "text/plain": {
                 "schema": {
@@ -24935,6 +26093,13 @@
           },
           "429": {
             "description": "Too many requests hit the API too quickly. We recommend an exponential backoff of your requests",
+            "headers": {
+              "Retry-After": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
             "content": {
               "text/plain": {
                 "schema": {
@@ -25052,6 +26217,13 @@
           },
           "429": {
             "description": "Too many requests hit the API too quickly. We recommend an exponential backoff of your requests",
+            "headers": {
+              "Retry-After": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
             "content": {
               "text/plain": {
                 "schema": {
@@ -25169,6 +26341,13 @@
           },
           "429": {
             "description": "Too many requests hit the API too quickly. We recommend an exponential backoff of your requests",
+            "headers": {
+              "Retry-After": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
             "content": {
               "text/plain": {
                 "schema": {
@@ -25364,6 +26543,13 @@
           },
           "429": {
             "description": "Too many requests hit the API too quickly. We recommend an exponential backoff of your requests",
+            "headers": {
+              "Retry-After": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
             "content": {
               "text/plain": {
                 "schema": {
@@ -25529,6 +26715,13 @@
           },
           "429": {
             "description": "Too many requests hit the API too quickly. We recommend an exponential backoff of your requests",
+            "headers": {
+              "Retry-After": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
             "content": {
               "text/plain": {
                 "schema": {
@@ -25646,6 +26839,13 @@
           },
           "429": {
             "description": "Too many requests hit the API too quickly. We recommend an exponential backoff of your requests",
+            "headers": {
+              "Retry-After": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
             "content": {
               "text/plain": {
                 "schema": {
@@ -25822,6 +27022,13 @@
           },
           "429": {
             "description": "Too many requests hit the API too quickly. We recommend an exponential backoff of your requests",
+            "headers": {
+              "Retry-After": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
             "content": {
               "text/plain": {
                 "schema": {
@@ -26007,6 +27214,13 @@
           },
           "429": {
             "description": "Too many requests hit the API too quickly. We recommend an exponential backoff of your requests",
+            "headers": {
+              "Retry-After": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
             "content": {
               "text/plain": {
                 "schema": {
@@ -26141,6 +27355,13 @@
           },
           "429": {
             "description": "Too many requests hit the API too quickly. We recommend an exponential backoff of your requests",
+            "headers": {
+              "Retry-After": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
             "content": {
               "text/plain": {
                 "schema": {
@@ -26306,6 +27527,13 @@
           },
           "429": {
             "description": "Too many requests hit the API too quickly. We recommend an exponential backoff of your requests",
+            "headers": {
+              "Retry-After": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
             "content": {
               "text/plain": {
                 "schema": {
@@ -26412,6 +27640,13 @@
           },
           "429": {
             "description": "Too many requests hit the API too quickly. We recommend an exponential backoff of your requests",
+            "headers": {
+              "Retry-After": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
             "content": {
               "text/plain": {
                 "schema": {
@@ -26607,6 +27842,13 @@
           },
           "429": {
             "description": "Too many requests hit the API too quickly. We recommend an exponential backoff of your requests",
+            "headers": {
+              "Retry-After": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
             "content": {
               "text/plain": {
                 "schema": {
@@ -26738,6 +27980,13 @@
           },
           "429": {
             "description": "Too many requests hit the API too quickly. We recommend an exponential backoff of your requests",
+            "headers": {
+              "Retry-After": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
             "content": {
               "text/plain": {
                 "schema": {
@@ -26850,6 +28099,13 @@
           },
           "429": {
             "description": "Too many requests hit the API too quickly. We recommend an exponential backoff of your requests",
+            "headers": {
+              "Retry-After": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
             "content": {
               "text/plain": {
                 "schema": {
@@ -26984,6 +28240,13 @@
           },
           "429": {
             "description": "Too many requests hit the API too quickly. We recommend an exponential backoff of your requests",
+            "headers": {
+              "Retry-After": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
             "content": {
               "text/plain": {
                 "schema": {
@@ -27149,6 +28412,13 @@
           },
           "429": {
             "description": "Too many requests hit the API too quickly. We recommend an exponential backoff of your requests",
+            "headers": {
+              "Retry-After": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
             "content": {
               "text/plain": {
                 "schema": {
@@ -27255,6 +28525,13 @@
           },
           "429": {
             "description": "Too many requests hit the API too quickly. We recommend an exponential backoff of your requests",
+            "headers": {
+              "Retry-After": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
             "content": {
               "text/plain": {
                 "schema": {
@@ -27431,6 +28708,13 @@
           },
           "429": {
             "description": "Too many requests hit the API too quickly. We recommend an exponential backoff of your requests",
+            "headers": {
+              "Retry-After": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
             "content": {
               "text/plain": {
                 "schema": {
@@ -27543,6 +28827,13 @@
           },
           "429": {
             "description": "Too many requests hit the API too quickly. We recommend an exponential backoff of your requests",
+            "headers": {
+              "Retry-After": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
             "content": {
               "text/plain": {
                 "schema": {
@@ -27655,6 +28946,13 @@
           },
           "429": {
             "description": "Too many requests hit the API too quickly. We recommend an exponential backoff of your requests",
+            "headers": {
+              "Retry-After": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
             "content": {
               "text/plain": {
                 "schema": {
@@ -27792,6 +29090,13 @@
           },
           "429": {
             "description": "Too many requests hit the API too quickly. We recommend an exponential backoff of your requests",
+            "headers": {
+              "Retry-After": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
             "content": {
               "text/plain": {
                 "schema": {
@@ -27957,6 +29262,13 @@
           },
           "429": {
             "description": "Too many requests hit the API too quickly. We recommend an exponential backoff of your requests",
+            "headers": {
+              "Retry-After": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
             "content": {
               "text/plain": {
                 "schema": {
@@ -28074,6 +29386,13 @@
           },
           "429": {
             "description": "Too many requests hit the API too quickly. We recommend an exponential backoff of your requests",
+            "headers": {
+              "Retry-After": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
             "content": {
               "text/plain": {
                 "schema": {
@@ -28180,6 +29499,13 @@
           },
           "429": {
             "description": "Too many requests hit the API too quickly. We recommend an exponential backoff of your requests",
+            "headers": {
+              "Retry-After": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
             "content": {
               "text/plain": {
                 "schema": {
@@ -28399,6 +29725,13 @@
           },
           "429": {
             "description": "Too many requests hit the API too quickly. We recommend an exponential backoff of your requests",
+            "headers": {
+              "Retry-After": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
             "content": {
               "text/plain": {
                 "schema": {
@@ -28554,6 +29887,13 @@
           },
           "429": {
             "description": "Too many requests hit the API too quickly. We recommend an exponential backoff of your requests",
+            "headers": {
+              "Retry-After": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
             "content": {
               "text/plain": {
                 "schema": {
@@ -28685,6 +30025,13 @@
           },
           "429": {
             "description": "Too many requests hit the API too quickly. We recommend an exponential backoff of your requests",
+            "headers": {
+              "Retry-After": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
             "content": {
               "text/plain": {
                 "schema": {
@@ -28850,6 +30197,13 @@
           },
           "429": {
             "description": "Too many requests hit the API too quickly. We recommend an exponential backoff of your requests",
+            "headers": {
+              "Retry-After": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
             "content": {
               "text/plain": {
                 "schema": {
@@ -28994,6 +30348,13 @@
           },
           "429": {
             "description": "Too many requests hit the API too quickly. We recommend an exponential backoff of your requests",
+            "headers": {
+              "Retry-After": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
             "content": {
               "text/plain": {
                 "schema": {
@@ -29100,6 +30461,13 @@
           },
           "429": {
             "description": "Too many requests hit the API too quickly. We recommend an exponential backoff of your requests",
+            "headers": {
+              "Retry-After": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
             "content": {
               "text/plain": {
                 "schema": {
@@ -29276,6 +30644,13 @@
           },
           "429": {
             "description": "Too many requests hit the API too quickly. We recommend an exponential backoff of your requests",
+            "headers": {
+              "Retry-After": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
             "content": {
               "text/plain": {
                 "schema": {
@@ -29388,6 +30763,13 @@
           },
           "429": {
             "description": "Too many requests hit the API too quickly. We recommend an exponential backoff of your requests",
+            "headers": {
+              "Retry-After": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
             "content": {
               "text/plain": {
                 "schema": {
@@ -29522,6 +30904,13 @@
           },
           "429": {
             "description": "Too many requests hit the API too quickly. We recommend an exponential backoff of your requests",
+            "headers": {
+              "Retry-After": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
             "content": {
               "text/plain": {
                 "schema": {
@@ -29687,6 +31076,13 @@
           },
           "429": {
             "description": "Too many requests hit the API too quickly. We recommend an exponential backoff of your requests",
+            "headers": {
+              "Retry-After": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
             "content": {
               "text/plain": {
                 "schema": {
@@ -29804,6 +31200,13 @@
           },
           "429": {
             "description": "Too many requests hit the API too quickly. We recommend an exponential backoff of your requests",
+            "headers": {
+              "Retry-After": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
             "content": {
               "text/plain": {
                 "schema": {
@@ -29910,6 +31313,13 @@
           },
           "429": {
             "description": "Too many requests hit the API too quickly. We recommend an exponential backoff of your requests",
+            "headers": {
+              "Retry-After": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
             "content": {
               "text/plain": {
                 "schema": {
@@ -29987,6 +31397,644 @@
           },
           "400": {
             "description": "The request was unacceptable, often due to missing a required parameter",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "application/json": {
+                "schema": {
+                  "nullable": true
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/environment": {
+      "get": {
+        "operationId": "listEnvironments",
+        "summary": "List environments",
+        "description": "List out all environments. The environments are sorted by creation date, with the most recently-created environments first.",
+        "tags": [
+          "Environments"
+        ],
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {}
+        ],
+        "parameters": [
+          {
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "format": "uuid"
+                },
+                {
+                  "type": "array",
+                  "items": {
+                    "type": "string",
+                    "format": "uuid"
+                  },
+                  "minItems": 1
+                }
+              ],
+              "description": "Filter by environment IDs. Supports a single ID or multiple values."
+            },
+            "required": false,
+            "name": "ids",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string"
+            },
+            "required": false,
+            "name": "name",
+            "in": "query"
+          },
+          {
+            "$ref": "#/components/parameters/OrgName"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "List of environments",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "objects": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/Environment"
+                      }
+                    }
+                  },
+                  "required": [
+                    "objects"
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request was unacceptable, often due to missing a required parameter",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "application/json": {
+                "schema": {
+                  "nullable": true
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No valid API key provided",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "application/json": {
+                "schema": {
+                  "nullable": true
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The API key doesn’t have permissions to perform the request",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "application/json": {
+                "schema": {
+                  "nullable": true
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too many requests hit the API too quickly. We recommend an exponential backoff of your requests",
+            "headers": {
+              "Retry-After": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "application/json": {
+                "schema": {
+                  "nullable": true
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Something went wrong on Braintrust's end. (These are rare.)",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "application/json": {
+                "schema": {
+                  "nullable": true
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "operationId": "createEnvironment",
+        "summary": "Create environment",
+        "description": "Create a new environment",
+        "tags": [
+          "Environments"
+        ],
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {}
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateEnvironment"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Created environment",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Environment"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request was unacceptable, often due to missing a required parameter",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "application/json": {
+                "schema": {
+                  "nullable": true
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No valid API key provided",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "application/json": {
+                "schema": {
+                  "nullable": true
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The API key doesn’t have permissions to perform the request",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "application/json": {
+                "schema": {
+                  "nullable": true
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too many requests hit the API too quickly. We recommend an exponential backoff of your requests",
+            "headers": {
+              "Retry-After": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "application/json": {
+                "schema": {
+                  "nullable": true
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Something went wrong on Braintrust's end. (These are rare.)",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "application/json": {
+                "schema": {
+                  "nullable": true
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/environment/{environment_id}": {
+      "get": {
+        "operationId": "getEnvironment",
+        "summary": "Get environment",
+        "tags": [
+          "Environments"
+        ],
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {}
+        ],
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "required": true,
+            "name": "environment_id",
+            "in": "path"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Environment object",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Environment"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request was unacceptable, often due to missing a required parameter",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "application/json": {
+                "schema": {
+                  "nullable": true
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No valid API key provided",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "application/json": {
+                "schema": {
+                  "nullable": true
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The API key doesn’t have permissions to perform the request",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "application/json": {
+                "schema": {
+                  "nullable": true
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too many requests hit the API too quickly. We recommend an exponential backoff of your requests",
+            "headers": {
+              "Retry-After": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "application/json": {
+                "schema": {
+                  "nullable": true
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Something went wrong on Braintrust's end. (These are rare.)",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "application/json": {
+                "schema": {
+                  "nullable": true
+                }
+              }
+            }
+          }
+        }
+      },
+      "patch": {
+        "operationId": "updateEnvironment",
+        "summary": "Partially update environment",
+        "tags": [
+          "Environments"
+        ],
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {}
+        ],
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "required": true,
+            "name": "environment_id",
+            "in": "path"
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PatchEnvironment"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Updated environment",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Environment"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request was unacceptable, often due to missing a required parameter",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "application/json": {
+                "schema": {
+                  "nullable": true
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No valid API key provided",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "application/json": {
+                "schema": {
+                  "nullable": true
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The API key doesn’t have permissions to perform the request",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "application/json": {
+                "schema": {
+                  "nullable": true
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too many requests hit the API too quickly. We recommend an exponential backoff of your requests",
+            "headers": {
+              "Retry-After": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "application/json": {
+                "schema": {
+                  "nullable": true
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Something went wrong on Braintrust's end. (These are rare.)",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "application/json": {
+                "schema": {
+                  "nullable": true
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "operationId": "deleteEnvironment",
+        "summary": "Delete environment",
+        "tags": [
+          "Environments"
+        ],
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {}
+        ],
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "required": true,
+            "name": "environment_id",
+            "in": "path"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Deleted environment",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Environment"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request was unacceptable, often due to missing a required parameter",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "application/json": {
+                "schema": {
+                  "nullable": true
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No valid API key provided",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "application/json": {
+                "schema": {
+                  "nullable": true
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The API key doesn’t have permissions to perform the request",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "application/json": {
+                "schema": {
+                  "nullable": true
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too many requests hit the API too quickly. We recommend an exponential backoff of your requests",
+            "headers": {
+              "Retry-After": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "application/json": {
+                "schema": {
+                  "nullable": true
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Something went wrong on Braintrust's end. (These are rare.)",
             "content": {
               "text/plain": {
                 "schema": {
@@ -30195,6 +32243,13 @@
           },
           "429": {
             "description": "Too many requests hit the API too quickly. We recommend an exponential backoff of your requests",
+            "headers": {
+              "Retry-After": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
             "content": {
               "text/plain": {
                 "schema": {
