@@ -1017,7 +1017,7 @@ class MigrationOrchestrator:
             detailed_report["projects"][project_name] = project_summary
 
         # Write JSON report to file
-        with open(report_path, "w") as f:
+        with open(report_path, "w", encoding="utf-8") as f:
             json.dump(detailed_report, f, indent=2, default=str)
 
         # Also create a human-readable summary
@@ -1044,7 +1044,7 @@ class MigrationOrchestrator:
             detailed_report: The detailed report data.
             summary_path: Path to write the summary.
         """
-        with open(summary_path, "w") as f:
+        with open(summary_path, "w", encoding="utf-8") as f:
             f.write("# Braintrust Migration Summary\n")
             f.write("=" * 50 + "\n\n")
 
