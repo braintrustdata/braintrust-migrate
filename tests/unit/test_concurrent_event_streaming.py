@@ -12,6 +12,8 @@ import pytest
 from braintrust_migrate.resources.datasets import DatasetMigrator
 from braintrust_migrate.resources.experiments import ExperimentMigrator
 from braintrust_migrate.resources.base import MigrationResult
+import braintrust_migrate.resources.datasets as datasets_module
+import braintrust_migrate.resources.experiments as experiments_module
 
 
 # ---------------------------------------------------------------------------
@@ -30,6 +32,7 @@ class _ConcurrencyTrackingClient:
         self._pages = btql_pages_per_resource or {}
         self._page_idx: dict[str, int] = {}
         self.inserts: list[dict[str, Any]] = []
+        self.btql_queries: list[str] = []
 
         # Concurrency tracking
         self._in_flight = 0
@@ -42,8 +45,16 @@ class _ConcurrencyTrackingClient:
         self.migration_config.copy_attachments = False
         self.migration_config.insert_max_request_bytes = 6 * 1024 * 1024
         self.migration_config.insert_request_headroom_ratio = 0.75
+        self.migration_config.events_fetch_group_size = 25
 
-    async def with_retry(self, _name: str, coro_func):
+    async def with_retry(
+        self,
+        _name: str,
+        coro_func,
+        *,
+        non_retryable_statuses: set[int] | None = None,
+    ):
+        _ = non_retryable_statuses
         res = coro_func()
         if hasattr(res, "__await__"):
             return await res
@@ -62,6 +73,8 @@ class _ConcurrencyTrackingClient:
         _ = timeout
 
         if method.upper() == "POST" and path == "/btql":
+            query = json.get("query", "") if json else ""
+            self.btql_queries.append(query)
             async with self._lock:
                 self._in_flight += 1
                 self.max_in_flight = max(self.max_in_flight, self._in_flight)
@@ -69,27 +82,26 @@ class _ConcurrencyTrackingClient:
             await asyncio.sleep(0.01)  # simulate latency
 
             # Determine which resource this BTQL query is for by parsing the query.
-            query = json.get("query", "") if json else ""
             resource_id = None
-            for rid in self._pages:
-                if rid in query:
-                    resource_id = rid
-                    break
+            matching_ids = [rid for rid in self._pages if rid in query]
 
             async with self._lock:
                 self._in_flight -= 1
 
-            if resource_id and resource_id in self._pages:
-                idx = self._page_idx.get(resource_id, 0)
-                pages = self._pages[resource_id]
-                if idx < len(pages):
-                    self._page_idx[resource_id] = idx + 1
-                    events = pages[idx]
-                    last_pk = events[-1]["_pagination_key"] if events else None
-                    return {
-                        "data": events,
-                        "btql_last_pagination_key": last_pk,
-                    }
+            if matching_ids:
+                combined_events: list[dict[str, Any]] = []
+                for resource_id in matching_ids:
+                    idx = self._page_idx.get(resource_id, 0)
+                    pages = self._pages[resource_id]
+                    if idx < len(pages):
+                        self._page_idx[resource_id] = idx + 1
+                        combined_events.extend(pages[idx])
+                combined_events.sort(key=lambda event: event["_pagination_key"])
+                last_pk = combined_events[-1]["_pagination_key"] if combined_events else None
+                return {
+                    "data": combined_events,
+                    "btql_last_pagination_key": last_pk,
+                }
             return {"data": []}
 
         if method.upper() == "POST" and "/insert" in path:
@@ -116,39 +128,58 @@ class _ConcurrencyTrackingClient:
 @pytest.mark.asyncio
 class TestConcurrentDatasetStreaming:
 
-    async def test_multiple_datasets_streamed_concurrently(self, tmp_path: Path):
-        """Event streams for multiple datasets should overlap."""
+    async def test_multiple_datasets_streamed_in_grouped_btql_fetch(
+        self, tmp_path: Path
+    ):
+        """Dataset events should be fetched via grouped BTQL queries."""
         # Set up 3 datasets, each with one page of events.
         pages = {
-            "ds1": [[{"id": "e1", "_pagination_key": "pk1", "_xact_id": "1"}]],
-            "ds2": [[{"id": "e2", "_pagination_key": "pk2", "_xact_id": "2"}]],
-            "ds3": [[{"id": "e3", "_pagination_key": "pk3", "_xact_id": "3"}]],
+            "ds1": [[{"id": "e1", "dataset_id": "ds1", "_pagination_key": "pk1", "_xact_id": "1"}]],
+            "ds2": [[{"id": "e2", "dataset_id": "ds2", "_pagination_key": "pk2", "_xact_id": "2"}]],
+            "ds3": [[{"id": "e3", "dataset_id": "ds3", "_pagination_key": "pk3", "_xact_id": "3"}]],
         }
         source = _ConcurrencyTrackingClient(btql_pages_per_resource=pages)
         dest = _ConcurrencyTrackingClient()
+        original_writer = datasets_module.SDKDatasetWriter
 
-        migrator = DatasetMigrator(
-            source,  # type: ignore[arg-type]
-            dest,  # type: ignore[arg-type]
-            tmp_path,
-            events_fetch_limit=100,
-            events_insert_batch_size=100,
-            events_use_seen_db=False,
-        )
+        class _FakeSDKDatasetWriter:
+            def __init__(self, dest_client: _ConcurrencyTrackingClient, dataset_id: str) -> None:
+                self._dest_client = dest_client
+                self._dataset_id = dataset_id
 
-        # Simulate successful dataset creations.
-        results = [
-            MigrationResult(success=True, source_id="ds1", dest_id="dest-ds1"),
-            MigrationResult(success=True, source_id="ds2", dest_id="dest-ds2"),
-            MigrationResult(success=True, source_id="ds3", dest_id="dest-ds3"),
-        ]
+            async def write_rows(self, rows: list[dict[str, Any]]) -> None:
+                self._dest_client.inserts.append(
+                    {
+                        "dataset_id": self._dataset_id,
+                        "events": [dict(row) for row in rows],
+                    }
+                )
 
-        await migrator._migrate_records_for_datasets(results)
+        datasets_module.SDKDatasetWriter = _FakeSDKDatasetWriter
 
-        # Events should have been inserted for all 3 datasets.
-        assert len(dest.inserts) >= 3
-        # Concurrency should have been observed (source fetch overlap).
-        assert source.max_in_flight >= 1  # At least serial works
+        try:
+            migrator = DatasetMigrator(
+                source,  # type: ignore[arg-type]
+                dest,  # type: ignore[arg-type]
+                tmp_path,
+                events_fetch_limit=100,
+                events_use_seen_db=False,
+            )
+
+            results = [
+                MigrationResult(success=True, source_id="ds1", dest_id="dest-ds1"),
+                MigrationResult(success=True, source_id="ds2", dest_id="dest-ds2"),
+                MigrationResult(success=True, source_id="ds3", dest_id="dest-ds3"),
+            ]
+
+            await migrator._migrate_records_for_datasets(results)
+
+            assert len(dest.inserts) == 3
+            assert source.max_in_flight >= 1
+            assert len(source.btql_queries) == 2
+            assert "dataset('ds1', 'ds2', 'ds3') spans" in source.btql_queries[0]
+        finally:
+            datasets_module.SDKDatasetWriter = original_writer
 
 
 # ---------------------------------------------------------------------------
@@ -159,33 +190,53 @@ class TestConcurrentDatasetStreaming:
 @pytest.mark.asyncio
 class TestConcurrentExperimentStreaming:
 
-    async def test_multiple_experiments_streamed_concurrently(self, tmp_path: Path):
-        """Event streams for multiple experiments should overlap."""
+    async def test_multiple_experiments_streamed_in_grouped_btql_fetch(
+        self, tmp_path: Path
+    ):
+        """Experiment events should be fetched via grouped BTQL queries."""
         pages = {
-            "exp1": [[{"id": "e1", "_pagination_key": "pk1", "_xact_id": "1"}]],
-            "exp2": [[{"id": "e2", "_pagination_key": "pk2", "_xact_id": "2"}]],
-            "exp3": [[{"id": "e3", "_pagination_key": "pk3", "_xact_id": "3"}]],
+            "exp1": [[{"id": "e1", "experiment_id": "exp1", "_pagination_key": "pk1", "_xact_id": "1"}]],
+            "exp2": [[{"id": "e2", "experiment_id": "exp2", "_pagination_key": "pk2", "_xact_id": "2"}]],
+            "exp3": [[{"id": "e3", "experiment_id": "exp3", "_pagination_key": "pk3", "_xact_id": "3"}]],
         }
         source = _ConcurrencyTrackingClient(btql_pages_per_resource=pages)
         dest = _ConcurrencyTrackingClient()
+        original_writer = experiments_module.SDKExperimentWriter
 
-        migrator = ExperimentMigrator(
-            source,  # type: ignore[arg-type]
-            dest,  # type: ignore[arg-type]
-            tmp_path,
-            events_fetch_limit=100,
-            events_insert_batch_size=100,
-            events_use_seen_db=False,
-        )
+        class _FakeSDKExperimentWriter:
+            def __init__(self, dest_client: _ConcurrencyTrackingClient, experiment_id: str) -> None:
+                self._dest_client = dest_client
+                self._experiment_id = experiment_id
 
-        results = [
-            MigrationResult(success=True, source_id="exp1", dest_id="dest-exp1"),
-            MigrationResult(success=True, source_id="exp2", dest_id="dest-exp2"),
-            MigrationResult(success=True, source_id="exp3", dest_id="dest-exp3"),
-        ]
+            async def write_rows(self, rows: list[dict[str, Any]]) -> None:
+                self._dest_client.inserts.append(
+                    {
+                        "experiment_id": self._experiment_id,
+                        "events": [dict(row) for row in rows],
+                    }
+                )
 
-        await migrator._migrate_events_for_experiments(results)
+        experiments_module.SDKExperimentWriter = _FakeSDKExperimentWriter
 
-        # Events should have been inserted.
-        assert len(dest.inserts) >= 3
-        assert source.max_in_flight >= 1
+        try:
+            migrator = ExperimentMigrator(
+                source,  # type: ignore[arg-type]
+                dest,  # type: ignore[arg-type]
+                tmp_path,
+                events_fetch_limit=100,
+                events_use_seen_db=False,
+            )
+
+            results = [
+                MigrationResult(success=True, source_id="exp1", dest_id="dest-exp1"),
+                MigrationResult(success=True, source_id="exp2", dest_id="dest-exp2"),
+                MigrationResult(success=True, source_id="exp3", dest_id="dest-exp3"),
+            ]
+
+            await migrator._migrate_events_for_experiments(results)
+
+            assert len(dest.inserts) == 3
+            assert len(source.btql_queries) == 2
+            assert "experiment('exp1', 'exp2', 'exp3') spans" in source.btql_queries[0]
+        finally:
+            experiments_module.SDKExperimentWriter = original_writer

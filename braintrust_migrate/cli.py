@@ -817,6 +817,8 @@ async def _run_migration_with_progress(
                         inserted_last = update.get("inserted_last")
                         inserted_bytes_last = update.get("inserted_bytes_last")
                         insert_seconds = update.get("insert_seconds")
+                        pending_buffered_rows = update.get("pending_buffered_rows")
+                        pending_buffered_bytes = update.get("pending_buffered_bytes")
 
                         gb_part = ""
                         if isinstance(inserted_bytes, int):
@@ -844,25 +846,34 @@ async def _run_migration_with_progress(
 
                         # Per-resource context
                         page_part = f" page={page_num}" if page_num is not None else ""
+                        pending_part = ""
+                        if (
+                            isinstance(pending_buffered_rows, int)
+                            and pending_buffered_rows > 0
+                        ):
+                            pending_part = f" buffered={pending_buffered_rows}"
+                            if isinstance(pending_buffered_bytes, int):
+                                pending_gb = pending_buffered_bytes / 1_000_000_000
+                                pending_part += f" pending_gb={pending_gb:.3f}"
 
                         if update.get("resource") == "experiment_events":
                             desc = (
                                 f"{_label} ({_project_name}):{page_part}"
                                 f" fetched={fetched} inserted={inserted}"
-                                f"{gb_part}{batch_rate_part}"
+                                f"{gb_part}{pending_part}{batch_rate_part}"
                             )
                         elif update.get("resource") == "dataset_events":
                             desc = (
                                 f"{_label} ({_project_name}):{page_part}"
                                 f" fetched={fetched} inserted={inserted}"
-                                f"{gb_part}{batch_rate_part}"
+                                f"{gb_part}{pending_part}{batch_rate_part}"
                             )
                         else:
                             # logs
                             desc = (
                                 f"{_label} ({_project_name}):{page_part}"
                                 f" fetched={fetched} inserted={inserted}"
-                                f"{gb_part}{batch_rate_part}"
+                                f"{gb_part}{pending_part}{batch_rate_part}"
                             )
 
                         if phase == "done":

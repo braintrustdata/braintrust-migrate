@@ -7,6 +7,7 @@ import pytest
 
 from braintrust_migrate.batching import approx_json_bytes
 from braintrust_migrate.config import MigrationConfig
+import braintrust_migrate.resources.logs as logs_module
 from braintrust_migrate.resources.logs import LogsMigrator
 
 
@@ -16,7 +17,14 @@ class _SourceFetchClient:
         self._calls = 0
         self.migration_config = mig_cfg
 
-    async def with_retry(self, _operation_name: str, coro_func):
+    async def with_retry(
+        self,
+        _operation_name: str,
+        coro_func,
+        *,
+        non_retryable_statuses: set[int] | None = None,
+    ):
+        _ = non_retryable_statuses
         res = coro_func()
         if hasattr(res, "__await__"):
             return await res
@@ -39,7 +47,14 @@ class _DestInsertClient:
         self.migration_config = mig_cfg
         self.insert_calls: list[list[str]] = []
 
-    async def with_retry(self, _operation_name: str, coro_func):
+    async def with_retry(
+        self,
+        _operation_name: str,
+        coro_func,
+        *,
+        non_retryable_statuses: set[int] | None = None,
+    ):
+        _ = non_retryable_statuses
         res = coro_func()
         if hasattr(res, "__await__"):
             return await res
@@ -48,27 +63,29 @@ class _DestInsertClient:
     async def raw_request(
         self, method: str, path: str, *, json: Any = None, **kwargs: Any
     ) -> Any:
-        _ = kwargs
-        assert method.upper() == "POST"
-        assert "/v1/project_logs/" in path
-        assert path.endswith("/insert")
-        events = (json or {}).get("events", [])
+        _ = method, path, json, kwargs
+        raise AssertionError("SDK-backed logs migration should not use raw_request")
+
+
+class _FakeSDKProjectLogsWriter:
+    def __init__(self, dest_client: _DestInsertClient, project_id: str) -> None:
+        self._dest_client = dest_client
+        self._project_id = project_id
+
+    async def write_rows(self, rows: list[dict[str, Any]]) -> None:
         ids: list[str] = []
-        for e in events:
+        for e in rows:
             if not isinstance(e, dict):
                 continue
             v = e.get("id")
             if isinstance(v, str):
                 ids.append(v)
-        self.insert_calls.append(ids)
-        row_ids = ids
-        return {"row_ids": row_ids}
+        self._dest_client.insert_calls.append(ids)
 
 
 @pytest.mark.asyncio
-async def test_logs_migrator_splits_inserts_by_bytes(tmp_path: Path) -> None:
+async def test_logs_migrator_buffers_rows_before_sdk_flush(tmp_path: Path) -> None:
     EXPECTED_MIGRATED = 2
-    MIN_INSERT_CALLS = 2
     # Make events large enough that 2 events exceed the byte cap, but 1 fits.
     raw_events = [
         {
@@ -89,7 +106,8 @@ async def test_logs_migrator_splits_inserts_by_bytes(tmp_path: Path) -> None:
     two = approx_json_bytes({"events": raw_events})
     assert one < two
 
-    # Target cap just above one-event payload so we must split.
+    # Target cap just above one-event payload. The logs migrator should still buffer
+    # both rows together and let the SDK handle any downstream request splitting.
     max_req = one + 25
 
     cfg = MigrationConfig(
@@ -99,23 +117,27 @@ async def test_logs_migrator_splits_inserts_by_bytes(tmp_path: Path) -> None:
 
     source = _SourceFetchClient(raw_events, cfg)
     dest = _DestInsertClient(cfg)
+    monkeypatch = pytest.MonkeyPatch()
+    monkeypatch.setattr(logs_module, "SDKProjectLogsWriter", _FakeSDKProjectLogsWriter)
 
-    migrator = LogsMigrator(
-        source,  # type: ignore[arg-type]
-        dest,  # type: ignore[arg-type]
-        tmp_path,
-        page_limit=10,
-        insert_batch_size=10_000,  # ensure count does not cause splitting
-        use_version_snapshot=False,
-        use_seen_db=False,
-        progress_hook=None,
-    )
-    migrator.set_destination_project_id("proj-dest")
-    res = await migrator.migrate_all("proj-source")
+    try:
+        migrator = LogsMigrator(
+            source,  # type: ignore[arg-type]
+            dest,  # type: ignore[arg-type]
+            tmp_path,
+            page_limit=10,
+            insert_batch_size=10_000,  # ensure count does not cause splitting
+            use_version_snapshot=False,
+            use_seen_db=False,
+            progress_hook=None,
+        )
+        migrator.set_destination_project_id("proj-dest")
+        res = await migrator.migrate_all("proj-source")
+    finally:
+        monkeypatch.undo()
 
     assert res["migrated"] == EXPECTED_MIGRATED
     assert migrator._stream_state.inserted_bytes > 0
-    # Must have at least 2 insert calls due to byte cap.
-    assert len(dest.insert_calls) >= MIN_INSERT_CALLS
+    assert len(dest.insert_calls) == 1
     flattened = [x for call in dest.insert_calls for x in call]
     assert flattened == ["a", "b"]

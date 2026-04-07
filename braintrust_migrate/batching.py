@@ -1,4 +1,4 @@
-"""Helpers for batching inserts by both count and approximate payload size."""
+"""Helpers for batching inserts by both count and payload size."""
 
 from __future__ import annotations
 
@@ -7,11 +7,10 @@ from collections.abc import Callable, Iterable
 from typing import Any
 
 
-# We deliberately use the *non-compact* json encoding here to slightly
-# over-estimate payload sizes vs compact separators. This works well with a
-# headroom ratio to avoid flirting with gateway limits.
+# Measure the actual UTF-8 payload bytes that will be sent over the wire.
+# This keeps batching aligned with gateway limits even for non-ASCII content.
 def approx_json_bytes(obj: Any) -> int:
-    return len(json.dumps(obj, ensure_ascii=False))
+    return len(json.dumps(obj, ensure_ascii=False).encode("utf-8"))
 
 
 _EMPTY_EVENTS_WRAPPER_BYTES = approx_json_bytes({"events": []})
@@ -25,7 +24,6 @@ def approx_events_insert_payload_bytes(
     """Approximate the JSON payload bytes for `{"events": events}`.
 
     This uses a fast additive estimate: wrapper overhead + sum(event bytes) + commas.
-    It intentionally overestimates in common cases.
     """
     if not events:
         return _EMPTY_EVENTS_WRAPPER_BYTES

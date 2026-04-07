@@ -7,6 +7,7 @@ streaming copier via BTQL sorted pagination.
 from __future__ import annotations
 
 import json as _json
+import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -16,6 +17,7 @@ import httpx
 import structlog
 
 from braintrust_migrate.attachments import AttachmentCopier
+from braintrust_migrate.batching import approx_events_insert_payload_bytes, approx_json_bytes
 from braintrust_migrate.btql import (
     btql_quote,
     fetch_btql_sorted_page_with_retries,
@@ -23,10 +25,10 @@ from braintrust_migrate.btql import (
 )
 from braintrust_migrate.client import BraintrustClient
 from braintrust_migrate.resources.base import MigrationState, ResourceMigrator
+from braintrust_migrate.sdk_logs import SDKProjectLogsWriter
 from braintrust_migrate.streaming_utils import (
     SeenIdsDB,
     build_btql_sorted_page_query,
-    stream_btql_sorted_events,
 )
 
 logger = structlog.get_logger(__name__)
@@ -103,6 +105,9 @@ class _LogsStreamingState:
 class LogsMigrator(ResourceMigrator[dict[str, Any]]):
     """Streaming migrator for Braintrust project logs."""
 
+    SDK_FLUSH_MAX_ROWS: ClassVar[int] = 5_000
+    SDK_FLUSH_MAX_BYTES: ClassVar[int] = 25 * 1024 * 1024
+
     _INSERT_FIELDS: ClassVar[set[str]] = {
         "input",
         "output",
@@ -150,6 +155,9 @@ class LogsMigrator(ResourceMigrator[dict[str, Any]]):
         _ = batch_size  # intentionally ignored
 
         self._logger = logger.bind(migrator=self.__class__.__name__)
+        self._sdk_logs_writer: SDKProjectLogsWriter | None = None
+        self._sdk_flush_max_rows = int(self.SDK_FLUSH_MAX_ROWS)
+        self._sdk_flush_max_bytes = int(self.SDK_FLUSH_MAX_BYTES)
 
         self._stream_state_path = self.checkpoint_dir / "logs_streaming_state.json"
         self._stream_state = _LogsStreamingState.from_path(self._stream_state_path)
@@ -317,15 +325,27 @@ class LogsMigrator(ResourceMigrator[dict[str, Any]]):
     async def _insert_events(
         self, *, project_id: str, events: list[dict[str, Any]]
     ) -> None:
+        if self._sdk_logs_writer is None:
+            self._sdk_logs_writer = SDKProjectLogsWriter(
+                self.dest_client, project_id
+            )
         await self.dest_client.with_retry(
             "insert_project_logs_events",
-            lambda: self.dest_client.raw_request(
-                "POST",
-                f"/v1/project_logs/{project_id}/insert",
-                json={"events": events},
-                timeout=120.0,
-            ),
+            lambda: self._sdk_logs_writer.write_rows(events),
         )
+
+    @staticmethod
+    def _extract_ids(events: list[dict[str, Any]]) -> list[str]:
+        ids: list[str] = []
+        for event in events:
+            event_id = event.get("id")
+            if isinstance(event_id, str) and event_id:
+                ids.append(event_id)
+        return ids
+
+    @staticmethod
+    def _sum_event_bytes(events: list[dict[str, Any]]) -> int:
+        return sum(approx_json_bytes(event) for event in events)
 
     @staticmethod
     def _is_http_413(exc: Exception) -> bool:
@@ -567,23 +587,30 @@ class LogsMigrator(ResourceMigrator[dict[str, Any]]):
             progress_hook = self._progress_hook
             current_page_num: int | None = None
             current_page_events: int | None = None
+            active_last_pk = self._stream_state.btql_min_pagination_key
+            active_last_pk_inclusive = bool(
+                self._stream_state.btql_min_pagination_key_inclusive
+            )
+
+            pending_events: list[dict[str, Any]] = []
+            pending_seen_ids: set[str] = set()
+            pending_row_bytes = 0
+            pending_fetched_events = 0
+            pending_inserted_events = 0
+            pending_inserted_bytes = 0
+            pending_skipped_seen = 0
+            pending_attachments_copied = 0
+            pending_last_pk: str | None = None
+            pending_last_created: str | None = None
 
             def _pk_cursor_prefix() -> str | None:
-                pk = self._stream_state.btql_min_pagination_key
+                pk = pending_last_pk or active_last_pk
                 return (pk[:16] + "…") if isinstance(pk, str) else pk
 
             def _save_state() -> None:
                 # Logs are BTQL-only; cursor is intentionally unused.
                 self._stream_state.cursor = None
                 self._save_stream_state()
-
-            async def _fetch(n: int) -> dict[str, Any]:
-                return await self._fetch_page(
-                    project_id=source_project_id,
-                    cursor=None,
-                    version=None,
-                    limit=n,
-                )
 
             async def _on_single_413(event: dict[str, Any], err: Exception) -> None:
                 self._dump_oversize_event_summary(
@@ -609,11 +636,16 @@ class LogsMigrator(ResourceMigrator[dict[str, Any]]):
                         "page_events": current_page_events,
                         "configured_fetch_limit": self.page_limit,
                         "configured_insert_batch_size": self.insert_batch_size,
-                        "fetched_total": self._stream_state.fetched_events,
+                        "fetched_total": self._stream_state.fetched_events
+                        + pending_fetched_events,
                         "inserted_total": self._stream_state.inserted_events,
                         "inserted_bytes_total": self._stream_state.inserted_bytes,
-                        "skipped_seen_total": self._stream_state.skipped_seen,
-                        "attachments_copied_total": self._stream_state.attachments_copied,
+                        "skipped_seen_total": self._stream_state.skipped_seen
+                        + pending_skipped_seen,
+                        "attachments_copied_total": self._stream_state.attachments_copied
+                        + pending_attachments_copied,
+                        "pending_buffered_rows": pending_inserted_events,
+                        "pending_buffered_bytes": pending_row_bytes,
                         "cursor": _pk_cursor_prefix(),
                     }
                 )
@@ -637,6 +669,8 @@ class LogsMigrator(ResourceMigrator[dict[str, Any]]):
                         "inserted_bytes_total": self._stream_state.inserted_bytes,
                         "skipped_seen_total": self._stream_state.skipped_seen,
                         "attachments_copied_total": self._stream_state.attachments_copied,
+                        "pending_buffered_rows": 0,
+                        "pending_buffered_bytes": 0,
                         "cursor": _pk_cursor_prefix(),
                     }
                 )
@@ -654,11 +688,16 @@ class LogsMigrator(ResourceMigrator[dict[str, Any]]):
                         "page_events": info.get("page_events"),
                         "configured_fetch_limit": self.page_limit,
                         "configured_insert_batch_size": self.insert_batch_size,
-                        "fetched_total": self._stream_state.fetched_events,
+                        "fetched_total": self._stream_state.fetched_events
+                        + pending_fetched_events,
                         "inserted_total": self._stream_state.inserted_events,
                         "inserted_bytes_total": self._stream_state.inserted_bytes,
-                        "skipped_seen_total": self._stream_state.skipped_seen,
-                        "attachments_copied_total": self._stream_state.attachments_copied,
+                        "skipped_seen_total": self._stream_state.skipped_seen
+                        + pending_skipped_seen,
+                        "attachments_copied_total": self._stream_state.attachments_copied
+                        + pending_attachments_copied,
+                        "pending_buffered_rows": pending_inserted_events,
+                        "pending_buffered_bytes": pending_row_bytes,
                         "cursor": _pk_cursor_prefix(),
                         "next_cursor": None,
                     }
@@ -678,6 +717,8 @@ class LogsMigrator(ResourceMigrator[dict[str, Any]]):
                         "inserted_bytes_total": self._stream_state.inserted_bytes,
                         "skipped_seen_total": self._stream_state.skipped_seen,
                         "attachments_copied_total": self._stream_state.attachments_copied,
+                        "pending_buffered_rows": 0,
+                        "pending_buffered_bytes": 0,
                         "cursor": None,
                         "next_cursor": None,
                     }
@@ -753,63 +794,192 @@ class LogsMigrator(ResourceMigrator[dict[str, Any]]):
                 self._stream_state.btql_min_pagination_key = pk
                 self._stream_state.btql_min_pagination_key_inclusive = False
 
-            await stream_btql_sorted_events(
-                fetch_page=_fetch,
-                page_limit=int(self.page_limit),
-                get_last_pk=lambda: self._stream_state.btql_min_pagination_key,
-                set_last_pk=_set_last_pk,
-                save_state=_save_state,
-                page_event_filter=None,
-                event_to_insert=lambda e: self._event_to_insert(e, source_project_id),
-                seen_db=seen_db,
-                insert_batch_size=int(self.insert_batch_size),
-                insert_max_bytes=self._insert_max_bytes,
-                rewrite_event_in_place=(
-                    None
-                    if self._attachment_copier is None
-                    else self._attachment_copier.rewrite_event_in_place
-                ),
-                insert_events=lambda batch: self._insert_events(
-                    project_id=dest_project_id, events=batch
-                ),
-                is_http_413=self._is_http_413,
-                on_single_413=_on_single_413,
-                incr_fetched=lambda n: setattr(
-                    self._stream_state,
-                    "fetched_events",
-                    int(self._stream_state.fetched_events) + int(n),
-                ),
-                incr_inserted=lambda n: setattr(
-                    self._stream_state,
-                    "inserted_events",
-                    int(self._stream_state.inserted_events) + int(n),
-                ),
-                incr_inserted_bytes=lambda n: setattr(
-                    self._stream_state,
-                    "inserted_bytes",
-                    int(self._stream_state.inserted_bytes) + int(n),
-                ),
-                incr_skipped_deleted=None,
-                incr_skipped_seen=lambda n: setattr(
-                    self._stream_state,
-                    "skipped_seen",
-                    int(self._stream_state.skipped_seen) + int(n),
-                ),
-                incr_attachments_copied=lambda n: setattr(
-                    self._stream_state,
-                    "attachments_copied",
-                    int(self._stream_state.attachments_copied) + int(n),
-                ),
-                hooks=None
-                if progress_hook is None
-                else {
-                    "on_fetch": _on_fetch,
-                    "on_insert": _on_insert,
-                    "on_page": _on_page,
-                    "on_done": _on_done,
-                    "on_batch_error": _on_batch_error,
-                },
-            )
+            async def _flush_pending_events() -> None:
+                nonlocal pending_events
+                nonlocal pending_seen_ids
+                nonlocal pending_row_bytes
+                nonlocal pending_fetched_events
+                nonlocal pending_inserted_events
+                nonlocal pending_inserted_bytes
+                nonlocal pending_skipped_seen
+                nonlocal pending_attachments_copied
+                nonlocal pending_last_pk
+                nonlocal pending_last_created
+
+                if (
+                    pending_fetched_events == 0
+                    and pending_inserted_events == 0
+                    and pending_skipped_seen == 0
+                    and pending_attachments_copied == 0
+                    and pending_last_pk is None
+                ):
+                    return
+
+                if pending_events:
+                    batch = list(pending_events)
+                    started = time.perf_counter()
+                    try:
+                        await self._insert_events(
+                            project_id=dest_project_id, events=batch
+                        )
+                    except Exception as e:
+                        _on_batch_error(
+                            {
+                                "page_num": current_page_num,
+                                "batch": batch,
+                                "error": e,
+                            }
+                        )
+                        if len(batch) == 1 and self._is_http_413(e):
+                            await _on_single_413(batch[0], e)
+                        raise
+                    if seen_db is not None and pending_seen_ids:
+                        seen_db.mark_seen(list(pending_seen_ids))
+                    self._stream_state.inserted_events += pending_inserted_events
+                    self._stream_state.inserted_bytes += pending_inserted_bytes
+                    _on_insert(
+                        {
+                            "inserted_last": pending_inserted_events,
+                            "inserted_bytes_last": pending_inserted_bytes,
+                            "insert_seconds": max(0.0, time.perf_counter() - started),
+                            "flush_rows": pending_inserted_events,
+                            "flush_buffer_bytes": pending_row_bytes,
+                        }
+                    )
+
+                self._stream_state.fetched_events += pending_fetched_events
+                self._stream_state.skipped_seen += pending_skipped_seen
+                self._stream_state.attachments_copied += pending_attachments_copied
+                self._stream_state.btql_last_created = pending_last_created
+                if pending_last_pk is not None:
+                    _set_last_pk(pending_last_pk)
+                _save_state()
+
+                pending_events = []
+                pending_seen_ids = set()
+                pending_row_bytes = 0
+                pending_fetched_events = 0
+                pending_inserted_events = 0
+                pending_inserted_bytes = 0
+                pending_skipped_seen = 0
+                pending_attachments_copied = 0
+                pending_last_pk = None
+                pending_last_created = None
+
+            page_num = 0
+            while True:
+                page_num += 1
+                current_page_num = page_num
+
+                from_expr = f"project_logs('{btql_quote(source_project_id)}') spans"
+
+                def _query_text_for_limit(n: int) -> str:
+                    return build_btql_sorted_page_query(
+                        from_expr=from_expr,
+                        limit=n,
+                        last_pagination_key=active_last_pk,
+                        last_pagination_key_inclusive=active_last_pk_inclusive,
+                        created_after=self._stream_state.created_after,
+                        created_before=self._stream_state.created_before,
+                        select="*",
+                    )
+
+                page = await fetch_btql_sorted_page_with_retries(
+                    client=self.source_client,
+                    query_for_limit=_query_text_for_limit,
+                    configured_limit=int(self.page_limit),
+                    operation="btql_project_logs_page",
+                    log_fields={"source_project_id": source_project_id},
+                    timeout_seconds=120.0,
+                )
+                page_events = cast(list[dict[str, Any]], page.get("events") or [])
+                page_last_pk = cast(str | None, page.get("btql_last_pagination_key"))
+                current_page_events = len(page_events)
+
+                if page_events:
+                    _on_fetch(
+                        {
+                            "page_num": page_num,
+                            "page_events": len(page_events),
+                            "configured_fetch_limit": int(self.page_limit),
+                        }
+                    )
+
+                if not page_events:
+                    await _flush_pending_events()
+                    _save_state()
+                    _on_done({"page_num": page_num})
+                    break
+
+                pending_fetched_events += len(page_events)
+
+                insert_events_list = [
+                    self._event_to_insert(event, source_project_id)
+                    for event in page_events
+                ]
+
+                if seen_db is not None:
+                    all_ids = self._extract_ids(insert_events_list)
+                    if all_ids:
+                        unseen = set(seen_db.filter_unseen(all_ids))
+                        skipped_seen = len(all_ids) - len(unseen)
+                        if skipped_seen:
+                            pending_skipped_seen += skipped_seen
+                        insert_events_list = [
+                            event
+                            for event in insert_events_list
+                            if event.get("id") in unseen
+                        ]
+
+                if pending_seen_ids:
+                    deduped_events: list[dict[str, Any]] = []
+                    pending_duplicates = 0
+                    for event in insert_events_list:
+                        event_id = event.get("id")
+                        if isinstance(event_id, str) and event_id in pending_seen_ids:
+                            pending_duplicates += 1
+                            continue
+                        deduped_events.append(event)
+                    if pending_duplicates:
+                        pending_skipped_seen += pending_duplicates
+                    insert_events_list = deduped_events
+
+                if self._attachment_copier is not None:
+                    copied = 0
+                    for event in insert_events_list:
+                        copied += int(
+                            await self._attachment_copier.rewrite_event_in_place(event)
+                        )
+                    pending_attachments_copied += copied
+
+                if insert_events_list:
+                    pending_events.extend(insert_events_list)
+                    pending_seen_ids.update(self._extract_ids(insert_events_list))
+                    pending_inserted_events += len(insert_events_list)
+                    pending_inserted_bytes += approx_events_insert_payload_bytes(
+                        insert_events_list
+                    )
+                    pending_row_bytes += self._sum_event_bytes(insert_events_list)
+
+                pending_last_pk = page_last_pk
+                last_created = page_events[-1].get("created")
+                if isinstance(last_created, str):
+                    pending_last_created = last_created
+                active_last_pk = page_last_pk
+                active_last_pk_inclusive = False
+
+                if (
+                    pending_inserted_events >= self._sdk_flush_max_rows
+                    or pending_row_bytes >= self._sdk_flush_max_bytes
+                ):
+                    await _flush_pending_events()
+
+                _on_page(
+                    {
+                        "page_num": page_num,
+                        "page_events": len(page_events),
+                    }
+                )
 
             return {
                 "resource_type": self.resource_name,

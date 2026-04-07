@@ -406,7 +406,13 @@ class BraintrustClient:
             self._logger.warning("Could not determine Brainstore status", error=str(e))
             return False
 
-    async def with_retry(self, operation_name: str, coro_func):
+    async def with_retry(
+        self,
+        operation_name: str,
+        coro_func,
+        *,
+        non_retryable_statuses: set[int] | None = None,
+    ):
         """Execute a coroutine function with adaptive retry logic.
 
         Args:
@@ -457,6 +463,11 @@ class BraintrustClient:
             if isinstance(exc, httpx.HTTPStatusError) and exc.response is not None:
                 status = int(exc.response.status_code)
                 retry_after = _parse_retry_after_seconds(exc.response)
+                if (
+                    non_retryable_statuses is not None
+                    and status in non_retryable_statuses
+                ):
+                    return False, status, retry_after
                 if status == HTTP_STATUS_TOO_MANY_REQUESTS:
                     return True, status, retry_after
                 if status in {408, 409, 425, 500, 502, 503, 504}:

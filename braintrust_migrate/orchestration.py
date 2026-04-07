@@ -658,8 +658,6 @@ class MigrationOrchestrator:
                         project_checkpoint_dir,
                         self.config.migration.batch_size,
                         events_fetch_limit=self.config.migration.dataset_events_fetch_limit,
-                        events_insert_batch_size=self.config.migration.dataset_events_insert_batch_size,
-                        events_use_version_snapshot=self.config.migration.dataset_events_use_version_snapshot,
                         events_use_seen_db=self.config.migration.dataset_events_use_seen_db,
                         events_progress_hook=progress_hook,
                     )
@@ -671,8 +669,6 @@ class MigrationOrchestrator:
                         project_checkpoint_dir,
                         self.config.migration.batch_size,
                         events_fetch_limit=self.config.migration.experiment_events_fetch_limit,
-                        events_insert_batch_size=self.config.migration.experiment_events_insert_batch_size,
-                        events_use_version_snapshot=self.config.migration.experiment_events_use_version_snapshot,
                         events_use_seen_db=self.config.migration.experiment_events_use_seen_db,
                         events_progress_hook=progress_hook,
                     )
@@ -736,6 +732,7 @@ class MigrationOrchestrator:
                     migrated=resource_results["migrated"],
                     skipped=resource_results["skipped"],
                     failed=resource_results["failed"],
+                    skip_summary=resource_results.get("skip_summary") or None,
                 )
 
                 # Notify callback for real-time console feedback
@@ -1250,6 +1247,7 @@ class MigrationOrchestrator:
                     migrated=resource_results["migrated"],
                     skipped=resource_results["skipped"],
                     failed=resource_results["failed"],
+                    skip_summary=resource_results.get("skip_summary") or None,
                 )
 
             except Exception as e:

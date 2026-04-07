@@ -1076,6 +1076,18 @@ class ResourceMigrator(ABC, Generic[T]):
             # Save state after each batch
             self._save_state()
 
+        skip_reasons: dict[str, int] = {}
+        for detail in skipped_details:
+            reason = detail["skip_reason"]
+            skip_reasons[reason] = skip_reasons.get(reason, 0) + 1
+
+        skip_summary_text = ", ".join(
+            [
+                f"{count} {reason.replace('_', ' ')}"
+                for reason, count in skip_reasons.items()
+            ]
+        )
+
         # Log detailed summary
         self._logger.info(
             f"Completed migration of {self.resource_name}",
@@ -1083,25 +1095,13 @@ class ResourceMigrator(ABC, Generic[T]):
             migrated=migrated_count,
             skipped=skipped_count,
             failed=failed_count,
+            skip_summary=skip_summary_text or None,
         )
 
         # Log brief skip summary if any - make this very visible
         if skipped_details:
-            skip_reasons = {}
-            for detail in skipped_details:
-                reason = detail["skip_reason"]
-                skip_reasons[reason] = skip_reasons.get(reason, 0) + 1
-
-            # Create a brief, readable summary
-            skip_summary = ", ".join(
-                [
-                    f"{count} {reason.replace('_', ' ')}"
-                    for reason, count in skip_reasons.items()
-                ]
-            )
-
             self._logger.info(
-                f"📋 {self.resource_name} skipped: {skip_summary}",
+                f"📋 {self.resource_name} skipped: {skip_summary_text}",
                 breakdown=skip_reasons,
             )
 
@@ -1113,5 +1113,7 @@ class ResourceMigrator(ABC, Generic[T]):
             "failed": failed_count,
             "errors": errors,
             "skipped_details": skipped_details,
+            "skip_breakdown": skip_reasons,
+            "skip_summary": skip_summary_text,
             "migrated_details": migrated_details,
         }

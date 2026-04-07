@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json as _json
+import hashlib
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any, ClassVar
@@ -15,11 +16,12 @@ from braintrust_migrate.btql import (
     fetch_btql_sorted_page_with_retries,
 )
 from braintrust_migrate.resources.base import MigrationResult, ResourceMigrator
+from braintrust_migrate.sdk_logs import SDKExperimentWriter
 from braintrust_migrate.streaming_utils import (
     EventsStreamState,
     SeenIdsDB,
     build_btql_sorted_page_query,
-    stream_btql_sorted_events,
+    stream_btql_sorted_events_buffered,
 )
 
 # HTTP status codes
@@ -38,6 +40,10 @@ class ExperimentMigrator(ResourceMigrator[dict]):
     Uses raw API requests instead of SDK to avoid model dependencies.
     """
 
+    SDK_FLUSH_MAX_ROWS: ClassVar[int] = 1_000
+    SDK_FLUSH_MAX_BYTES: ClassVar[int] = 25 * 1024 * 1024
+    DEFAULT_EVENT_FETCH_GROUP_SIZE: ClassVar[int] = 25
+
     def __init__(
         self,
         source_client,
@@ -45,9 +51,7 @@ class ExperimentMigrator(ResourceMigrator[dict]):
         checkpoint_dir: Path,
         batch_size: int = 100,
         *,
-        events_fetch_limit: int = 50,
-        events_insert_batch_size: int = 200,
-        events_use_version_snapshot: bool = True,
+        events_fetch_limit: int = 1000,
         events_use_seen_db: bool = True,
         events_progress_hook: Callable[[dict[str, Any]], None] | None = None,
     ) -> None:
@@ -55,8 +59,6 @@ class ExperimentMigrator(ResourceMigrator[dict]):
             source_client, dest_client, checkpoint_dir, batch_size=batch_size
         )
         self.events_fetch_limit = events_fetch_limit
-        self.events_insert_batch_size = events_insert_batch_size
-        self.events_use_version_snapshot = events_use_version_snapshot
         self.events_use_seen_db = events_use_seen_db
         self._events_progress_hook = events_progress_hook
         self._attachment_copier: AttachmentCopier | None = None
@@ -83,6 +85,11 @@ class ExperimentMigrator(ResourceMigrator[dict]):
             self._insert_max_bytes: int | None = int(max_req * headroom)
         except Exception:
             self._insert_max_bytes = None
+        self._sdk_flush_max_rows = int(self.SDK_FLUSH_MAX_ROWS)
+        self._sdk_flush_max_bytes = int(self.SDK_FLUSH_MAX_BYTES)
+        self._event_fetch_group_size = int(
+            getattr(cfg, "events_fetch_group_size", self.DEFAULT_EVENT_FETCH_GROUP_SIZE)
+        )
 
     @property
     def resource_name(self) -> str:
@@ -386,30 +393,38 @@ class ExperimentMigrator(ResourceMigrator[dict]):
             experiment_count=len(successful_migrations),
         )
 
-        for result in successful_migrations:
-            try:
+        async def _flush_group(group: list[MigrationResult]) -> None:
+            if not group:
+                return
+            source_to_dest: dict[str, str] = {}
+            for result in group:
                 if result.dest_id is None:
                     raise ValueError(
                         "Experiment migrated without dest_id; cannot copy events"
                     )
-                await self._migrate_experiment_events(result.source_id, result.dest_id)
+                source_to_dest[result.source_id] = result.dest_id
 
-                # Update metadata to indicate events are migrated
+            await self._migrate_experiment_events_streaming_grouped(source_to_dest)
+
+            for result in group:
                 if result.metadata:
                     result.metadata["events_pending"] = False
                     result.metadata["events_migrated"] = True
 
+        for start in range(0, len(successful_migrations), self._event_fetch_group_size):
+            group = successful_migrations[start : start + self._event_fetch_group_size]
+            try:
+                await _flush_group(group)
             except Exception as e:
                 self._logger.error(
-                    "Failed to migrate events for experiment",
-                    source_id=result.source_id,
-                    dest_id=result.dest_id,
+                    "Failed to migrate events for experiment group",
+                    source_ids=[result.source_id for result in group],
                     error=str(e),
                 )
-                # Update metadata to indicate event migration failed
-                if result.metadata:
-                    result.metadata["events_pending"] = False
-                    result.metadata["events_failed"] = True
+                for result in group:
+                    if result.metadata:
+                        result.metadata["events_pending"] = False
+                        result.metadata["events_failed"] = True
 
         self._logger.info(
             "Completed bulk event migration",
@@ -486,8 +501,8 @@ class ExperimentMigrator(ResourceMigrator[dict]):
 
         Deleted events (`_object_delete=true`) are skipped.
         """
-        await self._migrate_experiment_events_streaming(
-            source_experiment_id, dest_experiment_id
+        await self._migrate_experiment_events_streaming_grouped(
+            {source_experiment_id: dest_experiment_id}
         )
 
     @staticmethod
@@ -518,6 +533,7 @@ class ExperimentMigrator(ResourceMigrator[dict]):
         # Ensure id preserved for idempotency
         if "id" in event:
             out["id"] = event["id"]
+        out["experiment_id"] = source_experiment_id
         # Add provenance if absent
         if "origin" not in out or out.get("origin") is None:
             origin: dict[str, Any] = {
@@ -532,6 +548,12 @@ class ExperimentMigrator(ResourceMigrator[dict]):
             out["origin"] = origin
         return out
 
+    def _event_to_insert_from_row(self, event: dict[str, Any]) -> dict[str, Any]:
+        source_experiment_id = event.get("experiment_id")
+        if not isinstance(source_experiment_id, str) or not source_experiment_id:
+            raise ValueError("Fetched experiment event missing experiment_id")
+        return self._event_to_insert(event, source_experiment_id)
+
     async def _fetch_experiment_events_page(
         self,
         *,
@@ -545,22 +567,23 @@ class ExperimentMigrator(ResourceMigrator[dict]):
         _ = cursor
         _ = version
         return await self._fetch_experiment_events_page_btql_sorted(
-            experiment_id=experiment_id, limit=limit, state=state
+            experiment_ids=[experiment_id], limit=limit, state=state
         )
 
     async def _fetch_experiment_events_page_btql_sorted(
         self,
         *,
-        experiment_id: str,
+        experiment_ids: list[str],
         limit: int,
         state: EventsStreamState,
     ) -> dict[str, Any]:
         """Fetch one page via POST /btql using native BTQL syntax, sorted by _pagination_key."""
         last_pagination_key = state.btql_min_pagination_key
+        quoted_ids = ", ".join(f"'{btql_quote(experiment_id)}'" for experiment_id in experiment_ids)
 
         def _query_text_for_limit(n: int) -> str:
             return build_btql_sorted_page_query(
-                from_expr=f"experiment('{btql_quote(experiment_id)}') spans",
+                from_expr=f"experiment({quoted_ids}) spans",
                 limit=n,
                 last_pagination_key=last_pagination_key,
                 select="*",
@@ -571,21 +594,8 @@ class ExperimentMigrator(ResourceMigrator[dict]):
             query_for_limit=_query_text_for_limit,
             configured_limit=int(limit),
             operation="btql_experiment_events_page",
-            log_fields={"source_experiment_id": experiment_id},
+            log_fields={"source_experiment_ids": experiment_ids},
             timeout_seconds=120.0,
-        )
-
-    async def _insert_experiment_events(
-        self, *, experiment_id: str, events: list[dict[str, Any]]
-    ) -> None:
-        await self.dest_client.with_retry(
-            "insert_experiment_events",
-            lambda: self.dest_client.raw_request(
-                "POST",
-                f"/v1/experiment/{experiment_id}/insert",
-                json={"events": events},
-                timeout=120.0,
-            ),
         )
 
     @staticmethod
@@ -668,18 +678,52 @@ class ExperimentMigrator(ResourceMigrator[dict]):
                 cursor=cursor,
             )
 
-    async def _migrate_experiment_events_streaming(
-        self, source_experiment_id: str, dest_experiment_id: str
+    @staticmethod
+    def _group_stream_basename(source_experiment_ids: list[str]) -> str:
+        if len(source_experiment_ids) == 1:
+            return source_experiment_ids[0]
+        joined = ",".join(source_experiment_ids)
+        digest = hashlib.sha1(joined.encode("utf-8")).hexdigest()[:12]
+        return f"group_{digest}"
+
+    async def _insert_experiment_events_grouped(
+        self,
+        *,
+        batch: list[dict[str, Any]],
+        writers_by_source: dict[str, SDKExperimentWriter],
+    ) -> None:
+        grouped: dict[str, list[dict[str, Any]]] = {}
+        for event in batch:
+            source_experiment_id = event.get("experiment_id")
+            if not isinstance(source_experiment_id, str) or not source_experiment_id:
+                raise ValueError("Experiment event batch missing source experiment_id")
+            grouped.setdefault(source_experiment_id, []).append(event)
+
+        for source_experiment_id, rows in grouped.items():
+            writer = writers_by_source.get(source_experiment_id)
+            if writer is None:
+                raise KeyError(
+                    f"No destination writer for source experiment {source_experiment_id}"
+                )
+            await self.dest_client.with_retry(
+                "insert_experiment_events",
+                lambda rows=rows, writer=writer: writer.write_rows(rows),
+            )
+
+    async def _migrate_experiment_events_streaming_grouped(
+        self, source_to_dest_experiment_ids: dict[str, str]
     ) -> None:
         try:
             events_dir = self.checkpoint_dir / "experiment_events"
             events_dir.mkdir(parents=True, exist_ok=True)
+            source_experiment_ids = list(source_to_dest_experiment_ids.keys())
+            group_basename = self._group_stream_basename(source_experiment_ids)
 
-            state_path = events_dir / f"{source_experiment_id}_state.json"
+            state_path = events_dir / f"{group_basename}_state.json"
             state = EventsStreamState.from_path(state_path)
 
             seen_db = (
-                SeenIdsDB(str(events_dir / f"{source_experiment_id}_seen.sqlite3"))
+                SeenIdsDB(str(events_dir / f"{group_basename}_seen.sqlite3"))
                 if self.events_use_seen_db
                 else None
             )
@@ -691,13 +735,17 @@ class ExperimentMigrator(ResourceMigrator[dict]):
                     # beginning and rely on seen_db for idempotency.
                     self._logger.warning(
                         "Experiment events checkpoint contains legacy cursor but no btql_min_pagination_key; restarting BTQL stream from beginning",
-                        source_experiment_id=source_experiment_id,
+                        source_experiment_ids=source_experiment_ids,
                     )
                     state.cursor = None
 
-                # BTQL-based streaming does not use version snapshots.
-                version = None
                 progress = self._events_progress_hook
+                writers_by_source = {
+                    source_experiment_id: SDKExperimentWriter(
+                        self.dest_client, dest_experiment_id
+                    )
+                    for source_experiment_id, dest_experiment_id in source_to_dest_experiment_ids.items()
+                }
 
                 def _save_state() -> None:
                     state.cursor = None
@@ -705,85 +753,79 @@ class ExperimentMigrator(ResourceMigrator[dict]):
                         _json.dump(state.to_dict(), f, indent=2)
 
                 async def _fetch(n: int) -> dict[str, Any]:
-                    return await self._fetch_experiment_events_page(
-                        experiment_id=source_experiment_id,
-                        cursor=None,
-                        version=version,
+                    return await self._fetch_experiment_events_page_btql_sorted(
+                        experiment_ids=source_experiment_ids,
                         limit=n,
                         state=state,
                     )
 
                 async def _on_single_413(event: dict[str, Any], err: Exception) -> None:
+                    source_experiment_id = event.get("experiment_id")
                     self._dump_oversize_event_summary(
                         events_dir=events_dir,
                         cursor=state.btql_min_pagination_key,
-                        dest_experiment_id=dest_experiment_id,
+                        dest_experiment_id=(
+                            source_to_dest_experiment_ids.get(source_experiment_id)
+                            if isinstance(source_experiment_id, str)
+                            else None
+                        )
+                        or "unknown",
                         event=event,
                         error=err,
                     )
 
-                await stream_btql_sorted_events(
+                await stream_btql_sorted_events_buffered(
                     fetch_page=_fetch,
                     page_limit=int(self.events_fetch_limit),
-                    get_last_pk=lambda: state.btql_min_pagination_key,
-                    set_last_pk=lambda pk: setattr(
-                        state, "btql_min_pagination_key", pk
-                    ),
+                    state=state,
                     save_state=_save_state,
                     page_event_filter=lambda e: e.get("_object_delete") is True,
-                    event_to_insert=lambda e: self._event_to_insert(
-                        e, source_experiment_id
-                    ),
+                    event_to_insert=self._event_to_insert_from_row,
                     seen_db=seen_db,
-                    insert_batch_size=int(self.events_insert_batch_size),
-                    insert_max_bytes=self._insert_max_bytes,
                     rewrite_event_in_place=(
                         None
                         if self._attachment_copier is None
                         else self._attachment_copier.rewrite_event_in_place
                     ),
-                    insert_events=lambda batch: self._insert_experiment_events(
-                        experiment_id=dest_experiment_id, events=batch
+                    insert_events=lambda batch: self._insert_experiment_events_grouped(
+                        batch=batch,
+                        writers_by_source=writers_by_source,
                     ),
+                    flush_max_rows=self._sdk_flush_max_rows,
+                    flush_max_bytes=self._sdk_flush_max_bytes,
                     is_http_413=self._is_http_413,
                     on_single_413=_on_single_413,
-                    incr_fetched=lambda n: setattr(
-                        state, "fetched_events", int(state.fetched_events) + int(n)
-                    ),
-                    incr_inserted=lambda n: setattr(
-                        state, "inserted_events", int(state.inserted_events) + int(n)
-                    ),
-                    incr_inserted_bytes=lambda n: setattr(
-                        state, "inserted_bytes", int(state.inserted_bytes) + int(n)
-                    ),
-                    incr_skipped_deleted=lambda n: setattr(
-                        state, "skipped_deleted", int(state.skipped_deleted) + int(n)
-                    ),
-                    incr_skipped_seen=lambda n: setattr(
-                        state, "skipped_seen", int(state.skipped_seen) + int(n)
-                    ),
-                    incr_attachments_copied=lambda n: setattr(
-                        state,
-                        "attachments_copied",
-                        int(state.attachments_copied) + int(n),
-                    ),
                     hooks=None
                     if progress is None
                     else {
-                        "on_page": lambda info, _p=progress: _p(
+                        "on_fetch": lambda info, _p=progress: _p(
                             {
                                 "resource": "experiment_events",
-                                "phase": "page",
-                                "source_experiment_id": source_experiment_id,
-                                "dest_experiment_id": dest_experiment_id,
+                                "phase": "fetch",
+                                "source_experiment_ids": source_experiment_ids,
+                                "dest_experiment_ids": list(
+                                    source_to_dest_experiment_ids.values()
+                                ),
                                 "page_num": info.get("page_num"),
                                 "page_events": info.get("page_events"),
-                                "fetched_total": state.fetched_events,
-                                "inserted_total": state.inserted_events,
-                                "inserted_bytes_total": state.inserted_bytes,
-                                "skipped_deleted_total": state.skipped_deleted,
-                                "skipped_seen_total": state.skipped_seen,
-                                "attachments_copied_total": state.attachments_copied,
+                                "fetched_total": info.get("fetched_total"),
+                                "inserted_total": info.get("inserted_total"),
+                                "inserted_bytes_total": info.get(
+                                    "inserted_bytes_total"
+                                ),
+                                "skipped_deleted_total": info.get(
+                                    "skipped_deleted_total"
+                                ),
+                                "skipped_seen_total": info.get("skipped_seen_total"),
+                                "attachments_copied_total": info.get(
+                                    "attachments_copied_total"
+                                ),
+                                "pending_buffered_rows": info.get(
+                                    "pending_buffered_rows"
+                                ),
+                                "pending_buffered_bytes": info.get(
+                                    "pending_buffered_bytes"
+                                ),
                                 "cursor": (
                                     (state.btql_min_pagination_key[:16] + "…")
                                     if isinstance(state.btql_min_pagination_key, str)
@@ -792,18 +834,68 @@ class ExperimentMigrator(ResourceMigrator[dict]):
                                 "next_cursor": None,
                             }
                         ),
-                        "on_done": lambda _info, _p=progress: _p(
+                        "on_page": lambda info, _p=progress: _p(
+                            {
+                                "resource": "experiment_events",
+                                "phase": "page",
+                                "source_experiment_ids": source_experiment_ids,
+                                "dest_experiment_ids": list(
+                                    source_to_dest_experiment_ids.values()
+                                ),
+                                "page_num": info.get("page_num"),
+                                "page_events": info.get("page_events"),
+                                "fetched_total": info.get("fetched_total"),
+                                "inserted_total": info.get("inserted_total"),
+                                "inserted_bytes_total": info.get(
+                                    "inserted_bytes_total"
+                                ),
+                                "skipped_deleted_total": info.get(
+                                    "skipped_deleted_total"
+                                ),
+                                "skipped_seen_total": info.get("skipped_seen_total"),
+                                "attachments_copied_total": info.get(
+                                    "attachments_copied_total"
+                                ),
+                                "pending_buffered_rows": info.get(
+                                    "pending_buffered_rows"
+                                ),
+                                "pending_buffered_bytes": info.get(
+                                    "pending_buffered_bytes"
+                                ),
+                                "cursor": (
+                                    (state.btql_min_pagination_key[:16] + "…")
+                                    if isinstance(state.btql_min_pagination_key, str)
+                                    else None
+                                ),
+                                "next_cursor": None,
+                            }
+                        ),
+                        "on_done": lambda info, _p=progress: _p(
                             {
                                 "resource": "experiment_events",
                                 "phase": "done",
-                                "source_experiment_id": source_experiment_id,
-                                "dest_experiment_id": dest_experiment_id,
-                                "fetched_total": state.fetched_events,
-                                "inserted_total": state.inserted_events,
-                                "inserted_bytes_total": state.inserted_bytes,
-                                "skipped_deleted_total": state.skipped_deleted,
-                                "skipped_seen_total": state.skipped_seen,
-                                "attachments_copied_total": state.attachments_copied,
+                                "source_experiment_ids": source_experiment_ids,
+                                "dest_experiment_ids": list(
+                                    source_to_dest_experiment_ids.values()
+                                ),
+                                "fetched_total": info.get("fetched_total"),
+                                "inserted_total": info.get("inserted_total"),
+                                "inserted_bytes_total": info.get(
+                                    "inserted_bytes_total"
+                                ),
+                                "skipped_deleted_total": info.get(
+                                    "skipped_deleted_total"
+                                ),
+                                "skipped_seen_total": info.get("skipped_seen_total"),
+                                "attachments_copied_total": info.get(
+                                    "attachments_copied_total"
+                                ),
+                                "pending_buffered_rows": info.get(
+                                    "pending_buffered_rows"
+                                ),
+                                "pending_buffered_bytes": info.get(
+                                    "pending_buffered_bytes"
+                                ),
                                 "cursor": None,
                                 "next_cursor": None,
                             }
@@ -813,8 +905,8 @@ class ExperimentMigrator(ResourceMigrator[dict]):
 
                 self._logger.info(
                     "Migrated experiment events (streaming)",
-                    source_experiment_id=source_experiment_id,
-                    dest_experiment_id=dest_experiment_id,
+                    source_experiment_ids=source_experiment_ids,
+                    dest_experiment_ids=list(source_to_dest_experiment_ids.values()),
                     fetched=state.fetched_events,
                     inserted=state.inserted_events,
                     skipped_deleted=state.skipped_deleted,
@@ -830,19 +922,19 @@ class ExperimentMigrator(ResourceMigrator[dict]):
             if "Error code: 303" in error_str:
                 self._logger.warning(
                     "Experiment events fetch returned HTTP 303 - skipping events migration",
-                    source_experiment_id=source_experiment_id,
+                    source_experiment_ids=list(source_to_dest_experiment_ids.keys()),
                 )
                 return
             elif "Error code: 404" in error_str:
                 self._logger.info(
                     "No events found in source experiment (404)",
-                    source_experiment_id=source_experiment_id,
+                    source_experiment_ids=list(source_to_dest_experiment_ids.keys()),
                 )
                 return
             else:
                 self._logger.error(
                     "Failed to migrate experiment events",
-                    source_experiment_id=source_experiment_id,
+                    source_experiment_ids=list(source_to_dest_experiment_ids.keys()),
                     error=str(e),
                 )
                 raise

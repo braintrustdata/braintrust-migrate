@@ -33,3 +33,12 @@ def test_byte_batcher_splits_by_bytes_and_preserves_order() -> None:
     assert len(batches) >= 2
     for b in batches:
         assert approx_json_bytes({"events": b}) <= max_bytes
+
+
+def test_approx_json_bytes_counts_utf8_bytes() -> None:
+    payload = {"events": [{"id": "a", "input": "🙂漢字"}]}
+
+    serialized = '{"events": [{"id": "a", "input": "🙂漢字"}]}'
+
+    assert approx_json_bytes(payload) == len(serialized.encode("utf-8"))
+    assert approx_json_bytes(payload) > len(serialized)
