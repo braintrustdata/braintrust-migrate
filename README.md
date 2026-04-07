@@ -404,7 +404,7 @@ On resume: skips 1-30 (done), resumes experiment 31 from saved `_pagination_key`
 
 ## Parallelization
 
-The migration tool uses **three levels of parallelization** that work together to reduce migration time. All levels are enabled by default and are controlled by the three env vars described in [Parallelization Tuning](#parallelization-tuning).
+The migration tool currently uses **two active levels of concurrency** plus pipelined event streaming. The env vars in [Parallelization Tuning](#parallelization-tuning) still matter, but the within-project resource-type DAG concurrency described below has not been implemented yet.
 
 ### How It Works
 
@@ -414,21 +414,20 @@ The migration tool uses **three levels of parallelization** that work together t
 │   Projects migrate concurrently (up to 1 at a time by default) │
 │                                                             │
 │ ┌─────────────────────────────────────────────────────────┐ │
-│ │ Level 2: Inter-Resource-Type (DAG scheduler)            │ │
-│ │   Within each project, independent resource types       │ │
-│ │   (e.g. Datasets + Tags + Iframes) run concurrently.   │ │
-│ │   Dependent types wait for prerequisites to finish.     │ │
+│ │ Level 2: Intra-Resource-Type                           │ │
+│ │   Within a single resource type, some migrators can    │ │
+│ │   process multiple items concurrently                  │ │
+│ │   (MIGRATION_MAX_CONCURRENT_RESOURCES).                │ │
 │ │                                                         │ │
-│ │ ┌─────────────────────────────────────────────────────┐ │ │
-│ │ │ Level 3: Intra-Resource-Type                        │ │ │
-│ │ │   Within each type, individual items migrate        │ │ │
-│ │ │   concurrently (MIGRATION_MAX_CONCURRENT_RESOURCES) │ │ │
-│ │ │                                                     │ │ │
-│ │ │   For streaming resources (logs/datasets/exps):     │ │ │
-│ │ │   - Multiple event streams run in parallel          │ │ │
-│ │ │   - Each stream prefetches the next page while      │ │ │
-│ │ │     inserting the current (STREAMING_PIPELINE)      │ │ │
-│ │ └─────────────────────────────────────────────────────┘ │ │
+│ │   Resource types themselves still run sequentially     │ │
+│ │   within each project.                                 │ │
+│ │                                                         │ │
+│ │   For streaming resources (logs/datasets/exps):        │ │
+│ │   - Each stream can prefetch the next page while       │ │
+│ │     inserting the current one                          │ │
+│ │   - Dataset/experiment streams are grouped for fetch   │ │
+│ │     efficiency, not scheduled as independent parallel  │ │
+│ │     DAG tasks within a project                         │ │
 │ └─────────────────────────────────────────────────────────┘ │
 └─────────────────────────────────────────────────────────────┘
 ```
@@ -436,13 +435,17 @@ The migration tool uses **three levels of parallelization** that work together t
 ### Level Details
 
 **Inter-Project Concurrency** (`MIGRATION_MAX_CONCURRENT`, default 1)
-Multiple projects migrate at the same time. Each project runs its own DAG-scheduled resource pipeline independently. This was the only parallelism the tool had before the current changes.
-
-**Inter-Resource-Type Concurrency** (automatic, DAG-based)
-Within each project, resource types are organized in a dependency graph. Types whose dependencies are satisfied start immediately instead of waiting in a fixed sequence. For example, Datasets, Project Tags, and Span Iframes all start at the same time because they have no mutual dependencies.
+Multiple projects migrate at the same time. Each project runs independently, bounded by this semaphore.
 
 **Intra-Resource-Type Concurrency** (`MIGRATION_MAX_CONCURRENT_RESOURCES`, default 5)
-Within a single resource type, multiple individual items migrate concurrently. For example, if a project has 50 functions, up to 5 are created at once instead of one-by-one. For streaming resources (datasets, experiments), this also controls how many event streams run in parallel -- e.g. events for 5 datasets copy simultaneously.
+Within a single resource type, migrators that use the base batch executor can process multiple individual items concurrently. For example, if a project has 50 functions, up to 5 may be created at once instead of one-by-one.
+
+Resource types themselves are still processed sequentially within a project in the current implementation.
+
+For streaming resources:
+- `logs` is a single stream per project.
+- `datasets` and `experiments` group multiple ids into one BTQL fetch stream for efficiency.
+- `MIGRATION_MAX_CONCURRENT_RESOURCES` does not currently create multiple independent resource-type DAG tasks within a single project.
 
 **Pipelined Event Streaming** (`MIGRATION_STREAMING_PIPELINE`, default true)
 For each individual event stream (logs, dataset records, experiment events), the next BTQL page is prefetched from the source while the current page's batches are being inserted into the destination. This overlaps source reads with destination writes, reducing idle time for large migrations.
@@ -459,7 +462,7 @@ State mutations (ID mappings, checkpoint files) are protected by `asyncio.Lock` 
 |----------|---------------------|
 | **Small migration** (<5 projects, <100 resources) | Defaults work well. No tuning needed. |
 | **Many small projects** (50+ projects, small data) | Increase `MIGRATION_MAX_CONCURRENT=20` for more project-level parallelism. |
-| **Few projects with many resources** (e.g. 500 experiments in one project) | Increase `MIGRATION_MAX_CONCURRENT_RESOURCES=10` for more intra-type parallelism. |
+| **Few projects with many resources** (e.g. 500 experiments in one project) | `MIGRATION_MAX_CONCURRENT_RESOURCES` helps only for migrators that support per-item fanout. Streaming resources within one project still run mostly as a single grouped stream. |
 | **Large event streams** (TB-scale logs) | Defaults are good. Pipeline is on by default. Consider increasing `MIGRATION_MAX_CONCURRENT_REQUESTS=40` if the API can handle it. |
 | **Rate-limited API** (frequent 429s) | *Decrease* `MIGRATION_MAX_CONCURRENT_RESOURCES=2` and `MIGRATION_MAX_CONCURRENT_REQUESTS=10`. The tool handles 429s with backoff, but fewer concurrent requests reduces throttling. |
 | **Debugging or sequential run** | Set `MIGRATION_MAX_CONCURRENT_RESOURCES=1` and `MIGRATION_STREAMING_PIPELINE=false` for deterministic, sequential execution. |
