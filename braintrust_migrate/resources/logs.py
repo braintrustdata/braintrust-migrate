@@ -156,7 +156,13 @@ class LogsMigrator(ResourceMigrator[dict[str, Any]]):
 
         self._logger = logger.bind(migrator=self.__class__.__name__)
         self._sdk_logs_writer: SDKProjectLogsWriter | None = None
-        self._sdk_flush_max_rows = int(self.SDK_FLUSH_MAX_ROWS)
+        cfg = getattr(self.dest_client, "migration_config", None) or getattr(
+            self.source_client, "migration_config", None
+        )
+        self._sdk_flush_max_rows = max(
+            1,
+            int(getattr(cfg, "events_flush_max_rows", self.SDK_FLUSH_MAX_ROWS)),
+        )
         self._sdk_flush_max_bytes = int(self.SDK_FLUSH_MAX_BYTES)
 
         self._stream_state_path = self.checkpoint_dir / "logs_streaming_state.json"
@@ -188,9 +194,6 @@ class LogsMigrator(ResourceMigrator[dict[str, Any]]):
             )
 
         # Byte-aware insert batching config (best-effort; falls back to count-only if missing).
-        cfg = getattr(self.dest_client, "migration_config", None) or getattr(
-            self.source_client, "migration_config", None
-        )
         try:
             max_req = int(getattr(cfg, "insert_max_request_bytes", 6 * 1024 * 1024))
             headroom = float(getattr(cfg, "insert_request_headroom_ratio", 0.5))

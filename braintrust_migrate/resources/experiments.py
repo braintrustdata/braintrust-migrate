@@ -54,7 +54,7 @@ class ExperimentMigrator(ResourceMigrator[dict]):
     Uses raw API requests instead of SDK to avoid model dependencies.
     """
 
-    SDK_FLUSH_MAX_ROWS: ClassVar[int] = 1_000
+    SDK_FLUSH_MAX_ROWS: ClassVar[int] = 5_000
     SDK_FLUSH_MAX_BYTES: ClassVar[int] = 25 * 1024 * 1024
     DEFAULT_EVENT_FETCH_GROUP_SIZE: ClassVar[int] = 25
 
@@ -99,7 +99,12 @@ class ExperimentMigrator(ResourceMigrator[dict]):
             self._insert_max_bytes: int | None = int(max_req * headroom)
         except Exception:
             self._insert_max_bytes = None
-        self._sdk_flush_max_rows = int(self.SDK_FLUSH_MAX_ROWS)
+        self._sdk_flush_max_rows = _coerce_int_config(
+            cfg,
+            "events_flush_max_rows",
+            self.SDK_FLUSH_MAX_ROWS,
+            minimum=1,
+        )
         self._sdk_flush_max_bytes = int(self.SDK_FLUSH_MAX_BYTES)
         self._event_fetch_group_size = _coerce_int_config(
             cfg,

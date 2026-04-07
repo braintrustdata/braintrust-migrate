@@ -148,3 +148,25 @@ class TestConfigFromEnv:
         assert config.migration.group_auto_invite_users is True
         assert config.migration.events_fetch_group_size == 17
         assert config.logging.level == "DEBUG"
+
+    def test_unified_events_flush_max_rows_from_env(self, monkeypatch):
+        """Test shared streaming flush threshold env var."""
+        monkeypatch.setenv("BT_SOURCE_API_KEY", "source-test-key")
+        monkeypatch.setenv("BT_DEST_API_KEY", "dest-test-key")
+        monkeypatch.setenv("MIGRATION_EVENTS_FLUSH_MAX_ROWS", "4321")
+
+        config = Config.from_env()
+
+        assert config.migration.events_flush_max_rows == 4321
+        assert config.migration.logs_insert_batch_size == 4321
+
+    def test_legacy_logs_insert_batch_size_alias_still_works(self, monkeypatch):
+        """Test legacy logs-only env var maps to shared flush threshold."""
+        monkeypatch.setenv("BT_SOURCE_API_KEY", "source-test-key")
+        monkeypatch.setenv("BT_DEST_API_KEY", "dest-test-key")
+        monkeypatch.setenv("MIGRATION_LOGS_INSERT_BATCH_SIZE", "3456")
+
+        config = Config.from_env()
+
+        assert config.migration.events_flush_max_rows == 3456
+        assert config.migration.logs_insert_batch_size == 3456
