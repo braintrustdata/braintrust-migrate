@@ -33,6 +33,14 @@ logger = structlog.get_logger(__name__)
 MAX_SUMMARY_ITEMS_PER_REASON: int = 10
 
 T = TypeVar("T")
+ProjectHook = Callable[[dict[str, Any], int, int], None]
+ProjectResultHook = Callable[[dict[str, Any], dict[str, Any] | Exception, int, int], None]
+ProjectsDiscoveredHook = Callable[[list[dict[str, Any]]], None]
+OrganizationResultHook = Callable[[dict[str, Any]], None]
+ProgressFactory = Callable[[str], Callable[[dict[str, Any]], None]]
+ProgressFactoryFactory = Callable[[dict[str, Any]], ProgressFactory | None]
+ResourceCallback = Callable[[str, dict[str, Any]], None]
+ResourceCallbackFactory = Callable[[dict[str, Any]], ResourceCallback | None]
 
 # Project-scoped resource dependency graph used by DAG scheduler unit tests.
 # This graph is intentionally kept as module-level compatibility surface.
@@ -187,7 +195,18 @@ class MigrationOrchestrator:
         self.config = config
         self._logger = logger.bind(orchestrator=True)
 
-    async def migrate_all(self) -> dict[str, Any]:
+    async def migrate_all(
+        self,
+        *,
+        checkpoint_dir: Path | None = None,
+        on_projects_discovered: ProjectsDiscoveredHook | None = None,
+        on_organization_start: Callable[[], None] | None = None,
+        on_organization_complete: OrganizationResultHook | None = None,
+        on_project_start: ProjectHook | None = None,
+        on_project_complete: ProjectResultHook | None = None,
+        progress_factory_factory: ProgressFactoryFactory | None = None,
+        resource_callback_factory: ResourceCallbackFactory | None = None,
+    ) -> dict[str, Any]:
         """Migrate all resources from source to destination organization.
 
         Returns:
@@ -196,9 +215,10 @@ class MigrationOrchestrator:
         start_time = datetime.now()
         self._logger.info("Starting complete migration")
 
-        # Create timestamped checkpoint directory
-        timestamp = start_time.strftime("%Y%m%d_%H%M%S")
-        checkpoint_dir = self.config.ensure_checkpoint_dir() / timestamp
+        # Create timestamped checkpoint directory unless one was provided.
+        if checkpoint_dir is None:
+            timestamp = start_time.strftime("%Y%m%d_%H%M%S")
+            checkpoint_dir = self.config.ensure_checkpoint_dir() / timestamp
 
         total_results = {
             "start_time": start_time.isoformat(),
@@ -224,6 +244,8 @@ class MigrationOrchestrator:
                 # Discover projects
                 projects = await self._discover_projects(source_client, dest_client)
                 total_results["summary"]["total_projects"] = len(projects)
+                if on_projects_discovered is not None:
+                    on_projects_discovered(projects)
 
                 self._logger.info(f"Discovered {len(projects)} projects to migrate")
 
@@ -242,12 +264,16 @@ class MigrationOrchestrator:
 
                 # STEP 1: Migrate organization-scoped resources once
                 self._logger.info("Migrating organization-scoped resources")
+                if on_organization_start is not None:
+                    on_organization_start()
                 org_results = await self._migrate_organization_resources(
                     source_client,
                     dest_client,
                     checkpoint_dir,
                     global_id_mappings,
                 )
+                if on_organization_complete is not None:
+                    on_organization_complete(org_results)
 
                 total_results["organization_resources"] = org_results
 
@@ -270,15 +296,51 @@ class MigrationOrchestrator:
                     total_projects=len(projects),
                 )
 
+                completed_projects = 0
+
+                async def _run_project_with_hooks(
+                    project: dict[str, Any], index: int
+                ) -> dict[str, Any]:
+                    nonlocal completed_projects
+                    if on_project_start is not None:
+                        on_project_start(project, index, len(projects))
+
+                    try:
+                        project_results = await self._migrate_project(
+                            project,
+                            source_client,
+                            dest_client,
+                            checkpoint_dir,
+                            global_id_mappings,
+                            progress_factory=(
+                                progress_factory_factory(project)
+                                if progress_factory_factory is not None
+                                else None
+                            ),
+                            resource_callback=(
+                                resource_callback_factory(project)
+                                if resource_callback_factory is not None
+                                else None
+                            ),
+                        )
+                    except Exception as e:
+                        completed_projects += 1
+                        if on_project_complete is not None:
+                            on_project_complete(
+                                project, e, completed_projects, len(projects)
+                            )
+                        raise
+
+                    completed_projects += 1
+                    if on_project_complete is not None:
+                        on_project_complete(
+                            project, project_results, completed_projects, len(projects)
+                        )
+                    return project_results
+
                 project_coros = [
-                    self._migrate_project(
-                        project,
-                        source_client,
-                        dest_client,
-                        checkpoint_dir,
-                        global_id_mappings,  # shared mappings across all projects
-                    )
-                    for project in projects
+                    _run_project_with_hooks(project, index)
+                    for index, project in enumerate(projects, start=1)
                 ]
                 project_results_list = await _gather_with_concurrency(
                     project_coros, max_concurrent=max_concurrent

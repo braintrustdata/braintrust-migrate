@@ -95,7 +95,7 @@ class MigrationConfig(BaseModel):
         description="Initial delay between retries in seconds",
     )
     max_concurrent: int = Field(
-        default=10, ge=1, le=50, description="Maximum number of concurrent operations"
+        default=1, ge=1, le=50, description="Maximum number of concurrent operations"
     )
     max_concurrent_resources: int = Field(
         default=5,
@@ -353,7 +353,7 @@ class Config(BaseModel):
         batch_size = int(os.getenv("MIGRATION_BATCH_SIZE", "100"))
         retry_attempts = int(os.getenv("MIGRATION_RETRY_ATTEMPTS", "3"))
         retry_delay = float(os.getenv("MIGRATION_RETRY_DELAY", "1.0"))
-        max_concurrent = int(os.getenv("MIGRATION_MAX_CONCURRENT", "10"))
+        max_concurrent = int(os.getenv("MIGRATION_MAX_CONCURRENT", "1"))
         max_concurrent_resources = int(
             os.getenv("MIGRATION_MAX_CONCURRENT_RESOURCES", "5")
         )
