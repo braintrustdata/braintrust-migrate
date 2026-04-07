@@ -18,6 +18,26 @@ The format is based on Keep a Changelog and this project follows Semantic Versio
 
 - N/A
 
+## [0.2.0] - 2026-04-06
+
+### Added
+
+- SDK-backed `logs3` writers for high-volume logs, experiment events, and dataset events.
+- Buffered BTQL event streaming with grouped dataset and experiment fetches for higher-throughput migrations.
+- Additional regression coverage for SDK-backed streaming, retry behavior, UTF-8 batching, and resume flows.
+
+### Changed
+
+- Switched high-volume event migration from direct insert endpoints to buffered SDK-backed writers.
+- Updated BTQL request metadata handling and removed the `query_source` request/state field.
+- Refined release and streaming documentation to match the new `0.2.0` migration behavior.
+
+### Fixed
+
+- Made byte-based batching account for actual UTF-8 payload size instead of character count.
+- Preserved compatibility with mocked and lightweight client configs used across the test suite.
+- Brought integration and unit tests in line with buffered SDK streaming and the current retry API.
+
 ## [0.1.0] - 2026-03-02
 
 ### Added
