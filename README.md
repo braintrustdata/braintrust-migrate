@@ -146,7 +146,7 @@ All options can be set via environment variables or CLI flags. CLI flags take pr
 | `MIGRATION_BATCH_SIZE` | — | `100` | Number of resources to process per batch |
 | `MIGRATION_RETRY_ATTEMPTS` | — | `3` | Number of retry attempts for failed operations (0 = no retries) |
 | `MIGRATION_RETRY_DELAY` | — | `1.0` | Initial retry delay in seconds (exponential backoff) |
-| `MIGRATION_MAX_CONCURRENT` | — | `10` | Maximum concurrent **projects** (bounded project-level parallelism) |
+| `MIGRATION_MAX_CONCURRENT` | — | `1` | Maximum concurrent **projects** (bounded project-level parallelism) |
 | `MIGRATION_CHECKPOINT_INTERVAL` | — | `50` | Write checkpoint every N successful operations |
 
 #### Parallelization Tuning
@@ -410,8 +410,8 @@ The migration tool uses **three levels of parallelization** that work together t
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
-│ Level 1: Inter-Project (MIGRATION_MAX_CONCURRENT=10)        │
-│   Projects migrate concurrently (up to 10 at a time)        │
+│ Level 1: Inter-Project (MIGRATION_MAX_CONCURRENT=1)         │
+│   Projects migrate concurrently (up to 1 at a time by default) │
 │                                                             │
 │ ┌─────────────────────────────────────────────────────────┐ │
 │ │ Level 2: Inter-Resource-Type (DAG scheduler)            │ │
@@ -435,7 +435,7 @@ The migration tool uses **three levels of parallelization** that work together t
 
 ### Level Details
 
-**Inter-Project Concurrency** (`MIGRATION_MAX_CONCURRENT`, default 10)
+**Inter-Project Concurrency** (`MIGRATION_MAX_CONCURRENT`, default 1)
 Multiple projects migrate at the same time. Each project runs its own DAG-scheduled resource pipeline independently. This was the only parallelism the tool had before the current changes.
 
 **Inter-Resource-Type Concurrency** (automatic, DAG-based)
