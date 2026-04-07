@@ -123,8 +123,8 @@ All options can be set via environment variables or CLI flags. CLI flags take pr
 |---------------------|----------|---------|-------------|
 | `MIGRATION_RESOURCES` | `--resources`, `-r` | `all` | Comma-separated list of resources to migrate. Options: `all`, `ai_secrets`, `roles`, `groups`, `datasets`, `project_tags`, `span_iframes`, `functions`, `prompts`, `project_scores`, `experiments`, `logs`, `views` |
 | `MIGRATION_PROJECTS` | `--projects`, `-p` | *(all projects)* | Comma-separated list of project names to migrate |
-| `MIGRATION_CREATED_AFTER` | `--created-after` | *(none)* | Only migrate data created on or after this date (**inclusive**: `>=`). Format: `YYYY-MM-DD` or ISO-8601 |
-| `MIGRATION_CREATED_BEFORE` | `--created-before` | *(none)* | Only migrate data created before this date (**exclusive**: `<`). Format: `YYYY-MM-DD` or ISO-8601 |
+| `MIGRATION_CREATED_AFTER` | `--created-after` | *(none)* | Only applies to resources that support created-time filtering. Currently this affects project logs event streaming and experiment listing. Migrates items with `created >=` this value (**inclusive**). Format: `YYYY-MM-DD` or ISO-8601 |
+| `MIGRATION_CREATED_BEFORE` | `--created-before` | *(none)* | Only applies to resources that support created-time filtering. Currently this affects project logs event streaming and experiment listing. Migrates items with `created <` this value (**exclusive**). Format: `YYYY-MM-DD` or ISO-8601 |
 
 #### Logging
 
@@ -160,6 +160,7 @@ All options can be set via environment variables or CLI flags. CLI flags take pr
 #### Streaming Migration (Logs, Experiments, Datasets)
 
 These settings control BTQL-based streaming for high-volume resources.
+`MIGRATION_CREATED_AFTER` and `MIGRATION_CREATED_BEFORE` are not universal streaming filters: they currently affect project logs event migration and experiment selection, but not dataset event migration.
 
 | Environment Variable | CLI Flag | Default | Description |
 |---------------------|----------|---------|-------------|
