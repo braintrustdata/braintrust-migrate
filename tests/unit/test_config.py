@@ -132,6 +132,7 @@ class TestConfigFromEnv:
         monkeypatch.setenv("MIGRATION_ACL_AUTO_INVITE_USERS", "true")
         monkeypatch.setenv("MIGRATION_GROUP_MAP_USERS", "true")
         monkeypatch.setenv("MIGRATION_GROUP_AUTO_INVITE_USERS", "true")
+        monkeypatch.setenv("MIGRATION_EVENTS_FETCH_GROUP_SIZE", "17")
         monkeypatch.setenv("LOG_LEVEL", "DEBUG")
 
         config = Config.from_env()
@@ -145,4 +146,5 @@ class TestConfigFromEnv:
         assert config.migration.acl_auto_invite_users is True
         assert config.migration.group_map_users is True
         assert config.migration.group_auto_invite_users is True
+        assert config.migration.events_fetch_group_size == 17
         assert config.logging.level == "DEBUG"

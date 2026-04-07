@@ -11,12 +11,20 @@ that don't yet support SQL mode.
 from __future__ import annotations
 
 from collections.abc import Callable
+from importlib.metadata import PackageNotFoundError, version
 from typing import Any, cast
 
 import httpx
 import structlog
 
 from braintrust_migrate.client import BraintrustClient
+
+
+def _client_version() -> str:
+    try:
+        return version("braintrust-migrate")
+    except PackageNotFoundError:
+        return "dev"
 
 
 def btql_quote(s: str) -> str:
@@ -98,9 +106,12 @@ async def fetch_btql_sorted_page_with_retries(
                     # All modern deployments are Brainstore-backed; do not attempt
                     # a Postgres fallback.
                     "use_brainstore": True,
+                    "client_version": _client_version(),
+                    "query_timeout_seconds": int(timeout_seconds),
                 },
                 timeout=timeout_seconds,
             ),
+            non_retryable_statuses={500, 504},
         )
 
     async def _fetch_one_limit(n: int) -> Any:

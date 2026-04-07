@@ -186,19 +186,18 @@ class MigrationConfig(BaseModel):
         le=10_000,
         description="Fetch page size for streaming experiment events via BTQL (limit is in rows/spans)",
     )
-    experiment_events_insert_batch_size: int = Field(
-        default=200,
-        ge=1,
-        le=10_000,
-        description="Insert batch size for streaming experiment events (number of events per insert call)",
-    )
-    experiment_events_use_version_snapshot: bool = Field(
-        default=True,
-        description="Pin a stable snapshot version for streaming experiment event migration",
-    )
     experiment_events_use_seen_db: bool = Field(
         default=True,
         description="Use a SQLite seen-id store to prevent older versions overwriting newer ones during experiment pagination",
+    )
+    events_fetch_group_size: int = Field(
+        default=25,
+        ge=1,
+        le=1_000,
+        description=(
+            "Number of dataset or experiment ids to group into a single BTQL event stream. "
+            "Used for grouped dataset/experiment event fetches."
+        ),
     )
 
     # Dataset event migration tuning
@@ -207,16 +206,6 @@ class MigrationConfig(BaseModel):
         ge=1,
         le=10_000,
         description="Fetch page size for streaming dataset events via BTQL (limit is in rows/spans)",
-    )
-    dataset_events_insert_batch_size: int = Field(
-        default=200,
-        ge=1,
-        le=10_000,
-        description="Insert batch size for streaming dataset events (number of events per insert call)",
-    )
-    dataset_events_use_version_snapshot: bool = Field(
-        default=True,
-        description="Pin a stable snapshot version for streaming dataset event migration",
     )
     dataset_events_use_seen_db: bool = Field(
         default=True,
@@ -379,8 +368,8 @@ class Config(BaseModel):
         #
         # Unified:
         #   MIGRATION_EVENTS_FETCH_LIMIT=1000
-        #   MIGRATION_EVENTS_INSERT_BATCH_SIZE=200
         #   MIGRATION_EVENTS_USE_SEEN_DB=true
+        #   MIGRATION_EVENTS_FETCH_GROUP_SIZE=25
         #
         # Resource-specific overrides (optional):
         #   MIGRATION_LOGS_FETCH_LIMIT, MIGRATION_EXPERIMENT_EVENTS_FETCH_LIMIT, etc.
@@ -392,20 +381,20 @@ class Config(BaseModel):
             val = os.getenv(specific_key) or os.getenv(unified_key, default)
             return val.lower() in {"1", "true", "yes", "y", "on"}
 
+        events_fetch_group_size = int(
+            os.getenv("MIGRATION_EVENTS_FETCH_GROUP_SIZE", "25")
+        )
+
         # Logs
         logs_fetch_limit = _get_int(
             "MIGRATION_LOGS_FETCH_LIMIT", "MIGRATION_EVENTS_FETCH_LIMIT", "1000"
         )
-        logs_insert_batch_size = _get_int(
-            "MIGRATION_LOGS_INSERT_BATCH_SIZE",
-            "MIGRATION_EVENTS_INSERT_BATCH_SIZE",
-            "200",
+        logs_insert_batch_size = int(
+            os.getenv("MIGRATION_LOGS_INSERT_BATCH_SIZE", "200")
         )
-        logs_use_version_snapshot = _get_bool(
-            "MIGRATION_LOGS_USE_VERSION_SNAPSHOT",
-            "MIGRATION_EVENTS_USE_VERSION_SNAPSHOT",
-            "true",
-        )
+        logs_use_version_snapshot = os.getenv(
+            "MIGRATION_LOGS_USE_VERSION_SNAPSHOT", "true"
+        ).lower() in {"1", "true", "yes", "y", "on"}
         logs_use_seen_db = _get_bool(
             "MIGRATION_LOGS_USE_SEEN_DB", "MIGRATION_EVENTS_USE_SEEN_DB", "true"
         )
@@ -420,16 +409,6 @@ class Config(BaseModel):
             "MIGRATION_EVENTS_FETCH_LIMIT",
             "1000",
         )
-        experiment_events_insert_batch_size = _get_int(
-            "MIGRATION_EXPERIMENT_EVENTS_INSERT_BATCH_SIZE",
-            "MIGRATION_EVENTS_INSERT_BATCH_SIZE",
-            "200",
-        )
-        experiment_events_use_version_snapshot = _get_bool(
-            "MIGRATION_EXPERIMENT_EVENTS_USE_VERSION_SNAPSHOT",
-            "MIGRATION_EVENTS_USE_VERSION_SNAPSHOT",
-            "true",
-        )
         experiment_events_use_seen_db = _get_bool(
             "MIGRATION_EXPERIMENT_EVENTS_USE_SEEN_DB",
             "MIGRATION_EVENTS_USE_SEEN_DB",
@@ -441,16 +420,6 @@ class Config(BaseModel):
             "MIGRATION_DATASET_EVENTS_FETCH_LIMIT",
             "MIGRATION_EVENTS_FETCH_LIMIT",
             "1000",
-        )
-        dataset_events_insert_batch_size = _get_int(
-            "MIGRATION_DATASET_EVENTS_INSERT_BATCH_SIZE",
-            "MIGRATION_EVENTS_INSERT_BATCH_SIZE",
-            "200",
-        )
-        dataset_events_use_version_snapshot = _get_bool(
-            "MIGRATION_DATASET_EVENTS_USE_VERSION_SNAPSHOT",
-            "MIGRATION_EVENTS_USE_VERSION_SNAPSHOT",
-            "true",
         )
         dataset_events_use_seen_db = _get_bool(
             "MIGRATION_DATASET_EVENTS_USE_SEEN_DB",
@@ -536,12 +505,9 @@ class Config(BaseModel):
                 created_after=created_after,
                 created_before=created_before,
                 experiment_events_fetch_limit=experiment_events_fetch_limit,
-                experiment_events_insert_batch_size=experiment_events_insert_batch_size,
-                experiment_events_use_version_snapshot=experiment_events_use_version_snapshot,
                 experiment_events_use_seen_db=experiment_events_use_seen_db,
+                events_fetch_group_size=events_fetch_group_size,
                 dataset_events_fetch_limit=dataset_events_fetch_limit,
-                dataset_events_insert_batch_size=dataset_events_insert_batch_size,
-                dataset_events_use_version_snapshot=dataset_events_use_version_snapshot,
                 dataset_events_use_seen_db=dataset_events_use_seen_db,
                 copy_attachments=copy_attachments,
                 attachment_max_bytes=attachment_max_bytes,

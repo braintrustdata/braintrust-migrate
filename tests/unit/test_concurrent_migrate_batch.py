@@ -170,3 +170,23 @@ class TestConcurrentMigrateBatch:
         assert results["migrated"] == 6
         assert m._max_in_flight <= 3
         assert m._max_in_flight > 1  # Should have had some concurrency
+
+    async def test_migrate_all_includes_skip_summary(self, tmp_path: Path):
+        """migrate_all should return a human-readable skip summary."""
+        m = _TestMigrator(tmp_path)
+        m.state.id_mapping["existing"] = "dest-existing"
+
+        async def mock_list(project_id=None):
+            _ = project_id
+            return [
+                {"id": "existing", "name": "Already"},
+                {"id": "new", "name": "New"},
+            ]
+
+        m.list_source_resources = mock_list  # type: ignore[assignment]
+
+        results = await m.migrate_all(project_id="proj", max_concurrent=2)
+
+        assert results["skipped"] == 1
+        assert results["skip_breakdown"] == {"already_migrated": 1}
+        assert results["skip_summary"] == "1 already migrated"

@@ -5,6 +5,7 @@ from typing import Any
 
 import pytest
 
+import braintrust_migrate.resources.logs as logs_module
 from braintrust_migrate.resources.logs import LogsMigrator
 
 
@@ -18,7 +19,14 @@ class _StubClient:
         self.fail_on_insert_call: int | None = None
         self._insert_calls = 0
 
-    async def with_retry(self, _operation_name: str, coro_func):
+    async def with_retry(
+        self,
+        _operation_name: str,
+        coro_func,
+        *,
+        non_retryable_statuses: set[int] | None = None,
+    ):
+        _ = non_retryable_statuses
         res = coro_func()
         if hasattr(res, "__await__"):
             return await res
@@ -61,6 +69,18 @@ class _StubClient:
         raise AssertionError(f"Unexpected path: {path}")
 
 
+class _FakeSDKProjectLogsWriter:
+    def __init__(self, dest_client: _StubClient, project_id: str) -> None:
+        self._dest_client = dest_client
+        self._project_id = project_id
+
+    async def write_rows(self, rows: list[dict[str, Any]]) -> None:
+        self._dest_client._insert_calls += 1
+        if self._dest_client.fail_on_insert_call == self._dest_client._insert_calls:
+            raise RuntimeError("simulated insert failure")
+        self._dest_client.inserts.append([dict(row) for row in rows])
+
+
 @pytest.mark.asyncio
 async def test_logs_migrator_resume_after_insert_failure(tmp_path: Path) -> None:
     page1 = [
@@ -83,27 +103,33 @@ async def test_logs_migrator_resume_after_insert_failure(tmp_path: Path) -> None
     source = _StubClient(page1=page1, page2=page2)
     dest = _StubClient(page1=page1, page2=page2)
     dest.fail_on_insert_call = 2  # fail on second insert (page2) during first run
+    original_writer = logs_module.SDKProjectLogsWriter
+    original_flush_max_rows = logs_module.LogsMigrator.SDK_FLUSH_MAX_ROWS
+    logs_module.SDKProjectLogsWriter = _FakeSDKProjectLogsWriter
+    logs_module.LogsMigrator.SDK_FLUSH_MAX_ROWS = 1
 
-    migrator = LogsMigrator(
-        source,  # type: ignore[arg-type]
-        dest,  # type: ignore[arg-type]
-        tmp_path,
-        page_limit=1,
-        insert_batch_size=10,
-        use_version_snapshot=True,
-        use_seen_db=True,
-    )
-    migrator.set_destination_project_id("dest-project-id")
+    try:
+        migrator = LogsMigrator(
+            source,  # type: ignore[arg-type]
+            dest,  # type: ignore[arg-type]
+            tmp_path,
+            page_limit=1,
+            insert_batch_size=10,
+            use_version_snapshot=True,
+            use_seen_db=True,
+        )
+        migrator.set_destination_project_id("dest-project-id")
 
-    with pytest.raises(RuntimeError):
+        with pytest.raises(RuntimeError):
+            await migrator.migrate_all("source-project-id")
+
+        inserted_first = [e["id"] for batch in dest.inserts for e in batch]
+        assert inserted_first == ["a"]
+
+        dest.fail_on_insert_call = None
         await migrator.migrate_all("source-project-id")
-
-    # First run inserted only "a"
-    inserted_first = [e["id"] for batch in dest.inserts for e in batch]
-    assert inserted_first == ["a"]
-
-    # Second run should resume and insert only "b" (not reinsert "a")
-    dest.fail_on_insert_call = None
-    await migrator.migrate_all("source-project-id")
-    inserted_all = [e["id"] for batch in dest.inserts for e in batch]
-    assert inserted_all == ["a", "b"]
+        inserted_all = [e["id"] for batch in dest.inserts for e in batch]
+        assert inserted_all == ["a", "b"]
+    finally:
+        logs_module.SDKProjectLogsWriter = original_writer
+        logs_module.LogsMigrator.SDK_FLUSH_MAX_ROWS = original_flush_max_rows

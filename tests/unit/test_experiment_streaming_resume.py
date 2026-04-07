@@ -5,6 +5,7 @@ from typing import Any
 
 import pytest
 
+import braintrust_migrate.resources.experiments as experiments_module
 from braintrust_migrate.resources.experiments import ExperimentMigrator
 
 
@@ -21,7 +22,14 @@ class _StubClient:
         self.fail_on_insert_call: int | None = None
         self._insert_calls = 0
 
-    async def with_retry(self, _operation_name: str, coro_func):
+    async def with_retry(
+        self,
+        _operation_name: str,
+        coro_func,
+        *,
+        non_retryable_statuses: set[int] | None = None,
+    ):
+        _ = non_retryable_statuses
         res = coro_func()
         if hasattr(res, "__await__"):
             return await res
@@ -51,16 +59,19 @@ class _StubClient:
                 return {"data": []}
             return {"data": self._page1}
 
-        if path.endswith("/insert"):
-            self._insert_calls += 1
-            if self.fail_on_insert_call == self._insert_calls:
-                raise RuntimeError("simulated insert failure")
-            assert json is not None
-            events = json.get("events", [])
-            self.inserts.append(events)
-            return {"row_ids": [e.get("id", "") for e in events]}
-
         raise AssertionError(f"Unexpected path: {path}")
+
+
+class _FakeSDKExperimentWriter:
+    def __init__(self, dest_client: _StubClient, experiment_id: str) -> None:
+        self._dest_client = dest_client
+        self._experiment_id = experiment_id
+
+    async def write_rows(self, rows: list[dict[str, Any]]) -> None:
+        self._dest_client._insert_calls += 1
+        if self._dest_client.fail_on_insert_call == self._dest_client._insert_calls:
+            raise RuntimeError("simulated insert failure")
+        self._dest_client.inserts.append([dict(row) for row in rows])
 
 
 @pytest.mark.asyncio
@@ -69,6 +80,7 @@ async def test_experiment_streaming_resume_after_insert_failure(tmp_path: Path) 
     page1 = [
         {
             "id": "a",
+            "experiment_id": "source-exp-id",
             "_pagination_key": "p1",
             "_xact_id": "10",
             "created": "2023-01-01T00:00:00Z",
@@ -78,6 +90,7 @@ async def test_experiment_streaming_resume_after_insert_failure(tmp_path: Path) 
     page2 = [
         {
             "id": "b",
+            "experiment_id": "source-exp-id",
             "_pagination_key": "p2",
             "_xact_id": "9",
             "created": "2023-01-01T00:00:01Z",
@@ -87,29 +100,34 @@ async def test_experiment_streaming_resume_after_insert_failure(tmp_path: Path) 
     source = _StubClient(page1=page1, page2=page2)
     dest = _StubClient()
     dest.fail_on_insert_call = 2  # fail on second insert during first run
+    original_writer = experiments_module.SDKExperimentWriter
+    original_flush_max_rows = experiments_module.ExperimentMigrator.SDK_FLUSH_MAX_ROWS
+    experiments_module.SDKExperimentWriter = _FakeSDKExperimentWriter
+    experiments_module.ExperimentMigrator.SDK_FLUSH_MAX_ROWS = 1
 
-    migrator = ExperimentMigrator(
-        source,  # type: ignore[arg-type]
-        dest,  # type: ignore[arg-type]
-        tmp_path,
-        events_fetch_limit=1,
-        events_insert_batch_size=10,
-        events_use_version_snapshot=False,
-        events_use_seen_db=True,
-    )
+    try:
+        migrator = ExperimentMigrator(
+            source,  # type: ignore[arg-type]
+            dest,  # type: ignore[arg-type]
+            tmp_path,
+            events_fetch_limit=1,
+            events_use_seen_db=True,
+        )
 
-    with pytest.raises(RuntimeError):
+        with pytest.raises(RuntimeError):
+            await migrator._migrate_experiment_events(  # type: ignore[attr-defined]
+                "source-exp-id", "dest-exp-id"
+            )
+
+        inserted_first = [e["id"] for batch in dest.inserts for e in batch]
+        assert inserted_first == ["a"]
+
+        dest.fail_on_insert_call = None
         await migrator._migrate_experiment_events(  # type: ignore[attr-defined]
             "source-exp-id", "dest-exp-id"
         )
-
-    inserted_first = [e["id"] for batch in dest.inserts for e in batch]
-    assert inserted_first == ["a"]
-
-    # Resume
-    dest.fail_on_insert_call = None
-    await migrator._migrate_experiment_events(  # type: ignore[attr-defined]
-        "source-exp-id", "dest-exp-id"
-    )
-    inserted_all = [e["id"] for batch in dest.inserts for e in batch]
-    assert inserted_all == ["a", "b"]
+        inserted_all = [e["id"] for batch in dest.inserts for e in batch]
+        assert inserted_all == ["a", "b"]
+    finally:
+        experiments_module.SDKExperimentWriter = original_writer
+        experiments_module.ExperimentMigrator.SDK_FLUSH_MAX_ROWS = original_flush_max_rows

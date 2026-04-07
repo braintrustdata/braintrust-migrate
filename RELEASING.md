@@ -47,6 +47,8 @@ git push origin vX.Y.Z
    - publish to PyPI
    - create a GitHub Release
 
+Create the tag only after the release commit is on `main`, so the tag points at an immutable revision whose `pyproject.toml` version and `CHANGELOG.md` entry already match `X.Y.Z`.
+
 ## Hotfixes
 
 1. Branch from latest release tag: `hotfix/X.Y.Z+1`

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json as _json
+import hashlib
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any, ClassVar
@@ -16,17 +17,32 @@ from braintrust_migrate.btql import (
     fetch_btql_sorted_page_with_retries,
 )
 from braintrust_migrate.resources.base import MigrationResult, ResourceMigrator
+from braintrust_migrate.sdk_logs import SDKDatasetWriter
 from braintrust_migrate.streaming_utils import (
     EventsStreamState,
     SeenIdsDB,
     build_btql_sorted_page_query,
-    stream_btql_sorted_events,
+    stream_btql_sorted_events_buffered,
 )
 
 logger = structlog.get_logger(__name__)
 
 # HTTP status codes
 HTTP_STATUS_REQUEST_ENTITY_TOO_LARGE = 413
+
+
+def _coerce_int_config(
+    cfg: Any, attr_name: str, default: int, *, minimum: int | None = None
+) -> int:
+    value = getattr(cfg, attr_name, default)
+    if not isinstance(value, int):
+        try:
+            value = int(value)
+        except Exception:
+            value = default
+    if minimum is not None and value < minimum:
+        return default
+    return value
 
 
 class DatasetMigrator(ResourceMigrator[dict]):
@@ -41,6 +57,10 @@ class DatasetMigrator(ResourceMigrator[dict]):
     Uses raw API requests instead of SDK to avoid model dependencies.
     """
 
+    SDK_FLUSH_MAX_ROWS: ClassVar[int] = 5_000
+    SDK_FLUSH_MAX_BYTES: ClassVar[int] = 25 * 1024 * 1024
+    DEFAULT_EVENT_FETCH_GROUP_SIZE: ClassVar[int] = 25
+
     def __init__(
         self,
         source_client,
@@ -48,9 +68,7 @@ class DatasetMigrator(ResourceMigrator[dict]):
         checkpoint_dir: Path,
         batch_size: int = 100,
         *,
-        events_fetch_limit: int = 50,
-        events_insert_batch_size: int = 200,
-        events_use_version_snapshot: bool = True,
+        events_fetch_limit: int = 1000,
         events_use_seen_db: bool = True,
         events_progress_hook: Callable[[dict[str, Any]], None] | None = None,
     ) -> None:
@@ -58,8 +76,6 @@ class DatasetMigrator(ResourceMigrator[dict]):
             source_client, dest_client, checkpoint_dir, batch_size=batch_size
         )
         self.events_fetch_limit = events_fetch_limit
-        self.events_insert_batch_size = events_insert_batch_size
-        self.events_use_version_snapshot = events_use_version_snapshot
         self.events_use_seen_db = events_use_seen_db
         self._events_progress_hook = events_progress_hook
         self._attachment_copier: AttachmentCopier | None = None
@@ -86,6 +102,14 @@ class DatasetMigrator(ResourceMigrator[dict]):
             self._insert_max_bytes: int | None = int(max_req * headroom)
         except Exception:
             self._insert_max_bytes = None
+        self._sdk_flush_max_rows = int(self.SDK_FLUSH_MAX_ROWS)
+        self._sdk_flush_max_bytes = int(self.SDK_FLUSH_MAX_BYTES)
+        self._event_fetch_group_size = _coerce_int_config(
+            cfg,
+            "events_fetch_group_size",
+            self.DEFAULT_EVENT_FETCH_GROUP_SIZE,
+            minimum=1,
+        )
 
     @property
     def resource_name(self) -> str:
@@ -310,30 +334,36 @@ class DatasetMigrator(ResourceMigrator[dict]):
             dataset_count=len(successful_migrations),
         )
 
-        for result in successful_migrations:
-            try:
+        async def _flush_group(group: list[MigrationResult]) -> None:
+            if not group:
+                return
+            source_to_dest: dict[str, str] = {}
+            for result in group:
                 if result.dest_id is None:
-                    raise ValueError(
-                        "Dataset migrated without dest_id; cannot copy records"
-                    )
-                await self._migrate_dataset_records(result.source_id, result.dest_id)
+                    raise ValueError("Dataset migrated without dest_id; cannot copy records")
+                source_to_dest[result.source_id] = result.dest_id
 
-                # Update metadata to indicate records are migrated
+            await self._migrate_dataset_records_streaming_grouped(source_to_dest)
+
+            for result in group:
                 if result.metadata:
                     result.metadata["records_pending"] = False
                     result.metadata["records_migrated"] = True
 
+        for start in range(0, len(successful_migrations), self._event_fetch_group_size):
+            group = successful_migrations[start : start + self._event_fetch_group_size]
+            try:
+                await _flush_group(group)
             except Exception as e:
                 self._logger.error(
-                    "Failed to migrate records for dataset",
-                    source_id=result.source_id,
-                    dest_id=result.dest_id,
+                    "Failed to migrate records for dataset group",
+                    source_ids=[result.source_id for result in group],
                     error=str(e),
                 )
-                # Update metadata to indicate record migration failed
-                if result.metadata:
-                    result.metadata["records_pending"] = False
-                    result.metadata["records_failed"] = True
+                for result in group:
+                    if result.metadata:
+                        result.metadata["records_pending"] = False
+                        result.metadata["records_failed"] = True
 
         self._logger.info(
             "Completed bulk record migration",
@@ -453,7 +483,14 @@ class DatasetMigrator(ResourceMigrator[dict]):
             if event.get("created") is not None:
                 origin["created"] = event.get("created")
             out["origin"] = origin
+        out["dataset_id"] = source_dataset_id
         return out
+
+    def _event_to_insert_from_row(self, event: dict[str, Any]) -> dict[str, Any]:
+        source_dataset_id = event.get("dataset_id")
+        if not isinstance(source_dataset_id, str) or not source_dataset_id:
+            raise ValueError("Fetched dataset event missing dataset_id")
+        return self._event_to_insert(event, source_dataset_id)
 
     async def _fetch_dataset_events_page(
         self,
@@ -468,22 +505,23 @@ class DatasetMigrator(ResourceMigrator[dict]):
         _ = cursor
         _ = version
         return await self._fetch_dataset_events_page_btql_sorted(
-            dataset_id=dataset_id, limit=limit, state=state
+            dataset_ids=[dataset_id], limit=limit, state=state
         )
 
     async def _fetch_dataset_events_page_btql_sorted(
         self,
         *,
-        dataset_id: str,
+        dataset_ids: list[str],
         limit: int,
         state: EventsStreamState,
     ) -> dict[str, Any]:
         """Fetch one page via POST /btql using native BTQL syntax, sorted by _pagination_key."""
         last_pagination_key = state.btql_min_pagination_key
+        quoted_ids = ", ".join(f"'{btql_quote(dataset_id)}'" for dataset_id in dataset_ids)
 
         def _query_text_for_limit(n: int) -> str:
             return build_btql_sorted_page_query(
-                from_expr=f"dataset('{btql_quote(dataset_id)}') spans",
+                from_expr=f"dataset({quoted_ids}) spans",
                 limit=n,
                 last_pagination_key=last_pagination_key,
                 select="*",
@@ -494,21 +532,8 @@ class DatasetMigrator(ResourceMigrator[dict]):
             query_for_limit=_query_text_for_limit,
             configured_limit=int(limit),
             operation="btql_dataset_events_page",
-            log_fields={"source_dataset_id": dataset_id},
+            log_fields={"source_dataset_ids": dataset_ids},
             timeout_seconds=120.0,
-        )
-
-    async def _insert_dataset_events(
-        self, *, dataset_id: str, events: list[dict[str, Any]]
-    ) -> None:
-        await self.dest_client.with_retry(
-            "insert_dataset_events",
-            lambda: self.dest_client.raw_request(
-                "POST",
-                f"/v1/dataset/{dataset_id}/insert",
-                json={"events": events},
-                timeout=120.0,
-            ),
         )
 
     @staticmethod
@@ -591,17 +616,56 @@ class DatasetMigrator(ResourceMigrator[dict]):
                 cursor=cursor,
             )
 
+    @staticmethod
+    def _group_stream_basename(source_dataset_ids: list[str]) -> str:
+        if len(source_dataset_ids) == 1:
+            return source_dataset_ids[0]
+        joined = ",".join(source_dataset_ids)
+        digest = hashlib.sha1(joined.encode("utf-8")).hexdigest()[:12]
+        return f"group_{digest}"
+
+    async def _insert_dataset_events_grouped(
+        self,
+        *,
+        batch: list[dict[str, Any]],
+        writers_by_source: dict[str, SDKDatasetWriter],
+    ) -> None:
+        grouped: dict[str, list[dict[str, Any]]] = {}
+        for event in batch:
+            source_dataset_id = event.get("dataset_id")
+            if not isinstance(source_dataset_id, str) or not source_dataset_id:
+                raise ValueError("Dataset event batch missing source dataset_id")
+            grouped.setdefault(source_dataset_id, []).append(event)
+
+        for source_dataset_id, rows in grouped.items():
+            writer = writers_by_source.get(source_dataset_id)
+            if writer is None:
+                raise KeyError(f"No destination writer for source dataset {source_dataset_id}")
+            await self.dest_client.with_retry(
+                "insert_dataset_events",
+                lambda rows=rows, writer=writer: writer.write_rows(rows),
+            )
+
     async def _migrate_dataset_records_streaming(
         self, source_dataset_id: str, dest_dataset_id: str
     ) -> None:
+        await self._migrate_dataset_records_streaming_grouped(
+            {source_dataset_id: dest_dataset_id}
+        )
+
+    async def _migrate_dataset_records_streaming_grouped(
+        self, source_to_dest_dataset_ids: dict[str, str]
+    ) -> None:
         events_dir = self.checkpoint_dir / "dataset_events"
         events_dir.mkdir(parents=True, exist_ok=True)
+        source_dataset_ids = list(source_to_dest_dataset_ids.keys())
+        group_basename = self._group_stream_basename(source_dataset_ids)
 
-        state_path = events_dir / f"{source_dataset_id}_state.json"
+        state_path = events_dir / f"{group_basename}_state.json"
         state = EventsStreamState.from_path(state_path)
 
         seen_db = (
-            SeenIdsDB(str(events_dir / f"{source_dataset_id}_seen.sqlite3"))
+            SeenIdsDB(str(events_dir / f"{group_basename}_seen.sqlite3"))
             if self.events_use_seen_db
             else None
         )
@@ -613,12 +677,14 @@ class DatasetMigrator(ResourceMigrator[dict]):
                 # beginning and rely on seen_db for idempotency.
                 self._logger.warning(
                     "Dataset events checkpoint contains legacy cursor but no btql_min_pagination_key; restarting BTQL stream from beginning",
-                    source_dataset_id=source_dataset_id,
+                    source_dataset_ids=source_dataset_ids,
                 )
                 state.cursor = None
 
-            # BTQL-based streaming does not use version snapshots.
-            version = None
+            writers_by_source = {
+                source_dataset_id: SDKDatasetWriter(self.dest_client, dest_dataset_id)
+                for source_dataset_id, dest_dataset_id in source_to_dest_dataset_ids.items()
+            }
 
             progress = self._events_progress_hook
 
@@ -629,9 +695,9 @@ class DatasetMigrator(ResourceMigrator[dict]):
 
             async def _fetch(n: int) -> dict[str, Any]:
                 return await self._fetch_dataset_events_page(
-                    dataset_id=source_dataset_id,
+                    dataset_id=source_dataset_ids[0],
                     cursor=None,
-                    version=version,
+                    version=None,
                     limit=n,
                     state=state,
                 )
@@ -640,69 +706,71 @@ class DatasetMigrator(ResourceMigrator[dict]):
                 self._dump_oversize_event_summary(
                     events_dir=events_dir,
                     cursor=state.btql_min_pagination_key,
-                    dest_dataset_id=dest_dataset_id,
+                    dest_dataset_id=(
+                        source_to_dest_dataset_ids.get(source_dataset_id)
+                        if isinstance(source_dataset_id, str)
+                        else None
+                    )
+                    or "unknown",
                     event=event,
                     error=err,
                 )
 
-            await stream_btql_sorted_events(
-                fetch_page=_fetch,
+            async def _fetch_group(n: int) -> dict[str, Any]:
+                return await self._fetch_dataset_events_page_btql_sorted(
+                    dataset_ids=source_dataset_ids,
+                    limit=n,
+                    state=state,
+                )
+
+            event_to_insert = (
+                self._event_to_insert_from_row
+                if len(source_dataset_ids) > 1
+                else lambda event, _source_dataset_id=source_dataset_ids[0]: self._event_to_insert(
+                    event, _source_dataset_id
+                )
+            )
+
+            await stream_btql_sorted_events_buffered(
+                fetch_page=_fetch_group,
                 page_limit=int(self.events_fetch_limit),
-                get_last_pk=lambda: state.btql_min_pagination_key,
-                set_last_pk=lambda pk: setattr(state, "btql_min_pagination_key", pk),
+                state=state,
                 save_state=_save_state,
                 page_event_filter=lambda e: e.get("_object_delete") is True,
-                event_to_insert=lambda e: self._event_to_insert(e, source_dataset_id),
+                event_to_insert=event_to_insert,
                 seen_db=seen_db,
-                insert_batch_size=int(self.events_insert_batch_size),
-                insert_max_bytes=self._insert_max_bytes,
                 rewrite_event_in_place=(
                     None
                     if self._attachment_copier is None
                     else self._attachment_copier.rewrite_event_in_place
                 ),
-                insert_events=lambda batch: self._insert_dataset_events(
-                    dataset_id=dest_dataset_id, events=batch
+                insert_events=lambda batch: self._insert_dataset_events_grouped(
+                    batch=batch,
+                    writers_by_source=writers_by_source,
                 ),
+                flush_max_rows=self._sdk_flush_max_rows,
+                flush_max_bytes=self._sdk_flush_max_bytes,
                 is_http_413=self._is_http_413,
                 on_single_413=_on_single_413,
-                incr_fetched=lambda n: setattr(
-                    state, "fetched_events", int(state.fetched_events) + int(n)
-                ),
-                incr_inserted=lambda n: setattr(
-                    state, "inserted_events", int(state.inserted_events) + int(n)
-                ),
-                incr_inserted_bytes=lambda n: setattr(
-                    state, "inserted_bytes", int(state.inserted_bytes) + int(n)
-                ),
-                incr_skipped_deleted=lambda n: setattr(
-                    state, "skipped_deleted", int(state.skipped_deleted) + int(n)
-                ),
-                incr_skipped_seen=lambda n: setattr(
-                    state, "skipped_seen", int(state.skipped_seen) + int(n)
-                ),
-                incr_attachments_copied=lambda n: setattr(
-                    state,
-                    "attachments_copied",
-                    int(state.attachments_copied) + int(n),
-                ),
                 hooks=None
                 if progress is None
                 else {
-                    "on_page": lambda info, _p=progress: _p(
+                    "on_fetch": lambda info, _p=progress: _p(
                         {
                             "resource": "dataset_events",
-                            "phase": "page",
-                            "source_dataset_id": source_dataset_id,
-                            "dest_dataset_id": dest_dataset_id,
+                            "phase": "fetch",
+                            "source_dataset_ids": source_dataset_ids,
+                            "dest_dataset_ids": list(source_to_dest_dataset_ids.values()),
                             "page_num": info.get("page_num"),
                             "page_events": info.get("page_events"),
-                            "fetched_total": state.fetched_events,
-                            "inserted_total": state.inserted_events,
-                            "inserted_bytes_total": state.inserted_bytes,
-                            "skipped_deleted_total": state.skipped_deleted,
-                            "skipped_seen_total": state.skipped_seen,
-                            "attachments_copied_total": state.attachments_copied,
+                            "fetched_total": info.get("fetched_total"),
+                            "inserted_total": info.get("inserted_total"),
+                            "inserted_bytes_total": info.get("inserted_bytes_total"),
+                            "skipped_deleted_total": info.get("skipped_deleted_total"),
+                            "skipped_seen_total": info.get("skipped_seen_total"),
+                            "attachments_copied_total": info.get("attachments_copied_total"),
+                            "pending_buffered_rows": info.get("pending_buffered_rows"),
+                            "pending_buffered_bytes": info.get("pending_buffered_bytes"),
                             "cursor": (
                                 (state.btql_min_pagination_key[:16] + "…")
                                 if isinstance(state.btql_min_pagination_key, str)
@@ -711,18 +779,44 @@ class DatasetMigrator(ResourceMigrator[dict]):
                             "next_cursor": None,
                         }
                     ),
-                    "on_done": lambda _info, _p=progress: _p(
+                    "on_page": lambda info, _p=progress: _p(
+                        {
+                            "resource": "dataset_events",
+                            "phase": "page",
+                            "source_dataset_ids": source_dataset_ids,
+                            "dest_dataset_ids": list(source_to_dest_dataset_ids.values()),
+                            "page_num": info.get("page_num"),
+                            "page_events": info.get("page_events"),
+                            "fetched_total": info.get("fetched_total"),
+                            "inserted_total": info.get("inserted_total"),
+                            "inserted_bytes_total": info.get("inserted_bytes_total"),
+                            "skipped_deleted_total": info.get("skipped_deleted_total"),
+                            "skipped_seen_total": info.get("skipped_seen_total"),
+                            "attachments_copied_total": info.get("attachments_copied_total"),
+                            "pending_buffered_rows": info.get("pending_buffered_rows"),
+                            "pending_buffered_bytes": info.get("pending_buffered_bytes"),
+                            "cursor": (
+                                (state.btql_min_pagination_key[:16] + "…")
+                                if isinstance(state.btql_min_pagination_key, str)
+                                else None
+                            ),
+                            "next_cursor": None,
+                        }
+                    ),
+                    "on_done": lambda info, _p=progress: _p(
                         {
                             "resource": "dataset_events",
                             "phase": "done",
-                            "source_dataset_id": source_dataset_id,
-                            "dest_dataset_id": dest_dataset_id,
-                            "fetched_total": state.fetched_events,
-                            "inserted_total": state.inserted_events,
-                            "inserted_bytes_total": state.inserted_bytes,
-                            "skipped_deleted_total": state.skipped_deleted,
-                            "skipped_seen_total": state.skipped_seen,
-                            "attachments_copied_total": state.attachments_copied,
+                            "source_dataset_ids": source_dataset_ids,
+                            "dest_dataset_ids": list(source_to_dest_dataset_ids.values()),
+                            "fetched_total": info.get("fetched_total"),
+                            "inserted_total": info.get("inserted_total"),
+                            "inserted_bytes_total": info.get("inserted_bytes_total"),
+                            "skipped_deleted_total": info.get("skipped_deleted_total"),
+                            "skipped_seen_total": info.get("skipped_seen_total"),
+                            "attachments_copied_total": info.get("attachments_copied_total"),
+                            "pending_buffered_rows": info.get("pending_buffered_rows"),
+                            "pending_buffered_bytes": info.get("pending_buffered_bytes"),
                             "cursor": None,
                             "next_cursor": None,
                         }
@@ -732,8 +826,8 @@ class DatasetMigrator(ResourceMigrator[dict]):
 
             self._logger.info(
                 "Migrated dataset records (streaming)",
-                source_dataset_id=source_dataset_id,
-                dest_dataset_id=dest_dataset_id,
+                source_dataset_ids=source_dataset_ids,
+                dest_dataset_ids=list(source_to_dest_dataset_ids.values()),
                 fetched=state.fetched_events,
                 inserted=state.inserted_events,
                 skipped_deleted=state.skipped_deleted,

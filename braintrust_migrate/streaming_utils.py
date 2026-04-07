@@ -17,10 +17,9 @@ from typing import Any, TypedDict, cast
 
 from braintrust_migrate.batching import (
     approx_events_insert_payload_bytes,
-    iter_ordered_batches_by_count_and_bytes,
+    approx_json_bytes,
 )
 from braintrust_migrate.btql import btql_quote
-from braintrust_migrate.insert_bisect import insert_with_413_bisect
 
 
 @dataclass
@@ -30,7 +29,6 @@ class EventsStreamState:
     version: str | None = None
     cursor: str | None = None
     btql_min_pagination_key: str | None = None
-    query_source: str | None = None
     fetched_events: int = 0
     inserted_events: int = 0
     inserted_bytes: int = 0
@@ -48,7 +46,6 @@ class EventsStreamState:
             version=data.get("version"),
             cursor=data.get("cursor"),
             btql_min_pagination_key=data.get("btql_min_pagination_key"),
-            query_source=data.get("query_source"),
             fetched_events=int(data.get("fetched_events", 0)),
             inserted_events=int(data.get("inserted_events", 0)),
             inserted_bytes=int(data.get("inserted_bytes", 0)),
@@ -62,7 +59,6 @@ class EventsStreamState:
             "version": self.version,
             "cursor": self.cursor,
             "btql_min_pagination_key": self.btql_min_pagination_key,
-            "query_source": self.query_source,
             "fetched_events": self.fetched_events,
             "inserted_events": self.inserted_events,
             "inserted_bytes": self.inserted_bytes,
@@ -171,54 +167,128 @@ def _extract_ids(events: list[dict[str, Any]]) -> list[str]:
     return ids
 
 
-async def stream_btql_sorted_events(
+async def stream_btql_sorted_events_buffered(
     *,
     fetch_page: Callable[[int], Awaitable[dict[str, Any]]],
     page_limit: int,
-    # State plumbing
-    get_last_pk: Callable[[], str | None],
-    set_last_pk: Callable[[str | None], None],
+    state: EventsStreamState,
     save_state: Callable[[], None],
-    # Event processing
     page_event_filter: Callable[[dict[str, Any]], bool] | None,
     event_to_insert: Callable[[dict[str, Any]], dict[str, Any]],
-    # Idempotency + batching
     seen_db: SeenIdsDB | None,
-    insert_batch_size: int,
-    insert_max_bytes: int | None,
-    # Optional attachment rewrite (returns count of rewritten refs or 0/1)
     rewrite_event_in_place: Callable[[dict[str, Any]], Awaitable[int]] | None,
-    # Insert behavior
     insert_events: Callable[[list[dict[str, Any]]], Awaitable[None]],
+    flush_max_rows: int,
+    flush_max_bytes: int,
     is_http_413: Callable[[Exception], bool],
     on_single_413: Callable[[dict[str, Any], Exception], Awaitable[None]] | None,
-    # Counters (mutated via closures so each migrator keeps its own state shape)
-    incr_fetched: Callable[[int], None],
-    incr_inserted: Callable[[int], None],
-    incr_inserted_bytes: Callable[[int], None],
-    incr_skipped_deleted: Callable[[int], None] | None,
-    incr_skipped_seen: Callable[[int], None] | None,
-    incr_attachments_copied: Callable[[int], None] | None,
-    pipeline: bool = False,
-    # Optional progress hooks
     hooks: StreamHooks | None = None,
 ) -> None:
-    """Shared BTQL-sorted streaming loop.
+    """Stream BTQL-sorted rows, buffering multiple pages before flushing.
 
-    This handles:
-    - Fetching pages (sorted by `_pagination_key`)
-    - Filtering deleted events (optional)
-    - Filtering seen IDs via SeenIdsDB (optional)
-    - Batching by count and bytes
-    - Optional attachment rewrite
-    - Insert with 413-bisect isolation
-    - Advancing pagination key only after successful inserts
+    This preserves restart safety by checkpointing only after a buffered flush
+    succeeds. Rows may therefore be fetched across several pages before any are
+    committed to the destination or to the seen-id database.
     """
 
-    _ = pipeline
+    if flush_max_rows <= 0:
+        raise ValueError(f"flush_max_rows must be positive; got {flush_max_rows}")
+    if flush_max_bytes <= 0:
+        raise ValueError(f"flush_max_bytes must be positive; got {flush_max_bytes}")
+
+    active_last_pk = state.btql_min_pagination_key
+    pending_events: list[dict[str, Any]] = []
+    pending_seen_ids: set[str] = set()
+    pending_row_bytes = 0
+    pending_fetched_events = 0
+    pending_inserted_events = 0
+    pending_inserted_bytes = 0
+    pending_skipped_deleted = 0
+    pending_skipped_seen = 0
+    pending_attachments_copied = 0
+    pending_last_pk: str | None = None
+    current_page_num: int | None = None
+
+    async def _flush_pending() -> None:
+        nonlocal active_last_pk
+        nonlocal pending_events
+        nonlocal pending_seen_ids
+        nonlocal pending_row_bytes
+        nonlocal pending_fetched_events
+        nonlocal pending_inserted_events
+        nonlocal pending_inserted_bytes
+        nonlocal pending_skipped_deleted
+        nonlocal pending_skipped_seen
+        nonlocal pending_attachments_copied
+        nonlocal pending_last_pk
+
+        if (
+            pending_fetched_events == 0
+            and pending_inserted_events == 0
+            and pending_skipped_deleted == 0
+            and pending_skipped_seen == 0
+            and pending_attachments_copied == 0
+            and pending_last_pk is None
+        ):
+            return
+
+        if pending_events:
+            batch = list(pending_events)
+            started = time.perf_counter()
+            try:
+                await insert_events(batch)
+            except Exception as e:
+                if hooks and "on_batch_error" in hooks:
+                    hooks["on_batch_error"](
+                        {
+                            "page_num": current_page_num,
+                            "batch": batch,
+                            "error": e,
+                        }
+                    )
+                if len(batch) == 1 and on_single_413 is not None and is_http_413(e):
+                    await on_single_413(batch[0], e)
+                raise
+
+            if seen_db is not None and pending_seen_ids:
+                seen_db.mark_seen(list(pending_seen_ids))
+            state.inserted_events += pending_inserted_events
+            state.inserted_bytes += pending_inserted_bytes
+            if hooks and "on_insert" in hooks:
+                hooks["on_insert"](
+                    {
+                        "inserted_last": pending_inserted_events,
+                        "inserted_bytes_last": pending_inserted_bytes,
+                        "insert_seconds": max(0.0, time.perf_counter() - started),
+                        "flush_rows": pending_inserted_events,
+                        "flush_buffer_bytes": pending_row_bytes,
+                    }
+                )
+
+        state.fetched_events += pending_fetched_events
+        state.skipped_deleted += pending_skipped_deleted
+        state.skipped_seen += pending_skipped_seen
+        state.attachments_copied += pending_attachments_copied
+        state.btql_min_pagination_key = pending_last_pk
+        save_state()
+        active_last_pk = pending_last_pk
+
+        pending_events = []
+        pending_seen_ids = set()
+        pending_row_bytes = 0
+        pending_fetched_events = 0
+        pending_inserted_events = 0
+        pending_inserted_bytes = 0
+        pending_skipped_deleted = 0
+        pending_skipped_seen = 0
+        pending_attachments_copied = 0
+        pending_last_pk = None
+
     page_num = 0
     while True:
         page_num += 1
+        state.btql_min_pagination_key = active_last_pk
+        current_page_num = page_num
         page = await fetch_page(page_limit)
         page_events: list[dict[str, Any]] = cast(
             list[dict[str, Any]], page.get("events") or []
@@ -233,115 +303,118 @@ async def stream_btql_sorted_events(
                     "page_num": page_num,
                     "page_events": len(page_events),
                     "configured_fetch_limit": int(page_limit),
+                    "fetched_total": state.fetched_events + pending_fetched_events,
+                    "inserted_total": state.inserted_events + pending_inserted_events,
+                    "inserted_bytes_total": state.inserted_bytes
+                    + pending_inserted_bytes,
+                    "skipped_deleted_total": state.skipped_deleted
+                    + pending_skipped_deleted,
+                    "skipped_seen_total": state.skipped_seen + pending_skipped_seen,
+                    "attachments_copied_total": state.attachments_copied
+                    + pending_attachments_copied,
+                    "pending_buffered_rows": pending_inserted_events,
+                    "pending_buffered_bytes": pending_row_bytes,
                 }
             )
 
         if not page_events:
-            # Persist end-of-stream state (so resume knows it's complete and counters are saved).
+            await _flush_pending()
             save_state()
             if hooks and "on_done" in hooks:
-                hooks["on_done"]({"page_num": page_num})
+                hooks["on_done"](
+                    {
+                        "page_num": page_num,
+                        "fetched_total": state.fetched_events,
+                        "inserted_total": state.inserted_events,
+                        "inserted_bytes_total": state.inserted_bytes,
+                        "skipped_deleted_total": state.skipped_deleted,
+                        "skipped_seen_total": state.skipped_seen,
+                        "attachments_copied_total": state.attachments_copied,
+                        "pending_buffered_rows": 0,
+                        "pending_buffered_bytes": 0,
+                    }
+                )
             break
 
-        incr_fetched(len(page_events))
+        pending_fetched_events += len(page_events)
 
         kept: list[dict[str, Any]] = []
         if page_event_filter is None:
             kept = page_events
         else:
             skipped_deleted = 0
-            for e in page_events:
-                if page_event_filter(e):
+            for event in page_events:
+                if page_event_filter(event):
                     skipped_deleted += 1
                     continue
-                kept.append(e)
-            if skipped_deleted and incr_skipped_deleted is not None:
-                incr_skipped_deleted(skipped_deleted)
+                kept.append(event)
+            pending_skipped_deleted += skipped_deleted
 
-        insert_events_list = [event_to_insert(e) for e in kept]
+        insert_events_list = [event_to_insert(event) for event in kept]
 
-        # Filter seen ids up-front for the whole page (preserves order and reduces DB calls).
         if seen_db is not None:
             all_ids = _extract_ids(insert_events_list)
             if all_ids:
                 unseen = set(seen_db.filter_unseen(all_ids))
-                skipped_seen = len(all_ids) - len(unseen)
-                if skipped_seen and incr_skipped_seen is not None:
-                    incr_skipped_seen(skipped_seen)
+                pending_skipped_seen += len(all_ids) - len(unseen)
                 insert_events_list = [
-                    e for e in insert_events_list if e.get("id") in unseen
+                    event for event in insert_events_list if event.get("id") in unseen
                 ]
 
-        async def _insert_one(batch: list[dict[str, Any]]) -> float:
-            t0 = time.perf_counter()
-            await insert_events(batch)
-            return max(0.0, time.perf_counter() - t0)
+        if pending_seen_ids:
+            deduped_events: list[dict[str, Any]] = []
+            pending_duplicates = 0
+            for event in insert_events_list:
+                event_id = event.get("id")
+                if isinstance(event_id, str) and event_id in pending_seen_ids:
+                    pending_duplicates += 1
+                    continue
+                deduped_events.append(event)
+            pending_skipped_seen += pending_duplicates
+            insert_events_list = deduped_events
 
-        async def _on_success(batch: list[dict[str, Any]], dt: float) -> None:
-            if seen_db is not None:
-                seen_db.mark_seen(_extract_ids(batch))
-            incr_inserted(len(batch))
-            inserted_bytes_last = approx_events_insert_payload_bytes(batch)
-            incr_inserted_bytes(inserted_bytes_last)
-            if hooks and "on_insert" in hooks:
-                hooks["on_insert"](
-                    {
-                        "inserted_last": len(batch),
-                        "inserted_bytes_last": inserted_bytes_last,
-                        "insert_seconds": dt,
-                    }
-                )
+        if rewrite_event_in_place is not None:
+            copied = 0
+            for event in insert_events_list:
+                copied += int(await rewrite_event_in_place(event))
+            pending_attachments_copied += copied
 
-        async def _on_single_413(event: dict[str, Any], err: Exception) -> None:
-            if on_single_413 is not None:
-                await on_single_413(event, err)
+        if insert_events_list:
+            pending_events.extend(insert_events_list)
+            pending_seen_ids.update(_extract_ids(insert_events_list))
+            pending_inserted_events += len(insert_events_list)
+            pending_inserted_bytes += approx_events_insert_payload_bytes(
+                insert_events_list
+            )
+            pending_row_bytes += sum(
+                approx_json_bytes(event) for event in insert_events_list
+            )
 
-        for batch in iter_ordered_batches_by_count_and_bytes(
-            insert_events_list,
-            max_items=int(insert_batch_size),
-            max_bytes=insert_max_bytes,
-        ):
-            if not batch:
-                continue
-
-            if (
-                rewrite_event_in_place is not None
-                and incr_attachments_copied is not None
-            ):
-                copied = 0
-                for e in batch:
-                    copied += int(await rewrite_event_in_place(e))
-                if copied:
-                    incr_attachments_copied(copied)
-
-            try:
-                await insert_with_413_bisect(
-                    batch,
-                    insert_fn=_insert_one,
-                    is_http_413=is_http_413,
-                    on_success=_on_success,
-                    on_single_413=_on_single_413,
-                )
-            except Exception as e:
-                if hooks and "on_batch_error" in hooks:
-                    hooks["on_batch_error"](
-                        {
-                            "page_num": page_num,
-                            "batch": batch,
-                            "error": e,
-                        }
-                    )
-                raise
-
-        # Commit pagination progress only after inserts for this page succeed.
+        pending_last_pk = page_last_pk
         if isinstance(page_last_pk, str) and page_last_pk:
-            set_last_pk(page_last_pk)
-        save_state()
+            active_last_pk = page_last_pk
+
+        if (
+            pending_inserted_events >= flush_max_rows
+            or pending_row_bytes >= flush_max_bytes
+        ):
+            await _flush_pending()
 
         if hooks and "on_page" in hooks:
             hooks["on_page"](
                 {
                     "page_num": page_num,
                     "page_events": len(page_events),
+                    "fetched_total": state.fetched_events + pending_fetched_events,
+                    "inserted_total": state.inserted_events + pending_inserted_events,
+                    "inserted_bytes_total": state.inserted_bytes
+                    + pending_inserted_bytes,
+                    "skipped_deleted_total": state.skipped_deleted
+                    + pending_skipped_deleted,
+                    "skipped_seen_total": state.skipped_seen + pending_skipped_seen,
+                    "attachments_copied_total": state.attachments_copied
+                    + pending_attachments_copied,
+                    "pending_buffered_rows": pending_inserted_events,
+                    "pending_buffered_bytes": pending_row_bytes,
                 }
             )

@@ -7,8 +7,14 @@ import pytest
 from braintrust_migrate.resources.experiments import ExperimentMigrator
 
 
-async def _passthrough_with_retry(_operation_name: str, coro_func):
+async def _passthrough_with_retry(
+    _operation_name: str,
+    coro_func,
+    *,
+    non_retryable_statuses: set[int] | None = None,
+):
     """Execute the callable passed to with_retry, like the real BraintrustClient does."""
+    _ = non_retryable_statuses
     result = coro_func()
     if hasattr(result, "__await__"):
         return await result
@@ -197,7 +203,10 @@ class TestExperimentDependencies:
         """Test migration with resolved base experiment dependency."""
 
         # Mock successful experiment creation via raw_request
-        async def mock_with_retry(operation_name, coro_func):
+        async def mock_with_retry(
+            operation_name, coro_func, *, non_retryable_statuses=None
+        ):
+            _ = operation_name, non_retryable_statuses
             result = coro_func()
             if hasattr(result, "__await__"):
                 return await result
@@ -234,7 +243,10 @@ class TestExperimentDependencies:
         """Test migration with resolved dataset dependency."""
 
         # Mock successful experiment creation
-        async def mock_with_retry(operation_name, coro_func):
+        async def mock_with_retry(
+            operation_name, coro_func, *, non_retryable_statuses=None
+        ):
+            _ = operation_name, non_retryable_statuses
             result = coro_func()
             if hasattr(result, "__await__"):
                 return await result
@@ -271,7 +283,10 @@ class TestExperimentDependencies:
         """Test migration with unresolved dependencies (should log warnings but continue)."""
 
         # Mock successful experiment creation
-        async def mock_with_retry(operation_name, coro_func):
+        async def mock_with_retry(
+            operation_name, coro_func, *, non_retryable_statuses=None
+        ):
+            _ = operation_name, non_retryable_statuses
             result = coro_func()
             if hasattr(result, "__await__"):
                 return await result
@@ -307,7 +322,10 @@ class TestExperimentDependencies:
         """Test migration of experiment without dependencies."""
 
         # Mock successful experiment creation
-        async def mock_with_retry(operation_name, coro_func):
+        async def mock_with_retry(
+            operation_name, coro_func, *, non_retryable_statuses=None
+        ):
+            _ = operation_name, non_retryable_statuses
             result = coro_func()
             if hasattr(result, "__await__"):
                 return await result
@@ -375,7 +393,10 @@ class TestExperimentDependencies:
         }
 
         # Setup mock with_retry to handle raw_request calls
-        async def mock_with_retry(operation_name, coro_func):
+        async def mock_with_retry(
+            operation_name, coro_func, *, non_retryable_statuses=None
+        ):
+            _ = operation_name, non_retryable_statuses
             result = coro_func()
             if hasattr(result, "__await__"):
                 return await result

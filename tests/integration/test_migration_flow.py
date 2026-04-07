@@ -82,7 +82,13 @@ class TestMigrationFlow:
                 )
                 mock_client.create_project = AsyncMock(return_value=mock_project_data)
 
-                async def mock_with_retry(_op_name, coro_func):
+                async def mock_with_retry(
+                    _op_name,
+                    coro_func,
+                    *,
+                    non_retryable_statuses=None,
+                ):
+                    _ = non_retryable_statuses
                     res = coro_func()
                     if hasattr(res, "__await__"):
                         return await res

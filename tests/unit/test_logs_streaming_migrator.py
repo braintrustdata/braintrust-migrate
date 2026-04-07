@@ -5,6 +5,7 @@ from typing import Any
 
 import pytest
 
+import braintrust_migrate.resources.logs as logs_module
 from braintrust_migrate.resources.logs import LogsMigrator
 
 
@@ -13,7 +14,14 @@ class _StubClient:
         self._btql_pages = btql_pages or []
         self.inserts: list[dict[str, Any]] = []
 
-    async def with_retry(self, _operation_name: str, coro_func):
+    async def with_retry(
+        self,
+        _operation_name: str,
+        coro_func,
+        *,
+        non_retryable_statuses: set[int] | None = None,
+    ):
+        _ = non_retryable_statuses
         return await coro_func()
 
     async def raw_request(
@@ -44,6 +52,20 @@ class _StubClient:
             return {"row_ids": [e.get("id", "") for e in events]}
 
         raise AssertionError(f"Unexpected path: {path}")
+
+
+class _FakeSDKProjectLogsWriter:
+    def __init__(self, dest_client: _StubClient, project_id: str) -> None:
+        self._dest_client = dest_client
+        self._project_id = project_id
+
+    async def write_rows(self, rows: list[dict[str, Any]]) -> None:
+        self._dest_client.inserts.append(
+            {
+                "project_id": self._project_id,
+                "events": [dict(row) for row in rows],
+            }
+        )
 
 
 @pytest.mark.asyncio
@@ -78,29 +100,33 @@ async def test_logs_migrator_skips_duplicate_ids_across_pages(tmp_path: Path) ->
 
     source = _StubClient(btql_pages=[page1, page2])
     dest = _StubClient()
+    original_writer = logs_module.SDKProjectLogsWriter
+    logs_module.SDKProjectLogsWriter = _FakeSDKProjectLogsWriter
 
-    migrator = LogsMigrator(
-        source,  # type: ignore[arg-type]
-        dest,  # type: ignore[arg-type]
-        tmp_path,
-        page_limit=1,
-        insert_batch_size=2,
-        use_version_snapshot=False,
-        use_seen_db=True,
-    )
-    migrator.set_destination_project_id("dest-project-id")
+    try:
+        migrator = LogsMigrator(
+            source,  # type: ignore[arg-type]
+            dest,  # type: ignore[arg-type]
+            tmp_path,
+            page_limit=1,
+            insert_batch_size=2,
+            use_version_snapshot=False,
+            use_seen_db=True,
+        )
+        migrator.set_destination_project_id("dest-project-id")
 
-    result = await migrator.migrate_all("source-project-id")
-    assert result["streaming"] is True
-    assert result["version"] is None
-    assert result["migrated"] == expected_inserted  # a + b inserted once
-    assert result["skipped"] == 1  # older duplicate 'a' skipped on page 2
+        result = await migrator.migrate_all("source-project-id")
+        assert result["streaming"] is True
+        assert result["version"] is None
+        assert result["migrated"] == expected_inserted  # a + b inserted once
+        assert result["skipped"] == 1  # older duplicate 'a' skipped on page 2
 
-    # Ensure destination insert saw only two ids total
-    inserted_ids: list[str] = []
-    for call in dest.inserts:
-        inserted_ids.extend([e["id"] for e in call["events"]])
-    assert inserted_ids == ["a", "b"]
-
-    # Ensure checkpoint exists
-    assert (tmp_path / "logs_streaming_state.json").exists()
+        inserted_ids: list[str] = []
+        for call in dest.inserts:
+            inserted_ids.extend([e["id"] for e in call["events"]])
+        assert inserted_ids == ["a", "b"]
+        assert len(dest.inserts) == 1
+        assert all(call["project_id"] == "dest-project-id" for call in dest.inserts)
+        assert (tmp_path / "logs_streaming_state.json").exists()
+    finally:
+        logs_module.SDKProjectLogsWriter = original_writer

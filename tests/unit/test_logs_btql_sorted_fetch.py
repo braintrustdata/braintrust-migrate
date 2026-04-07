@@ -5,6 +5,7 @@ from typing import Any
 
 import pytest
 
+import braintrust_migrate.resources.logs as logs_module
 from braintrust_migrate.config import MigrationConfig
 from braintrust_migrate.resources.logs import LogsMigrator
 
@@ -17,7 +18,14 @@ class _SourceBtqlClient:
         self.migration_config = mig_cfg
         self._calls = 0
 
-    async def with_retry(self, _operation_name: str, coro_func):
+    async def with_retry(
+        self,
+        _operation_name: str,
+        coro_func,
+        *,
+        non_retryable_statuses: set[int] | None = None,
+    ):
+        _ = non_retryable_statuses
         res = coro_func()
         if hasattr(res, "__await__"):
             return await res
@@ -61,7 +69,14 @@ class _SourceBtqlClient500ThenOK:
         self.migration_config = mig_cfg
         self.queries: list[str] = []
 
-    async def with_retry(self, _operation_name: str, coro_func):
+    async def with_retry(
+        self,
+        _operation_name: str,
+        coro_func,
+        *,
+        non_retryable_statuses: set[int] | None = None,
+    ):
+        _ = non_retryable_statuses
         res = coro_func()
         if hasattr(res, "__await__"):
             return await res
@@ -101,18 +116,14 @@ class _DestInsertClient:
         self.migration_config = mig_cfg
         self.inserted_ids: list[str] = []
 
-        class _Views:
-            async def create(self, **kwargs: Any) -> Any:
-                _ = kwargs
-                return {"id": "v1"}
-
-        class _ClientObj:
-            def __init__(self) -> None:
-                self.views = _Views()
-
-        self.client = _ClientObj()
-
-    async def with_retry(self, _operation_name: str, coro_func):
+    async def with_retry(
+        self,
+        _operation_name: str,
+        coro_func,
+        *,
+        non_retryable_statuses: set[int] | None = None,
+    ):
+        _ = non_retryable_statuses
         res = coro_func()
         if hasattr(res, "__await__"):
             return await res
@@ -121,15 +132,20 @@ class _DestInsertClient:
     async def raw_request(
         self, method: str, path: str, *, json: Any = None, **kwargs: Any
     ) -> Any:
-        _ = kwargs
-        assert method.upper() == "POST"
-        assert "/v1/project_logs/" in path
-        assert path.endswith("/insert")
-        events = (json or {}).get("events", [])
-        for e in events:
-            if isinstance(e, dict) and isinstance(e.get("id"), str):
-                self.inserted_ids.append(e["id"])
-        return {"row_ids": self.inserted_ids}
+        _ = method, path, json, kwargs
+        raise AssertionError("SDK-backed logs migration should not use raw_request")
+
+
+class _FakeSDKProjectLogsWriter:
+    def __init__(self, dest_client: _DestInsertClient, project_id: str) -> None:
+        self._dest_client = dest_client
+        self._project_id = project_id
+
+    async def write_rows(self, rows: list[dict[str, Any]]) -> None:
+        _ = self._project_id
+        for row in rows:
+            if isinstance(row, dict) and isinstance(row.get("id"), str):
+                self._dest_client.inserted_ids.append(row["id"])
 
 
 class _SourceBtqlClientCreatedAfter:
@@ -143,7 +159,14 @@ class _SourceBtqlClientCreatedAfter:
         self._preflight_calls = 0
         self._SECOND_CALL = 2
 
-    async def with_retry(self, _operation_name: str, coro_func):
+    async def with_retry(
+        self,
+        _operation_name: str,
+        coro_func,
+        *,
+        non_retryable_statuses: set[int] | None = None,
+    ):
+        _ = non_retryable_statuses
         res = coro_func()
         if hasattr(res, "__await__"):
             return await res
@@ -206,19 +229,24 @@ async def test_logs_btql_sorted_fetch_inserts_in_created_order(tmp_path: Path) -
 
     source = _SourceBtqlClient(pages, source_cfg)
     dest = _DestInsertClient(dest_cfg)
+    original_writer = logs_module.SDKProjectLogsWriter
+    logs_module.SDKProjectLogsWriter = _FakeSDKProjectLogsWriter
 
-    migrator = LogsMigrator(
-        source,  # type: ignore[arg-type]
-        dest,  # type: ignore[arg-type]
-        tmp_path,
-        page_limit=2,
-        insert_batch_size=10,
-        use_version_snapshot=False,
-        use_seen_db=False,
-        progress_hook=None,
-    )
-    migrator.set_destination_project_id("proj-dest")
-    res = await migrator.migrate_all("proj-source")
+    try:
+        migrator = LogsMigrator(
+            source,  # type: ignore[arg-type]
+            dest,  # type: ignore[arg-type]
+            tmp_path,
+            page_limit=2,
+            insert_batch_size=10,
+            use_version_snapshot=False,
+            use_seen_db=False,
+            progress_hook=None,
+        )
+        migrator.set_destination_project_id("proj-dest")
+        res = await migrator.migrate_all("proj-source")
+    finally:
+        logs_module.SDKProjectLogsWriter = original_writer
 
     assert res["migrated"] == EXPECTED_MIGRATED
     assert dest.inserted_ids == ["a", "b", "c"]
@@ -236,19 +264,24 @@ async def test_logs_btql_fetch_retries_smaller_limit_on_500(tmp_path: Path) -> N
 
     source = _SourceBtqlClient500ThenOK(pages, source_cfg)
     dest = _DestInsertClient(dest_cfg)
+    original_writer = logs_module.SDKProjectLogsWriter
+    logs_module.SDKProjectLogsWriter = _FakeSDKProjectLogsWriter
 
-    migrator = LogsMigrator(
-        source,  # type: ignore[arg-type]
-        dest,  # type: ignore[arg-type]
-        tmp_path,
-        page_limit=1000,  # will 500, then retry with smaller limit
-        insert_batch_size=10,
-        use_version_snapshot=False,
-        use_seen_db=False,
-        progress_hook=None,
-    )
-    migrator.set_destination_project_id("proj-dest")
-    res = await migrator.migrate_all("proj-source")
+    try:
+        migrator = LogsMigrator(
+            source,  # type: ignore[arg-type]
+            dest,  # type: ignore[arg-type]
+            tmp_path,
+            page_limit=1000,  # will 500, then retry with smaller limit
+            insert_batch_size=10,
+            use_version_snapshot=False,
+            use_seen_db=False,
+            progress_hook=None,
+        )
+        migrator.set_destination_project_id("proj-dest")
+        res = await migrator.migrate_all("proj-source")
+    finally:
+        logs_module.SDKProjectLogsWriter = original_writer
 
     assert res["migrated"] == 1
     assert dest.inserted_ids == ["a"]
@@ -277,19 +310,24 @@ async def test_logs_created_after_uses_preflight_and_inclusive_start_pk(
 
     source = _SourceBtqlClientCreatedAfter(pages, source_cfg)
     dest = _DestInsertClient(dest_cfg)
+    original_writer = logs_module.SDKProjectLogsWriter
+    logs_module.SDKProjectLogsWriter = _FakeSDKProjectLogsWriter
 
-    migrator = LogsMigrator(
-        source,  # type: ignore[arg-type]
-        dest,  # type: ignore[arg-type]
-        tmp_path,
-        page_limit=1,
-        insert_batch_size=10,
-        use_version_snapshot=False,
-        use_seen_db=False,
-        progress_hook=None,
-    )
-    migrator.set_destination_project_id("proj-dest")
-    res = await migrator.migrate_all("proj-source")
+    try:
+        migrator = LogsMigrator(
+            source,  # type: ignore[arg-type]
+            dest,  # type: ignore[arg-type]
+            tmp_path,
+            page_limit=1,
+            insert_batch_size=10,
+            use_version_snapshot=False,
+            use_seen_db=False,
+            progress_hook=None,
+        )
+        migrator.set_destination_project_id("proj-dest")
+        res = await migrator.migrate_all("proj-source")
+    finally:
+        logs_module.SDKProjectLogsWriter = original_writer
 
     EXPECTED_MIGRATED = 2
     assert res["migrated"] == EXPECTED_MIGRATED

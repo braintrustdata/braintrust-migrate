@@ -5,6 +5,7 @@ from typing import Any
 
 import pytest
 
+import braintrust_migrate.resources.datasets as datasets_module
 from braintrust_migrate.resources.datasets import DatasetMigrator
 
 
@@ -13,7 +14,14 @@ class _StubClient:
         self._btql_pages = btql_pages or []
         self.inserts: list[dict[str, Any]] = []
 
-    async def with_retry(self, _operation_name: str, coro_func):
+    async def with_retry(
+        self,
+        _operation_name: str,
+        coro_func,
+        *,
+        non_retryable_statuses: set[int] | None = None,
+    ):
+        _ = non_retryable_statuses
         res = coro_func()
         if hasattr(res, "__await__"):
             return await res
@@ -38,13 +46,73 @@ class _StubClient:
                 return {"data": self._btql_pages.pop(0)}
             return {"data": []}
 
-        if path.endswith("/insert"):
-            assert json is not None
-            self.inserts.append(json)
-            events = json.get("events", [])
-            return {"row_ids": [e.get("id", "") for e in events]}
-
         raise AssertionError(f"Unexpected path: {path}")
+
+
+class _FakeSDKDatasetWriter:
+    def __init__(self, dest_client: _StubClient, dataset_id: str) -> None:
+        self._dest_client = dest_client
+        self._dataset_id = dataset_id
+
+    async def write_rows(self, rows: list[dict[str, Any]]) -> None:
+        self._dest_client.inserts.append(
+            {
+                "dataset_id": self._dataset_id,
+                "events": [dict(row) for row in rows],
+            }
+        )
+
+
+class _PaginationAwareStubClient(_StubClient):
+    def __init__(self) -> None:
+        super().__init__(btql_pages=None)
+        self.btql_queries: list[str] = []
+
+    async def raw_request(
+        self,
+        method: str,
+        path: str,
+        *,
+        params: dict[str, Any] | None = None,
+        json: Any | None = None,
+        timeout: float | None = None,
+    ) -> Any:
+        _ = params
+        _ = timeout
+        assert method.lower() == "post"
+
+        if path != "/btql":
+            raise AssertionError(f"Unexpected path: {path}")
+
+        assert json is not None and isinstance(json.get("query"), str)
+        query = json["query"]
+        self.btql_queries.append(query)
+
+        if "_pagination_key > 'p2'" in query:
+            return {"data": []}
+        if "_pagination_key > 'p1'" in query:
+            return {
+                "data": [
+                    {
+                        "id": "b",
+                        "dataset_id": "source-dataset-id",
+                        "_pagination_key": "p2",
+                        "_xact_id": "2",
+                        "created": "2023-01-01T00:00:01Z",
+                    }
+                ]
+            }
+        return {
+            "data": [
+                {
+                    "id": "a",
+                    "dataset_id": "source-dataset-id",
+                    "_pagination_key": "p1",
+                    "_xact_id": "1",
+                    "created": "2023-01-01T00:00:00Z",
+                }
+            ]
+        }
 
 
 @pytest.mark.asyncio
@@ -72,23 +140,60 @@ async def test_dataset_streaming_skips_deleted_and_duplicates(tmp_path: Path) ->
 
     source = _StubClient(btql_pages=[page1, page2])
     dest = _StubClient()
+    original_writer = datasets_module.SDKDatasetWriter
+    datasets_module.SDKDatasetWriter = _FakeSDKDatasetWriter
 
-    migrator = DatasetMigrator(
-        source,  # type: ignore[arg-type]
-        dest,  # type: ignore[arg-type]
-        tmp_path,
-        events_fetch_limit=1,
-        events_insert_batch_size=2,
-        events_use_version_snapshot=False,
-        events_use_seen_db=True,
-    )
+    try:
+        migrator = DatasetMigrator(
+            source,  # type: ignore[arg-type]
+            dest,  # type: ignore[arg-type]
+            tmp_path,
+            events_fetch_limit=1,
+            events_use_seen_db=True,
+        )
 
-    await migrator._migrate_dataset_records("source-dataset-id", "dest-dataset-id")  # type: ignore[attr-defined]
+        await migrator._migrate_dataset_records("source-dataset-id", "dest-dataset-id")  # type: ignore[attr-defined]
 
-    inserted_ids: list[str] = []
-    for call in dest.inserts:
-        inserted_ids.extend([e["id"] for e in call["events"]])
-    assert inserted_ids == ["a"]
+        inserted_ids: list[str] = []
+        for call in dest.inserts:
+            inserted_ids.extend([e["id"] for e in call["events"]])
+        assert inserted_ids == ["a"]
+        assert len(dest.inserts) == 1
+        assert all(call["dataset_id"] == "dest-dataset-id" for call in dest.inserts)
+        assert (tmp_path / "dataset_events" / "source-dataset-id_state.json").exists()
+    finally:
+        datasets_module.SDKDatasetWriter = original_writer
 
-    # Checkpoint exists
-    assert (tmp_path / "dataset_events" / "source-dataset-id_state.json").exists()
+
+@pytest.mark.asyncio
+async def test_dataset_streaming_advances_btql_pagination_before_flush(
+    tmp_path: Path,
+) -> None:
+    source = _PaginationAwareStubClient()
+    dest = _StubClient()
+    original_writer = datasets_module.SDKDatasetWriter
+    datasets_module.SDKDatasetWriter = _FakeSDKDatasetWriter
+
+    try:
+        migrator = DatasetMigrator(
+            source,  # type: ignore[arg-type]
+            dest,  # type: ignore[arg-type]
+            tmp_path,
+            events_fetch_limit=100000,
+            events_use_seen_db=False,
+        )
+        migrator._sdk_flush_max_rows = 100
+
+        await migrator._migrate_dataset_records(  # type: ignore[attr-defined]
+            "source-dataset-id", "dest-dataset-id"
+        )
+
+        inserted_ids: list[str] = []
+        for call in dest.inserts:
+            inserted_ids.extend([e["id"] for e in call["events"]])
+
+        assert inserted_ids == ["a", "b"]
+        assert any("_pagination_key > 'p1'" in query for query in source.btql_queries)
+        assert len(source.btql_queries) == 3
+    finally:
+        datasets_module.SDKDatasetWriter = original_writer

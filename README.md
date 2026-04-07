@@ -1,12 +1,12 @@
 # Braintrust Migration Tool
 
-> **⚠️ WARNING: Large-scale migrations (especially logs/experiments) can be extremely expensive and operationally risky. This tool includes streaming + resumable migration for high-volume event streams, but TB-scale migrations have not been fully soak-tested in production-like conditions. Use with caution and test on a subset first.**
+> **⚠️ WARNING: Large-scale migrations can still be expensive and operationally risky, but high-volume event resources are now streamed and resumable. Logs, experiment events, and dataset events use BTQL sorted pagination with checkpointed resume and SDK-backed `logs3` writes. TB-scale migrations have not been fully soak-tested in production-like conditions, so test on a subset first.**
 
 A Python CLI & library for migrating Braintrust organizations with maximum fidelity, using direct HTTP requests (via `httpx`) against the Braintrust REST API.
 
 ## Overview
 
-This tool provides migration capabilities for Braintrust organizations, handling everything from AI provider credentials to project-level data. **It is best suited for small-scale migrations, such as moving POC/test data to a new deployment.**
+This tool provides migration capabilities for Braintrust organizations, handling everything from AI provider credentials to project-level data. It works well for small and medium migrations, and it now has dedicated streaming paths for high-volume logs, experiment events, and dataset events.
 
 - **Organization administrators** migrating between environments (dev → staging → prod)
 - **Teams** consolidating multiple organizations
@@ -19,7 +19,7 @@ This tool provides migration capabilities for Braintrust organizations, handling
 - **Dependency Resolution**: Handles resource dependencies (e.g., functions referenced by prompts, datasets referenced by experiments)
 - **Organization vs Project Scope**: Org-level resources are migrated once, project-level resources per project
 - **Real-time Progress**: Live progress indicators and detailed migration reports
-- **High-volume Streaming**: Logs, experiment events, and dataset events are migrated via BTQL sorted pagination (by `_pagination_key`) with bounded insert batches
+- **High-volume Streaming**: Logs, experiment events, and dataset events are migrated via BTQL sorted pagination (by `_pagination_key`) with checkpointed resume and SDK-backed `logs3` writes
 - **Resume + Idempotency**: Per-resource/per-experiment checkpoints + a SQLite "seen ids" store enable safe resume and help avoid duplicate inserts/overwrites
 - **Rate Limit Resilience**: Automatic LIMIT backoff on 500/504 errors (retries with progressively smaller page sizes: 1000 → 500 → 250 → ...)
 
@@ -170,12 +170,12 @@ These settings control BTQL-based streaming for high-volume resources.
 | Environment Variable | CLI Flag | Default | Description |
 |---------------------|----------|---------|-------------|
 | `MIGRATION_EVENTS_FETCH_LIMIT` | — | `1000` | BTQL fetch page size (rows per query) |
-| `MIGRATION_EVENTS_INSERT_BATCH_SIZE` | — | `200` | Events per insert API call |
+| `MIGRATION_EVENTS_FETCH_GROUP_SIZE` | — | `25` | Number of experiment or dataset ids to group into one BTQL event stream |
 | `MIGRATION_EVENTS_USE_SEEN_DB` | — | `true` | Use SQLite store for deduplication |
 | `MIGRATION_LOGS_FETCH_LIMIT` | `--logs-fetch-limit` | *(inherits)* | Override fetch limit for logs only |
-| `MIGRATION_LOGS_INSERT_BATCH_SIZE` | `--logs-insert-batch-size` | *(inherits)* | Override insert batch size for logs only |`
+| `MIGRATION_LOGS_INSERT_BATCH_SIZE` | `--logs-insert-batch-size` | `200` | Max rows per pre-SDK logs insert chunk before enqueueing to the SDK writer |
 
-Resource-specific overrides follow the pattern `MIGRATION_{RESOURCE}_FETCH_LIMIT`, `MIGRATION_{RESOURCE}_INSERT_BATCH_SIZE`, `MIGRATION_{RESOURCE}_USE_SEEN_DB` where `{RESOURCE}` is `LOGS`, `EXPERIMENT_EVENTS`, or `DATASET_EVENTS`.
+Resource-specific overrides follow the pattern `MIGRATION_{RESOURCE}_FETCH_LIMIT` and `MIGRATION_{RESOURCE}_USE_SEEN_DB` where `{RESOURCE}` is `LOGS`, `EXPERIMENT_EVENTS`, or `DATASET_EVENTS`. Logs additionally support `MIGRATION_LOGS_INSERT_BATCH_SIZE` and `MIGRATION_LOGS_USE_VERSION_SNAPSHOT`.
 
 #### Insert Request Sizing
 
