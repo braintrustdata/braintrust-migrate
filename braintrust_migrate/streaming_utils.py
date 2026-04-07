@@ -102,6 +102,30 @@ class SeenIdsDB:
         self._conn.commit()
 
 
+def coerce_int_config(
+    cfg: Any,
+    attr_name: str,
+    default: int,
+    *,
+    minimum: int | None = None,
+) -> int:
+    """Best-effort int coercion for migration config values.
+
+    This is intentionally tolerant of mocks and unset attributes because many
+    unit tests construct lightweight client doubles without real config models.
+    """
+
+    value = getattr(cfg, attr_name, default)
+    if not isinstance(value, int):
+        try:
+            value = int(value)
+        except Exception:
+            value = default
+    if minimum is not None and value < minimum:
+        return default
+    return value
+
+
 def build_btql_sorted_page_query(
     *,
     from_expr: str,

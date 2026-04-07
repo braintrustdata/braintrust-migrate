@@ -32,13 +32,13 @@ from braintrust_migrate.sdk_logs import SDKProjectLogsWriter
 from braintrust_migrate.streaming_utils import (
     SeenIdsDB,
     build_btql_sorted_page_query,
+    coerce_int_config,
 )
 
 logger = structlog.get_logger(__name__)
 
 # HTTP status codes
 HTTP_STATUS_REQUEST_ENTITY_TOO_LARGE = 413
-
 
 @dataclass(slots=True)
 class _LogsStreamingState:
@@ -159,9 +159,11 @@ class LogsMigrator(ResourceMigrator[dict[str, Any]]):
         cfg = getattr(self.dest_client, "migration_config", None) or getattr(
             self.source_client, "migration_config", None
         )
-        self._sdk_flush_max_rows = max(
-            1,
-            int(getattr(cfg, "events_flush_max_rows", self.SDK_FLUSH_MAX_ROWS)),
+        self._sdk_flush_max_rows = coerce_int_config(
+            cfg,
+            "events_flush_max_rows",
+            self.SDK_FLUSH_MAX_ROWS,
+            minimum=1,
         )
         self._sdk_flush_max_bytes = int(self.SDK_FLUSH_MAX_BYTES)
 

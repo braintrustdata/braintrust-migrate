@@ -21,26 +21,12 @@ from braintrust_migrate.streaming_utils import (
     EventsStreamState,
     SeenIdsDB,
     build_btql_sorted_page_query,
+    coerce_int_config,
     stream_btql_sorted_events_buffered,
 )
 
 # HTTP status codes
 HTTP_STATUS_REQUEST_ENTITY_TOO_LARGE = 413
-
-
-def _coerce_int_config(
-    cfg: Any, attr_name: str, default: int, *, minimum: int | None = None
-) -> int:
-    value = getattr(cfg, attr_name, default)
-    if not isinstance(value, int):
-        try:
-            value = int(value)
-        except Exception:
-            value = default
-    if minimum is not None and value < minimum:
-        return default
-    return value
-
 
 class ExperimentMigrator(ResourceMigrator[dict]):
     """Migrator for Braintrust experiments.
@@ -99,14 +85,14 @@ class ExperimentMigrator(ResourceMigrator[dict]):
             self._insert_max_bytes: int | None = int(max_req * headroom)
         except Exception:
             self._insert_max_bytes = None
-        self._sdk_flush_max_rows = _coerce_int_config(
+        self._sdk_flush_max_rows = coerce_int_config(
             cfg,
             "events_flush_max_rows",
             self.SDK_FLUSH_MAX_ROWS,
             minimum=1,
         )
         self._sdk_flush_max_bytes = int(self.SDK_FLUSH_MAX_BYTES)
-        self._event_fetch_group_size = _coerce_int_config(
+        self._event_fetch_group_size = coerce_int_config(
             cfg,
             "events_fetch_group_size",
             self.DEFAULT_EVENT_FETCH_GROUP_SIZE,
