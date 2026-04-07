@@ -52,16 +52,10 @@ This tool provides migration capabilities for Braintrust organizations, handling
 
 ### Stable Install (Recommended)
 
-Install a pinned release from PyPI:
+This project is not yet published on PyPI. Install a pinned release from GitHub:
 
 ```bash
-pip install "braintrust-migrate==0.1.0"
-```
-
-Install from a pinned git tag:
-
-```bash
-pip install "git+https://github.com/braintrustdata/braintrust-migrate.git@v0.1.0"
+pip install "git+https://github.com/braintrustdata/braintrust-migrate.git@v0.2.0"
 ```
 
 > Avoid installing directly from `main` in production workflows.
@@ -89,7 +83,7 @@ braintrust-migrate --help
 
 ## Releases And Pinning
 
-- Stable releases are published as SemVer tags (`vX.Y.Z`) and PyPI versions (`X.Y.Z`).
+- Stable releases are published as SemVer git tags (`vX.Y.Z`).
 - `main` may contain unreleased changes.
 - Use pinned versions in automation and production migrations.
 
