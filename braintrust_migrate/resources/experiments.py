@@ -28,6 +28,20 @@ from braintrust_migrate.streaming_utils import (
 HTTP_STATUS_REQUEST_ENTITY_TOO_LARGE = 413
 
 
+def _coerce_int_config(
+    cfg: Any, attr_name: str, default: int, *, minimum: int | None = None
+) -> int:
+    value = getattr(cfg, attr_name, default)
+    if not isinstance(value, int):
+        try:
+            value = int(value)
+        except Exception:
+            value = default
+    if minimum is not None and value < minimum:
+        return default
+    return value
+
+
 class ExperimentMigrator(ResourceMigrator[dict]):
     """Migrator for Braintrust experiments.
 
@@ -87,8 +101,11 @@ class ExperimentMigrator(ResourceMigrator[dict]):
             self._insert_max_bytes = None
         self._sdk_flush_max_rows = int(self.SDK_FLUSH_MAX_ROWS)
         self._sdk_flush_max_bytes = int(self.SDK_FLUSH_MAX_BYTES)
-        self._event_fetch_group_size = int(
-            getattr(cfg, "events_fetch_group_size", self.DEFAULT_EVENT_FETCH_GROUP_SIZE)
+        self._event_fetch_group_size = _coerce_int_config(
+            cfg,
+            "events_fetch_group_size",
+            self.DEFAULT_EVENT_FETCH_GROUP_SIZE,
+            minimum=1,
         )
 
     @property
