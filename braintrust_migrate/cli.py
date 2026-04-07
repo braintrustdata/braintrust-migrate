@@ -157,7 +157,11 @@ def migrate(
         int | None,
         typer.Option(
             "--logs-insert-batch-size",
-            help="Insert batch size for streaming logs (number of events per insert call)",
+            help=(
+                "Deprecated alias for the shared streaming flush threshold "
+                "(rows buffered before flush across logs, experiment events, "
+                "and dataset events)"
+            ),
             envvar="MIGRATION_LOGS_INSERT_BATCH_SIZE",
         ),
     ] = None,
@@ -334,6 +338,7 @@ async def _migrate_main(
         if logs_fetch_limit is not None:
             config.migration.logs_fetch_limit = logs_fetch_limit
         if logs_insert_batch_size is not None:
+            config.migration.events_flush_max_rows = logs_insert_batch_size
             config.migration.logs_insert_batch_size = logs_insert_batch_size
         if created_after is not None:
             config.migration.created_after = canonicalize_created_after(created_after)
@@ -357,6 +362,7 @@ async def _migrate_main(
             state_dir=str(config.state_dir),
             dry_run=dry_run,
             logs_fetch_limit=config.migration.logs_fetch_limit,
+            events_flush_max_rows=config.migration.events_flush_max_rows,
             logs_insert_batch_size=config.migration.logs_insert_batch_size,
             created_after=config.migration.created_after,
             created_before=config.migration.created_before,

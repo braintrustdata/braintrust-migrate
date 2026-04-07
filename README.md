@@ -166,11 +166,12 @@ These settings control BTQL-based streaming for high-volume resources.
 |---------------------|----------|---------|-------------|
 | `MIGRATION_EVENTS_FETCH_LIMIT` | — | `1000` | BTQL fetch page size (rows per query) |
 | `MIGRATION_EVENTS_FETCH_GROUP_SIZE` | — | `25` | Number of experiment or dataset ids to group into one BTQL event stream |
+| `MIGRATION_EVENTS_FLUSH_MAX_ROWS` | — | `5000` | Buffered flush threshold shared by logs, experiment events, and dataset events |
 | `MIGRATION_EVENTS_USE_SEEN_DB` | — | `true` | Use SQLite store for deduplication |
 | `MIGRATION_LOGS_FETCH_LIMIT` | `--logs-fetch-limit` | *(inherits)* | Override fetch limit for logs only |
-| `MIGRATION_LOGS_INSERT_BATCH_SIZE` | `--logs-insert-batch-size` | `200` | Max rows per pre-SDK logs insert chunk before enqueueing to the SDK writer |
+| `MIGRATION_LOGS_INSERT_BATCH_SIZE` | `--logs-insert-batch-size` | `5000` | Deprecated alias for `MIGRATION_EVENTS_FLUSH_MAX_ROWS` |
 
-Resource-specific overrides follow the pattern `MIGRATION_{RESOURCE}_FETCH_LIMIT` and `MIGRATION_{RESOURCE}_USE_SEEN_DB` where `{RESOURCE}` is `LOGS`, `EXPERIMENT_EVENTS`, or `DATASET_EVENTS`. Logs additionally support `MIGRATION_LOGS_INSERT_BATCH_SIZE` and `MIGRATION_LOGS_USE_VERSION_SNAPSHOT`.
+Resource-specific overrides follow the pattern `MIGRATION_{RESOURCE}_FETCH_LIMIT` and `MIGRATION_{RESOURCE}_USE_SEEN_DB` where `{RESOURCE}` is `LOGS`, `EXPERIMENT_EVENTS`, or `DATASET_EVENTS`. Logs additionally support `MIGRATION_LOGS_USE_VERSION_SNAPSHOT`. The older `MIGRATION_LOGS_INSERT_BATCH_SIZE` name is still accepted as a compatibility alias for the shared flush threshold.
 
 #### Insert Request Sizing
 

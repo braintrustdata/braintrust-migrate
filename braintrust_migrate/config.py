@@ -144,11 +144,24 @@ class MigrationConfig(BaseModel):
         le=1_000,
         description="Fetch page size for streaming logs migration via BTQL (limit is in rows/spans)",
     )
-    logs_insert_batch_size: int = Field(
-        default=200,
+    events_flush_max_rows: int = Field(
+        default=5_000,
         ge=1,
-        le=1_000,
-        description="Insert batch size for streaming logs migration (number of events per insert call)",
+        le=50_000,
+        description=(
+            "Buffered flush threshold for streaming logs, experiment events, and "
+            "dataset events. Rows may be fetched across multiple BTQL pages before "
+            "one flush is committed."
+        ),
+    )
+    logs_insert_batch_size: int = Field(
+        default=5_000,
+        ge=1,
+        le=50_000,
+        description=(
+            "Deprecated compatibility alias for events_flush_max_rows. Prefer "
+            "MIGRATION_EVENTS_FLUSH_MAX_ROWS."
+        ),
     )
     logs_use_version_snapshot: bool = Field(
         default=True,
@@ -370,6 +383,7 @@ class Config(BaseModel):
         #   MIGRATION_EVENTS_FETCH_LIMIT=1000
         #   MIGRATION_EVENTS_USE_SEEN_DB=true
         #   MIGRATION_EVENTS_FETCH_GROUP_SIZE=25
+        #   MIGRATION_EVENTS_FLUSH_MAX_ROWS=5000
         #
         # Resource-specific overrides (optional):
         #   MIGRATION_LOGS_FETCH_LIMIT, MIGRATION_EXPERIMENT_EVENTS_FETCH_LIMIT, etc.
@@ -384,14 +398,16 @@ class Config(BaseModel):
         events_fetch_group_size = int(
             os.getenv("MIGRATION_EVENTS_FETCH_GROUP_SIZE", "25")
         )
+        events_flush_max_rows = int(
+            os.getenv("MIGRATION_EVENTS_FLUSH_MAX_ROWS")
+            or os.getenv("MIGRATION_LOGS_INSERT_BATCH_SIZE", "5000")
+        )
 
         # Logs
         logs_fetch_limit = _get_int(
             "MIGRATION_LOGS_FETCH_LIMIT", "MIGRATION_EVENTS_FETCH_LIMIT", "1000"
         )
-        logs_insert_batch_size = int(
-            os.getenv("MIGRATION_LOGS_INSERT_BATCH_SIZE", "200")
-        )
+        logs_insert_batch_size = events_flush_max_rows
         logs_use_version_snapshot = os.getenv(
             "MIGRATION_LOGS_USE_VERSION_SNAPSHOT", "true"
         ).lower() in {"1", "true", "yes", "y", "on"}
@@ -499,6 +515,7 @@ class Config(BaseModel):
                 insert_max_request_bytes=insert_max_request_bytes,
                 insert_request_headroom_ratio=insert_request_headroom_ratio,
                 logs_fetch_limit=logs_fetch_limit,
+                events_flush_max_rows=events_flush_max_rows,
                 logs_insert_batch_size=logs_insert_batch_size,
                 logs_use_version_snapshot=logs_use_version_snapshot,
                 logs_use_seen_db=logs_use_seen_db,

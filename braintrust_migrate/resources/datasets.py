@@ -22,6 +22,7 @@ from braintrust_migrate.streaming_utils import (
     EventsStreamState,
     SeenIdsDB,
     build_btql_sorted_page_query,
+    coerce_int_config,
     stream_btql_sorted_events_buffered,
 )
 
@@ -29,21 +30,6 @@ logger = structlog.get_logger(__name__)
 
 # HTTP status codes
 HTTP_STATUS_REQUEST_ENTITY_TOO_LARGE = 413
-
-
-def _coerce_int_config(
-    cfg: Any, attr_name: str, default: int, *, minimum: int | None = None
-) -> int:
-    value = getattr(cfg, attr_name, default)
-    if not isinstance(value, int):
-        try:
-            value = int(value)
-        except Exception:
-            value = default
-    if minimum is not None and value < minimum:
-        return default
-    return value
-
 
 class DatasetMigrator(ResourceMigrator[dict]):
     """Migrator for Braintrust datasets.
@@ -102,9 +88,14 @@ class DatasetMigrator(ResourceMigrator[dict]):
             self._insert_max_bytes: int | None = int(max_req * headroom)
         except Exception:
             self._insert_max_bytes = None
-        self._sdk_flush_max_rows = int(self.SDK_FLUSH_MAX_ROWS)
+        self._sdk_flush_max_rows = coerce_int_config(
+            cfg,
+            "events_flush_max_rows",
+            self.SDK_FLUSH_MAX_ROWS,
+            minimum=1,
+        )
         self._sdk_flush_max_bytes = int(self.SDK_FLUSH_MAX_BYTES)
-        self._event_fetch_group_size = _coerce_int_config(
+        self._event_fetch_group_size = coerce_int_config(
             cfg,
             "events_fetch_group_size",
             self.DEFAULT_EVENT_FETCH_GROUP_SIZE,
@@ -795,6 +786,35 @@ class DatasetMigrator(ResourceMigrator[dict]):
                             "attachments_copied_total": info.get("attachments_copied_total"),
                             "pending_buffered_rows": info.get("pending_buffered_rows"),
                             "pending_buffered_bytes": info.get("pending_buffered_bytes"),
+                            "cursor": (
+                                (state.btql_min_pagination_key[:16] + "…")
+                                if isinstance(state.btql_min_pagination_key, str)
+                                else None
+                            ),
+                            "next_cursor": None,
+                        }
+                    ),
+                    "on_insert": lambda info, _p=progress: _p(
+                        {
+                            "resource": "dataset_events",
+                            "phase": "insert",
+                            "source_dataset_ids": source_dataset_ids,
+                            "dest_dataset_ids": list(source_to_dest_dataset_ids.values()),
+                            "page_num": None,
+                            "page_events": None,
+                            "inserted_last": info.get("inserted_last"),
+                            "inserted_bytes_last": info.get("inserted_bytes_last"),
+                            "insert_seconds": info.get("insert_seconds"),
+                            "flush_rows": info.get("flush_rows"),
+                            "flush_buffer_bytes": info.get("flush_buffer_bytes"),
+                            "fetched_total": state.fetched_events,
+                            "inserted_total": state.inserted_events,
+                            "inserted_bytes_total": state.inserted_bytes,
+                            "skipped_deleted_total": state.skipped_deleted,
+                            "skipped_seen_total": state.skipped_seen,
+                            "attachments_copied_total": state.attachments_copied,
+                            "pending_buffered_rows": 0,
+                            "pending_buffered_bytes": 0,
                             "cursor": (
                                 (state.btql_min_pagination_key[:16] + "…")
                                 if isinstance(state.btql_min_pagination_key, str)

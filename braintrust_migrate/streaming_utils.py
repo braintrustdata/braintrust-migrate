@@ -102,6 +102,30 @@ class SeenIdsDB:
         self._conn.commit()
 
 
+def coerce_int_config(
+    cfg: Any,
+    attr_name: str,
+    default: int,
+    *,
+    minimum: int | None = None,
+) -> int:
+    """Best-effort int coercion for migration config values.
+
+    This is intentionally tolerant of mocks and unset attributes because many
+    unit tests construct lightweight client doubles without real config models.
+    """
+
+    value = getattr(cfg, attr_name, default)
+    if not isinstance(value, int):
+        try:
+            value = int(value)
+        except Exception:
+            value = default
+    if minimum is not None and value < minimum:
+        return default
+    return value
+
+
 def build_btql_sorted_page_query(
     *,
     from_expr: str,
@@ -304,9 +328,8 @@ async def stream_btql_sorted_events_buffered(
                     "page_events": len(page_events),
                     "configured_fetch_limit": int(page_limit),
                     "fetched_total": state.fetched_events + pending_fetched_events,
-                    "inserted_total": state.inserted_events + pending_inserted_events,
-                    "inserted_bytes_total": state.inserted_bytes
-                    + pending_inserted_bytes,
+                    "inserted_total": state.inserted_events,
+                    "inserted_bytes_total": state.inserted_bytes,
                     "skipped_deleted_total": state.skipped_deleted
                     + pending_skipped_deleted,
                     "skipped_seen_total": state.skipped_seen + pending_skipped_seen,
@@ -406,9 +429,8 @@ async def stream_btql_sorted_events_buffered(
                     "page_num": page_num,
                     "page_events": len(page_events),
                     "fetched_total": state.fetched_events + pending_fetched_events,
-                    "inserted_total": state.inserted_events + pending_inserted_events,
-                    "inserted_bytes_total": state.inserted_bytes
-                    + pending_inserted_bytes,
+                    "inserted_total": state.inserted_events,
+                    "inserted_bytes_total": state.inserted_bytes,
                     "skipped_deleted_total": state.skipped_deleted
                     + pending_skipped_deleted,
                     "skipped_seen_total": state.skipped_seen + pending_skipped_seen,

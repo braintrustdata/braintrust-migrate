@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 from typing import Any
+from unittest.mock import Mock
 
 import pytest
 
@@ -130,3 +131,20 @@ async def test_logs_migrator_skips_duplicate_ids_across_pages(tmp_path: Path) ->
         assert (tmp_path / "logs_streaming_state.json").exists()
     finally:
         logs_module.SDKProjectLogsWriter = original_writer
+
+
+def test_logs_migrator_defaults_flush_rows_when_config_is_a_mock(tmp_path: Path) -> None:
+    source = Mock()
+    source.migration_config = Mock()
+    dest = Mock()
+    dest.migration_config = Mock()
+
+    migrator = LogsMigrator(
+        source,  # type: ignore[arg-type]
+        dest,  # type: ignore[arg-type]
+        tmp_path,
+        page_limit=1,
+        insert_batch_size=2,
+    )
+
+    assert migrator._sdk_flush_max_rows == LogsMigrator.SDK_FLUSH_MAX_ROWS
