@@ -892,6 +892,41 @@ class ExperimentMigrator(ResourceMigrator[dict]):
                                 "next_cursor": None,
                             }
                         ),
+                        "on_insert": lambda info, _p=progress: _p(
+                            {
+                                "resource": "experiment_events",
+                                "phase": "insert",
+                                "source_experiment_ids": source_experiment_ids,
+                                "dest_experiment_ids": list(
+                                    source_to_dest_experiment_ids.values()
+                                ),
+                                "page_num": None,
+                                "page_events": None,
+                                "inserted_last": info.get("inserted_last"),
+                                "inserted_bytes_last": info.get(
+                                    "inserted_bytes_last"
+                                ),
+                                "insert_seconds": info.get("insert_seconds"),
+                                "flush_rows": info.get("flush_rows"),
+                                "flush_buffer_bytes": info.get(
+                                    "flush_buffer_bytes"
+                                ),
+                                "fetched_total": state.fetched_events,
+                                "inserted_total": state.inserted_events,
+                                "inserted_bytes_total": state.inserted_bytes,
+                                "skipped_deleted_total": state.skipped_deleted,
+                                "skipped_seen_total": state.skipped_seen,
+                                "attachments_copied_total": state.attachments_copied,
+                                "pending_buffered_rows": 0,
+                                "pending_buffered_bytes": 0,
+                                "cursor": (
+                                    (state.btql_min_pagination_key[:16] + "…")
+                                    if isinstance(state.btql_min_pagination_key, str)
+                                    else None
+                                ),
+                                "next_cursor": None,
+                            }
+                        ),
                         "on_done": lambda info, _p=progress: _p(
                             {
                                 "resource": "experiment_events",
