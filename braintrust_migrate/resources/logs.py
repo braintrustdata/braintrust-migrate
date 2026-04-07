@@ -17,7 +17,10 @@ import httpx
 import structlog
 
 from braintrust_migrate.attachments import AttachmentCopier
-from braintrust_migrate.batching import approx_events_insert_payload_bytes, approx_json_bytes
+from braintrust_migrate.batching import (
+    approx_events_insert_payload_bytes,
+    approx_json_bytes,
+)
 from braintrust_migrate.btql import (
     btql_quote,
     fetch_btql_sorted_page_with_retries,
@@ -54,7 +57,6 @@ class _LogsStreamingState:
     btql_min_pagination_key: str | None = None
     btql_min_pagination_key_inclusive: bool = False
     btql_last_created: str | None = None
-    query_source: str | None = None
     created_after: str | None = None
     created_before: str | None = None
 
@@ -78,7 +80,6 @@ class _LogsStreamingState:
                 data.get("btql_min_pagination_key_inclusive", False)
             ),
             btql_last_created=data.get("btql_last_created"),
-            query_source=data.get("query_source"),
             created_after=data.get("created_after"),
             created_before=data.get("created_before"),
         )
@@ -96,7 +97,6 @@ class _LogsStreamingState:
             "btql_min_pagination_key": self.btql_min_pagination_key,
             "btql_min_pagination_key_inclusive": self.btql_min_pagination_key_inclusive,
             "btql_last_created": self.btql_last_created,
-            "query_source": self.query_source,
             "created_after": self.created_after,
             "created_before": self.created_before,
         }
@@ -326,9 +326,7 @@ class LogsMigrator(ResourceMigrator[dict[str, Any]]):
         self, *, project_id: str, events: list[dict[str, Any]]
     ) -> None:
         if self._sdk_logs_writer is None:
-            self._sdk_logs_writer = SDKProjectLogsWriter(
-                self.dest_client, project_id
-            )
+            self._sdk_logs_writer = SDKProjectLogsWriter(self.dest_client, project_id)
         await self.dest_client.with_retry(
             "insert_project_logs_events",
             lambda: self._sdk_logs_writer.write_rows(events),
@@ -490,7 +488,6 @@ class LogsMigrator(ResourceMigrator[dict[str, Any]]):
                             "migration_config.created_after must be a non-empty string when set"
                         )
                     self._stream_state.created_after = created_after_cfg
-                    self._stream_state.query_source = "btql_sorted_date_filter"
                     self._save_stream_state()
                 elif created_after_cfg is None:
                     raise ValueError(
@@ -513,12 +510,14 @@ class LogsMigrator(ResourceMigrator[dict[str, Any]]):
                 or created_before_cfg is not None
             ):
                 if self._stream_state.created_before is None:
-                    if not isinstance(created_before_cfg, str) or not created_before_cfg:
+                    if (
+                        not isinstance(created_before_cfg, str)
+                        or not created_before_cfg
+                    ):
                         raise TypeError(
                             "migration_config.created_before must be a non-empty string when set"
                         )
                     self._stream_state.created_before = created_before_cfg
-                    self._stream_state.query_source = "btql_sorted_date_filter"
                     self._save_stream_state()
                 elif created_before_cfg is None:
                     raise ValueError(
@@ -581,7 +580,6 @@ class LogsMigrator(ResourceMigrator[dict[str, Any]]):
                     }
                 self._stream_state.btql_min_pagination_key = start_pk
                 self._stream_state.btql_min_pagination_key_inclusive = True
-                self._stream_state.query_source = "btql_sorted_date_filter"
                 self._save_stream_state()
 
             progress_hook = self._progress_hook

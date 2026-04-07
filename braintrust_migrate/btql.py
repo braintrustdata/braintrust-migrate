@@ -13,7 +13,6 @@ from __future__ import annotations
 from collections.abc import Callable
 from importlib.metadata import PackageNotFoundError, version
 from typing import Any, cast
-from uuid import NAMESPACE_URL, uuid5
 
 import httpx
 import structlog
@@ -93,7 +92,6 @@ async def fetch_btql_sorted_page_with_retries(
 
     HTTP_STATUS_GATEWAY_TIMEOUT = 504
     HTTP_STATUS_INTERNAL_SERVER_ERROR = 500
-    query_source = str(uuid5(NAMESPACE_URL, f"braintrust-migrate:{operation}"))
 
     async def _do_btql(*, op: str, query_text: str) -> Any:
         return await client.with_retry(
@@ -108,7 +106,6 @@ async def fetch_btql_sorted_page_with_retries(
                     # All modern deployments are Brainstore-backed; do not attempt
                     # a Postgres fallback.
                     "use_brainstore": True,
-                    "query_source": query_source,
                     "client_version": _client_version(),
                     "query_timeout_seconds": int(timeout_seconds),
                 },
@@ -143,7 +140,6 @@ async def fetch_btql_sorted_page_with_retries(
             if n != int(configured_limit):
                 logger.info(
                     "BTQL succeeded after retrying with smaller LIMIT",
-                    query_source=query_source,
                     configured_fetch_limit=configured_limit,
                     effective_fetch_limit=n,
                     attempted_limits=attempted_limits,
@@ -166,7 +162,6 @@ async def fetch_btql_sorted_page_with_retries(
             ):
                 logger.warning(
                     "BTQL returned error; retrying with smaller LIMIT",
-                    query_source=query_source,
                     status_code=status,
                     configured_fetch_limit=configured_limit,
                     effective_fetch_limit=n,

@@ -29,7 +29,6 @@ class EventsStreamState:
     version: str | None = None
     cursor: str | None = None
     btql_min_pagination_key: str | None = None
-    query_source: str | None = None
     fetched_events: int = 0
     inserted_events: int = 0
     inserted_bytes: int = 0
@@ -47,7 +46,6 @@ class EventsStreamState:
             version=data.get("version"),
             cursor=data.get("cursor"),
             btql_min_pagination_key=data.get("btql_min_pagination_key"),
-            query_source=data.get("query_source"),
             fetched_events=int(data.get("fetched_events", 0)),
             inserted_events=int(data.get("inserted_events", 0)),
             inserted_bytes=int(data.get("inserted_bytes", 0)),
@@ -61,7 +59,6 @@ class EventsStreamState:
             "version": self.version,
             "cursor": self.cursor,
             "btql_min_pagination_key": self.btql_min_pagination_key,
-            "query_source": self.query_source,
             "fetched_events": self.fetched_events,
             "inserted_events": self.inserted_events,
             "inserted_bytes": self.inserted_bytes,
@@ -308,7 +305,8 @@ async def stream_btql_sorted_events_buffered(
                     "configured_fetch_limit": int(page_limit),
                     "fetched_total": state.fetched_events + pending_fetched_events,
                     "inserted_total": state.inserted_events + pending_inserted_events,
-                    "inserted_bytes_total": state.inserted_bytes + pending_inserted_bytes,
+                    "inserted_bytes_total": state.inserted_bytes
+                    + pending_inserted_bytes,
                     "skipped_deleted_total": state.skipped_deleted
                     + pending_skipped_deleted,
                     "skipped_seen_total": state.skipped_seen + pending_skipped_seen,
@@ -388,7 +386,9 @@ async def stream_btql_sorted_events_buffered(
             pending_inserted_bytes += approx_events_insert_payload_bytes(
                 insert_events_list
             )
-            pending_row_bytes += sum(approx_json_bytes(event) for event in insert_events_list)
+            pending_row_bytes += sum(
+                approx_json_bytes(event) for event in insert_events_list
+            )
 
         pending_last_pk = page_last_pk
         if isinstance(page_last_pk, str) and page_last_pk:
@@ -407,7 +407,8 @@ async def stream_btql_sorted_events_buffered(
                     "page_events": len(page_events),
                     "fetched_total": state.fetched_events + pending_fetched_events,
                     "inserted_total": state.inserted_events + pending_inserted_events,
-                    "inserted_bytes_total": state.inserted_bytes + pending_inserted_bytes,
+                    "inserted_bytes_total": state.inserted_bytes
+                    + pending_inserted_bytes,
                     "skipped_deleted_total": state.skipped_deleted
                     + pending_skipped_deleted,
                     "skipped_seen_total": state.skipped_seen + pending_skipped_seen,

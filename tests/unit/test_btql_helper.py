@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from typing import Any
-from uuid import NAMESPACE_URL, uuid5
 
 import httpx
 import pytest
@@ -261,30 +260,3 @@ async def test_btql_helper_resets_to_configured_limit_on_next_fetch() -> None:
         (True, False),
         (False, True),
     ]
-
-
-@pytest.mark.asyncio
-async def test_btql_helper_adds_query_metadata_and_reuses_query_source_per_fetch() -> None:
-    c = _StubBtqlClient()
-    c.mode = "500_on_1000_then_ok"
-
-    def q(limit: int) -> str:
-        return f"SELECT * FROM dataset('d') ORDER BY _pagination_key ASC LIMIT {limit}"
-
-    await fetch_btql_sorted_page_with_retries(
-        client=c,  # type: ignore[arg-type]
-        query_for_limit=q,
-        configured_limit=1000,
-        operation="btql_test",
-        log_fields={"x": "y"},
-        timeout_seconds=123.0,
-    )
-
-    assert len(c.calls) >= 2
-    query_sources = [call.get("query_source") for call in c.calls]
-    assert all(isinstance(value, str) and value for value in query_sources)
-    assert len(set(query_sources)) == 1
-    assert query_sources[0] == str(uuid5(NAMESPACE_URL, "braintrust-migrate:btql_test"))
-    assert all(call.get("use_brainstore") is True for call in c.calls)
-    assert all(call.get("query_timeout_seconds") == 123 for call in c.calls)
-    assert all(call.get("client_version") is not None for call in c.calls)
