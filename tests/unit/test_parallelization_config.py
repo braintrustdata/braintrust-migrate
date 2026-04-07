@@ -8,6 +8,10 @@ from braintrust_migrate.config import Config, BraintrustOrgConfig, MigrationConf
 class TestParallelizationConfigDefaults:
     """Verify defaults for new parallelization config fields."""
 
+    def test_max_concurrent_default(self):
+        config = MigrationConfig()
+        assert config.max_concurrent == 1
+
     def test_max_concurrent_resources_default(self):
         config = MigrationConfig()
         assert config.max_concurrent_resources == 5
@@ -65,6 +69,14 @@ class TestParallelizationConfigBounds:
 class TestParallelizationConfigFromEnv:
     """Verify env var parsing for parallelization fields."""
 
+    def test_max_concurrent_from_env(self, monkeypatch):
+        monkeypatch.setenv("BT_SOURCE_API_KEY", "src")
+        monkeypatch.setenv("BT_DEST_API_KEY", "dst")
+        monkeypatch.setenv("MIGRATION_MAX_CONCURRENT", "4")
+
+        config = Config.from_env()
+        assert config.migration.max_concurrent == 4
+
     def test_max_concurrent_resources_from_env(self, monkeypatch):
         monkeypatch.setenv("BT_SOURCE_API_KEY", "src")
         monkeypatch.setenv("BT_DEST_API_KEY", "dst")
@@ -101,11 +113,13 @@ class TestParallelizationConfigFromEnv:
         monkeypatch.setenv("BT_SOURCE_API_KEY", "src")
         monkeypatch.setenv("BT_DEST_API_KEY", "dst")
         # Ensure the parallelization env vars are NOT set
+        monkeypatch.delenv("MIGRATION_MAX_CONCURRENT", raising=False)
         monkeypatch.delenv("MIGRATION_MAX_CONCURRENT_RESOURCES", raising=False)
         monkeypatch.delenv("MIGRATION_STREAMING_PIPELINE", raising=False)
         monkeypatch.delenv("MIGRATION_MAX_CONCURRENT_REQUESTS", raising=False)
 
         config = Config.from_env()
+        assert config.migration.max_concurrent == 1
         assert config.migration.max_concurrent_resources == 5
         assert config.migration.streaming_pipeline is True
         assert config.migration.max_concurrent_requests == 20

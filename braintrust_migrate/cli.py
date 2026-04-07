@@ -559,72 +559,27 @@ async def _run_migration(config: Config, *, resume_run_dir: Path | None) -> None
         )
 
         try:
-            # Import here to avoid circular dependencies
-            from braintrust_migrate.client import create_client_pair
-
             progress.update(
                 migration_task,
                 description="🔗 Connecting to organizations...",
             )
 
-            async with create_client_pair(
-                config.source,
-                config.destination,
-                config.migration,
-            ) as (source_client, dest_client):
-                progress.update(
-                    migration_task,
-                    description="🔍 Discovering projects...",
-                )
+            progress.update(migration_task, description="🚀 Starting migration...")
 
-                # Discover projects first to set up progress tracking
-                projects = await orchestrator._discover_projects(
-                    source_client, dest_client
-                )
-                num_projects = len(projects)
+            results = await _run_migration_with_progress(
+                orchestrator,
+                progress,
+                migration_task,
+                checkpoint_dir=checkpoint_dir,
+            )
 
-                # Set up project-based progress tracking
-                # We'll show organization migration as "prep", then project 1/N, 2/N, etc.
-                total_projects = max(
-                    num_projects, 1
-                )  # At least 1 to avoid division by zero
-
-                progress.update(
-                    migration_task,
-                    total=total_projects,
-                    completed=0,
-                    description=f"📋 Found {num_projects} projects to migrate",
-                )
-
-                # Show project list for user awareness
-                if num_projects > 0:
-                    project_names = [
-                        p["name"] for p in projects[:PROJECTS_PREVIEW_LIMIT]
-                    ]
-                    if num_projects > PROJECTS_PREVIEW_LIMIT:
-                        project_names.append(
-                            f"... and {num_projects - PROJECTS_PREVIEW_LIMIT} more"
-                        )
-                    console.print(f"[blue]Projects:[/blue] {', '.join(project_names)}")
-
-                progress.update(migration_task, description="🚀 Starting migration...")
-
-                # Run migration with project-based progress tracking
-                results = await _run_migration_with_progress(
-                    orchestrator,
-                    progress,
-                    migration_task,
-                    num_projects,
-                    checkpoint_dir=checkpoint_dir,
-                    is_resuming=is_resuming,
-                )
-
-                # Final update
-                progress.update(
-                    migration_task,
-                    completed=total_projects,
-                    description="✅ Migration completed",
-                )
+            total_projects = max(results["summary"]["total_projects"], 1)
+            progress.update(
+                migration_task,
+                completed=total_projects,
+                total=total_projects,
+                description="✅ Migration completed",
+            )
 
             # Display results
             _display_results(results)
@@ -661,10 +616,8 @@ async def _run_migration_with_progress(
     orchestrator,
     progress,
     migration_task,
-    total_projects,
     *,
     checkpoint_dir: Path,
-    is_resuming: bool,
 ):
     """Run migration with detailed progress updates.
 
@@ -672,327 +625,203 @@ async def _run_migration_with_progress(
         orchestrator: MigrationOrchestrator instance
         progress: Rich progress instance
         migration_task: Progress task ID
-        total_projects: Total number of projects to migrate
 
     Returns:
         Migration results
     """
-    from datetime import datetime
-
-    import structlog
-
-    from braintrust_migrate.client import create_client_pair
-
-    # Track progress during migration
-    start_time = datetime.now()
-    logger = structlog.get_logger(__name__)
-    projects_completed = 0
     # Track streaming throughput from progress hooks (per-project/resource).
     stream_totals: dict[tuple[str, str], dict[str, float]] = {}
 
     # Use the resolved run checkpoint dir (either new timestamp dir or resume dir)
     orchestrator.config.ensure_checkpoint_dir()
     checkpoint_dir.mkdir(parents=True, exist_ok=True)
+    def _projects_discovered(projects: list[dict[str, Any]]) -> None:
+        num_projects = len(projects)
+        progress.update(
+            migration_task,
+            total=max(num_projects, 1),
+            completed=0,
+            description=f"📋 Found {num_projects} projects to migrate",
+        )
+        if num_projects > 0:
+            project_names = [p["name"] for p in projects[:PROJECTS_PREVIEW_LIMIT]]
+            if num_projects > PROJECTS_PREVIEW_LIMIT:
+                project_names.append(
+                    f"... and {num_projects - PROJECTS_PREVIEW_LIMIT} more"
+                )
+            console.print(f"[blue]Projects:[/blue] {', '.join(project_names)}")
 
-    total_results = {
-        "start_time": start_time.isoformat(),
-        "checkpoint_dir": str(checkpoint_dir),
-        "organization_resources": {},
-        "projects": {},
-        "summary": {
-            "total_projects": 0,
-            "total_resources": 0,
-            "migrated_resources": 0,
-            "skipped_resources": 0,
-            "failed_resources": 0,
-            "errors": [],
-        },
-    }
-
-    async with create_client_pair(
-        orchestrator.config.source,
-        orchestrator.config.destination,
-        orchestrator.config.migration,
-    ) as (source_client, dest_client):
-        # Discover projects
-        projects = await orchestrator._discover_projects(source_client, dest_client)
-        total_results["summary"]["total_projects"] = len(projects)
-
-        # Create global ID mapping registry
-        global_id_mappings = {}
-        for project in projects:
-            global_id_mappings[project["source_id"]] = project["dest_id"]
-
-        # STEP 1: Migrate organization-scoped resources first (doesn't count toward project progress)
+    def _organization_start() -> None:
         progress.update(
             migration_task,
             description="🏢 Migrating organization resources...",
-            completed=projects_completed,
+            completed=0,
         )
 
-        try:
-            org_results = await orchestrator._migrate_organization_resources(
-                source_client,
-                dest_client,
-                checkpoint_dir,
-                global_id_mappings,
-            )
-            total_results["organization_resources"] = org_results
+    def _organization_complete(_org_results: dict[str, Any]) -> None:
+        progress.update(
+            migration_task,
+            description="✅ Organization resources migrated",
+            completed=0,
+        )
 
-            # Don't increment project counter for org resources, just update description
-            progress.update(
-                migration_task,
-                description="✅ Organization resources migrated",
-                completed=projects_completed,
-            )
+    def _project_start(project: dict[str, Any], index: int, total: int) -> None:
+        progress.update(
+            migration_task,
+            description=f"📁 Running project {index} of {total}: {project['name']}",
+        )
+        console.print(f"\n[bold blue]📁 {project['name']}[/bold blue] ({index}/{total})")
 
-            # Aggregate organization results
-            summary = total_results["summary"]
-            summary["total_resources"] += org_results.get("total_resources", 0)
-            summary["migrated_resources"] += org_results.get("migrated_resources", 0)
-            summary["skipped_resources"] += org_results.get("skipped_resources", 0)
-            summary["failed_resources"] += org_results.get("failed_resources", 0)
-            summary["errors"].extend(org_results.get("errors", []))
+    def _progress_factory_factory(project: dict[str, Any]):
+        project_name = project["name"]
+        stream_task_ids: dict[str, TaskID] = {}
 
-        except Exception as e:
-            progress.update(
-                migration_task,
-                description="❌ Organization migration failed",
-                completed=projects_completed,
-            )
-            logger.error("Organization resource migration failed", error=str(e))
-            total_results["summary"]["errors"].append(
-                {"type": "org_error", "error": str(e)}
-            )
+        def _stream_progress_factory(
+            resource_name: str,
+            *,
+            _project_name: str = project_name,
+            _progress: Progress = progress,
+            _stream_task_ids: dict[str, TaskID] = stream_task_ids,
+        ):
+            label_map = {
+                "logs": "🧾 Logs",
+                "experiments": "🧪 Experiment events",
+                "datasets": "📚 Dataset events",
+            }
+            label = label_map.get(resource_name, resource_name)
 
-        # STEP 2: Migrate project-scoped resources (1 per project)
-        for i, project in enumerate(projects):
-            project_name = project["name"]
+            if resource_name not in _stream_task_ids:
+                _stream_task_ids[resource_name] = _progress.add_task(
+                    f"{label} ({_project_name}): starting…",
+                    total=None,
+                )
+            task_id = _stream_task_ids[resource_name]
 
-            progress.update(
-                migration_task,
-                description=f"📁 Migrating project {i + 1} of {total_projects}: {project_name}",
-                completed=projects_completed,
-            )
+            def hook(update: dict[str, Any], *, _label: str = label) -> None:
+                phase = update.get("phase")
+                fetched = update.get("fetched_total")
+                inserted = update.get("inserted_total")
+                inserted_bytes = update.get("inserted_bytes_total")
+                page_num = update.get("page_num")
+                inserted_last = update.get("inserted_last")
+                inserted_bytes_last = update.get("inserted_bytes_last")
+                insert_seconds = update.get("insert_seconds")
+                pending_buffered_rows = update.get("pending_buffered_rows")
+                pending_buffered_bytes = update.get("pending_buffered_bytes")
 
-            # Print project header for visibility
-            console.print(
-                f"\n[bold blue]📁 {project_name}[/bold blue] ({i + 1}/{total_projects})"
-            )
+                gb_part = ""
+                if isinstance(inserted_bytes, int):
+                    gb = inserted_bytes / 1_000_000_000
+                    gb_part = f" gb={gb:.3f}"
+                    stream_totals[(_project_name, str(update.get("resource")))] = {
+                        "inserted_rows": float(inserted or 0),
+                        "inserted_gb": gb,
+                    }
 
-            try:
-                # Create per-project streaming progress tasks lazily.
-                stream_task_ids: dict[str, TaskID] = {}
-
-                def _stream_progress_factory(
-                    resource_name: str,
-                    *,
-                    _project_name: str = project_name,
-                    _progress: Progress = progress,
-                    _stream_task_ids: dict[str, TaskID] = stream_task_ids,
+                batch_rate_part = ""
+                if (
+                    isinstance(inserted_last, int)
+                    and isinstance(inserted_bytes_last, int)
+                    and isinstance(insert_seconds, int | float)
+                    and insert_seconds > 0
                 ):
-                    label_map = {
-                        "logs": "🧾 Logs",
-                        "experiments": "🧪 Experiment events",
-                        "datasets": "📚 Dataset events",
-                    }
-                    label = label_map.get(resource_name, resource_name)
+                    rps = inserted_last / float(insert_seconds)
+                    gbps = (inserted_bytes_last / 1_000_000_000) / float(
+                        insert_seconds
+                    )
+                    batch_rate_part = f" rps={rps:.0f} gbps={gbps:.3f}"
 
-                    if resource_name not in _stream_task_ids:
-                        _stream_task_ids[resource_name] = _progress.add_task(
-                            f"{label} ({_project_name}): starting…",
-                            total=None,
-                        )
-                    task_id = _stream_task_ids[resource_name]
+                page_part = f" page={page_num}" if page_num is not None else ""
+                pending_part = ""
+                if isinstance(pending_buffered_rows, int) and pending_buffered_rows > 0:
+                    pending_part = f" buffered={pending_buffered_rows}"
+                    if isinstance(pending_buffered_bytes, int):
+                        pending_gb = pending_buffered_bytes / 1_000_000_000
+                        pending_part += f" pending_gb={pending_gb:.3f}"
 
-                    def hook(update: dict[str, Any], *, _label: str = label) -> None:
-                        # Common fields
-                        phase = update.get("phase")
-                        fetched = update.get("fetched_total")
-                        inserted = update.get("inserted_total")
-                        inserted_bytes = update.get("inserted_bytes_total")
-                        _ = update.get("skipped_seen_total")
-                        _ = update.get("skipped_deleted_total")
-                        page_num = update.get("page_num")
-                        inserted_last = update.get("inserted_last")
-                        inserted_bytes_last = update.get("inserted_bytes_last")
-                        insert_seconds = update.get("insert_seconds")
-                        pending_buffered_rows = update.get("pending_buffered_rows")
-                        pending_buffered_bytes = update.get("pending_buffered_bytes")
-
-                        gb_part = ""
-                        if isinstance(inserted_bytes, int):
-                            gb = inserted_bytes / 1_000_000_000
-                            gb_part = f" gb={gb:.3f}"
-                            stream_totals[
-                                (_project_name, str(update.get("resource")))
-                            ] = {
-                                "inserted_rows": float(inserted or 0),
-                                "inserted_gb": gb,
-                            }
-
-                        batch_rate_part = ""
-                        if (
-                            isinstance(inserted_last, int)
-                            and isinstance(inserted_bytes_last, int)
-                            and isinstance(insert_seconds, int | float)
-                            and insert_seconds > 0
-                        ):
-                            rps = inserted_last / float(insert_seconds)
-                            gbps = (inserted_bytes_last / 1_000_000_000) / float(
-                                insert_seconds
-                            )
-                            batch_rate_part = f" rps={rps:.0f} gbps={gbps:.3f}"
-
-                        # Per-resource context
-                        page_part = f" page={page_num}" if page_num is not None else ""
-                        pending_part = ""
-                        if (
-                            isinstance(pending_buffered_rows, int)
-                            and pending_buffered_rows > 0
-                        ):
-                            pending_part = f" buffered={pending_buffered_rows}"
-                            if isinstance(pending_buffered_bytes, int):
-                                pending_gb = pending_buffered_bytes / 1_000_000_000
-                                pending_part += f" pending_gb={pending_gb:.3f}"
-
-                        if update.get("resource") == "experiment_events":
-                            desc = (
-                                f"{_label} ({_project_name}):{page_part}"
-                                f" fetched={fetched} inserted={inserted}"
-                                f"{gb_part}{pending_part}{batch_rate_part}"
-                            )
-                        elif update.get("resource") == "dataset_events":
-                            desc = (
-                                f"{_label} ({_project_name}):{page_part}"
-                                f" fetched={fetched} inserted={inserted}"
-                                f"{gb_part}{pending_part}{batch_rate_part}"
-                            )
-                        else:
-                            # logs
-                            desc = (
-                                f"{_label} ({_project_name}):{page_part}"
-                                f" fetched={fetched} inserted={inserted}"
-                                f"{gb_part}{pending_part}{batch_rate_part}"
-                            )
-
-                        if phase == "done":
-                            _progress.update(
-                                task_id, description=desc, total=1, completed=1
-                            )
-                        else:
-                            _progress.update(task_id, description=desc)
-
-                    return hook
-
-                # Create callback for real-time resource feedback
-                def _resource_callback(
-                    resource_name: str,
-                    results: dict[str, Any],
-                    *,
-                    _project_name: str = project_name,
-                ) -> None:
-                    """Print real-time feedback when each resource type completes."""
-                    total = results.get("total", 0)
-                    migrated = results.get("migrated", 0)
-                    skipped = results.get("skipped", 0)
-                    failed = results.get("failed", 0)
-
-                    # Emoji labels for resource types
-                    label_map = {
-                        "datasets": "📚 datasets",
-                        "experiments": "🧪 experiments",
-                        "logs": "🧾 logs",
-                        "prompts": "💬 prompts",
-                        "functions": "⚙️  functions",
-                        "project_tags": "🏷️  project_tags",
-                        "project_scores": "📊 project_scores",
-                        "views": "👁️  views",
-                        "span_iframes": "🖼️  span_iframes",
-                    }
-                    label = label_map.get(resource_name, f"   {resource_name}")
-
-                    # Build status parts
-                    if total == 0:
-                        status = "[dim]none found[/dim]"
-                    else:
-                        parts = []
-                        if migrated > 0:
-                            parts.append(f"[green]{migrated} migrated[/green]")
-                        if skipped > 0:
-                            parts.append(f"[yellow]{skipped} skipped[/yellow]")
-                        if failed > 0:
-                            parts.append(f"[red]{failed} failed[/red]")
-                        status = ", ".join(parts) if parts else "[dim]0[/dim]"
-
-                    console.print(f"    {label}: {status}")
-
-                project_results = await orchestrator._migrate_project(
-                    project,
-                    source_client,
-                    dest_client,
-                    checkpoint_dir,
-                    global_id_mappings,
-                    progress_factory=_stream_progress_factory,
-                    resource_callback=_resource_callback,
+                desc = (
+                    f"{_label} ({_project_name}):{page_part}"
+                    f" fetched={fetched} inserted={inserted}"
+                    f"{gb_part}{pending_part}{batch_rate_part}"
                 )
 
-                total_results["projects"][project_name] = project_results
+                if phase == "done":
+                    _progress.update(task_id, description=desc, total=1, completed=1)
+                else:
+                    _progress.update(task_id, description=desc)
 
-                # Aggregate project results
-                summary = total_results["summary"]
-                summary["total_resources"] += project_results.get("total_resources", 0)
-                summary["migrated_resources"] += project_results.get(
-                    "migrated_resources", 0
-                )
-                summary["skipped_resources"] += project_results.get(
-                    "skipped_resources", 0
-                )
-                summary["failed_resources"] += project_results.get(
-                    "failed_resources", 0
-                )
-                summary["errors"].extend(project_results.get("errors", []))
+            return hook
 
-                # Complete this project
-                projects_completed += 1
+        return _stream_progress_factory
 
-                progress.update(
-                    migration_task,
-                    description=f"✅ Completed project {projects_completed} of {total_projects}: {project_name}",
-                    completed=projects_completed,
-                )
+    def _resource_callback_factory(project: dict[str, Any]):
+        project_name = project["name"]
 
-            except Exception as e:
-                # Still increment project counter even on failure
-                projects_completed += 1
-                logger.error(
-                    "Project migration failed", project=project_name, error=str(e)
-                )
-                total_results["summary"]["errors"].append(
-                    {
-                        "type": "project_error",
-                        "project": project_name,
-                        "error": str(e),
-                    }
-                )
-                progress.update(
-                    migration_task,
-                    description=f"❌ Failed project {projects_completed} of {total_projects}: {project_name}",
-                    completed=projects_completed,
-                )
+        def _resource_callback(
+            resource_name: str,
+            results: dict[str, Any],
+            *,
+            _project_name: str = project_name,
+        ) -> None:
+            total = results.get("total", 0)
+            migrated = results.get("migrated", 0)
+            skipped = results.get("skipped", 0)
+            failed = results.get("failed", 0)
 
-    # Finalize results
-    end_time = datetime.now()
-    duration = (end_time - start_time).total_seconds()
+            label_map = {
+                "datasets": "📚 datasets",
+                "experiments": "🧪 experiments",
+                "logs": "🧾 logs",
+                "prompts": "💬 prompts",
+                "functions": "⚙️  functions",
+                "project_tags": "🏷️  project_tags",
+                "project_scores": "📊 project_scores",
+                "views": "👁️  views",
+                "span_iframes": "🖼️  span_iframes",
+            }
+            label = label_map.get(resource_name, f"   {resource_name}")
 
-    total_results.update(
-        {
-            "end_time": end_time.isoformat(),
-            "duration_seconds": duration,
-            "success": total_results["summary"]["failed_resources"] == 0
-            and len(total_results["summary"]["errors"]) == 0,
-        }
+            if total == 0:
+                status = "[dim]none found[/dim]"
+            else:
+                parts = []
+                if migrated > 0:
+                    parts.append(f"[green]{migrated} migrated[/green]")
+                if skipped > 0:
+                    parts.append(f"[yellow]{skipped} skipped[/yellow]")
+                if failed > 0:
+                    parts.append(f"[red]{failed} failed[/red]")
+                status = ", ".join(parts) if parts else "[dim]0[/dim]"
+
+            console.print(f"    {label}: {status}")
+
+        return _resource_callback
+
+    def _project_complete(
+        project: dict[str, Any],
+        result: dict[str, Any] | Exception,
+        completed: int,
+        total: int,
+    ) -> None:
+        status = "✅ Completed" if not isinstance(result, Exception) else "❌ Failed"
+        progress.update(
+            migration_task,
+            description=f"{status} project {completed} of {total}: {project['name']}",
+            completed=completed,
+        )
+
+    total_results = await orchestrator.migrate_all(
+        checkpoint_dir=checkpoint_dir,
+        on_projects_discovered=_projects_discovered,
+        on_organization_start=_organization_start,
+        on_organization_complete=_organization_complete,
+        on_project_start=_project_start,
+        on_project_complete=_project_complete,
+        progress_factory_factory=_progress_factory_factory,
+        resource_callback_factory=_resource_callback_factory,
     )
+
+    duration = float(total_results.get("duration_seconds", 0.0))
 
     # Add a lightweight throughput summary based on streaming progress hooks.
     inserted_rows_total = 0.0
@@ -1006,10 +835,6 @@ async def _run_migration_with_progress(
         "rows_per_sec": (inserted_rows_total / duration) if duration > 0 else None,
         "gb_per_sec": (inserted_gb_total / duration) if duration > 0 else None,
     }
-
-    # Generate detailed migration report
-    report_path = orchestrator._generate_migration_report(total_results, checkpoint_dir)
-    total_results["report_path"] = str(report_path)
 
     return total_results
 
