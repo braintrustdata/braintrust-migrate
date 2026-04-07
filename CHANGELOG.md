@@ -18,6 +18,24 @@ The format is based on Keep a Changelog and this project follows Semantic Versio
 
 - N/A
 
+## [0.3.0] - 2026-04-07
+
+### Added
+
+- Project-level migration concurrency is now fully wired through a single execution path, with regression coverage for orchestrator behavior, progress reporting, and configuration.
+- Added a shared streaming flush threshold for logs, experiment events, and dataset events via `MIGRATION_EVENTS_FLUSH_MAX_ROWS`.
+
+### Changed
+
+- Simplified project migration execution so concurrent and sequential project runs share the same orchestration path.
+- Unified buffered event streaming configuration across logs, experiment events, and dataset events, including CLI and environment-variable plumbing.
+- Updated installation and release documentation for the `0.3.0` release.
+
+### Fixed
+
+- Restored compatibility with mocked and lightweight client configs when reading streaming flush settings.
+- Improved streaming progress reporting so page-level counters reflect committed inserts separately from buffered rows.
+
 ## [0.2.0] - 2026-04-06
 
 ### Added

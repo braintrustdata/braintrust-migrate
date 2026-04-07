@@ -55,7 +55,7 @@ This tool provides migration capabilities for Braintrust organizations, handling
 This project is not yet published on PyPI. Install a pinned release from GitHub:
 
 ```bash
-pip install "git+https://github.com/braintrustdata/braintrust-migrate.git@v0.2.0"
+pip install "git+https://github.com/braintrustdata/braintrust-migrate.git@v0.3.0"
 ```
 
 > Avoid installing directly from `main` in production workflows.
