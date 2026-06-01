@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
-import pytest
-
 from braintrust_migrate.streaming_utils import build_btql_sorted_page_query
+
+EXPECTED_THREE_FILTER_JOIN_COUNT = 2
 
 
 class TestBuildBtqlSortedPageQuery:
@@ -104,7 +104,23 @@ class TestBuildBtqlSortedPageQuery:
         assert "created < '2026-02-01T00:00:00Z'" in query
         assert "_pagination_key > 'pk123'" in query
         # All three conditions should be joined with 'and'
-        assert query.count(" and ") == 2
+        assert query.count(" and ") == EXPECTED_THREE_FILTER_JOIN_COUNT
+
+    def test_query_with_extra_conditions(self) -> None:
+        """Test query with caller-provided filter conditions."""
+        query = build_btql_sorted_page_query(
+            from_expr="project_logs('proj123') spans",
+            limit=100,
+            last_pagination_key="pk123",
+            created_after="2026-01-01T00:00:00Z",
+            extra_conditions=["is_root = true"],
+        )
+
+        assert "filter:" in query
+        assert "created >= '2026-01-01T00:00:00Z'" in query
+        assert "_pagination_key > 'pk123'" in query
+        assert "is_root = true" in query
+        assert query.count(" and ") == EXPECTED_THREE_FILTER_JOIN_COUNT
 
     def test_query_with_custom_select(self) -> None:
         """Test query with custom select clause."""

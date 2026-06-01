@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import sys
+from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Annotated, Any
 
@@ -32,6 +33,9 @@ from braintrust_migrate.orchestration import MigrationOrchestrator
 MAX_ERRORS_TO_DISPLAY = 10
 PROJECTS_PREVIEW_LIMIT = 3
 SAMPLES_PREVIEW_LIMIT = 50
+ValidationResourceRunner = Callable[
+    [Config, Any, Any, list[dict[str, str]]], Awaitable[dict[str, Any]]
+]
 
 # Create Typer app
 app = typer.Typer(
@@ -917,6 +921,47 @@ def _display_results(results: dict) -> None:
 
 @app.command()
 def validate(
+    resources: Annotated[
+        str | None,
+        typer.Option(
+            "--resources",
+            "-r",
+            help="Comma-separated resources to validate. Currently supported: logs",
+        ),
+    ] = None,
+    projects: Annotated[
+        str | None,
+        typer.Option(
+            "--projects",
+            "-p",
+            help="Comma-separated project names to validate (if not specified, all projects will be validated)",
+            envvar="MIGRATION_PROJECTS",
+        ),
+    ] = None,
+    created_after: Annotated[
+        str | None,
+        typer.Option(
+            "--created-after",
+            help="Only validate logs created on or after this date. Format: YYYY-MM-DD or ISO-8601.",
+            envvar="MIGRATION_CREATED_AFTER",
+        ),
+    ] = None,
+    created_before: Annotated[
+        str | None,
+        typer.Option(
+            "--created-before",
+            help="Only validate logs created before this date (exclusive). Format: YYYY-MM-DD or ISO-8601.",
+            envvar="MIGRATION_CREATED_BEFORE",
+        ),
+    ] = None,
+    logs_fetch_limit: Annotated[
+        int | None,
+        typer.Option(
+            "--logs-fetch-limit",
+            help="Fetch page size for logs validation via BTQL (limit is in rows/spans)",
+            envvar="MIGRATION_LOGS_FETCH_LIMIT",
+        ),
+    ] = None,
     log_level: Annotated[
         str,
         typer.Option(
@@ -926,11 +971,11 @@ def validate(
         ),
     ] = "INFO",
 ) -> None:
-    """Validate configuration and test connectivity to both organizations.
+    """Validate configuration, connectivity, and optional migrated resources.
 
-    This command will validate your configuration and test connectivity to both
-    the source and destination Braintrust organizations without performing any
-    migrations.
+    With no --resources, this command performs the existing setup check only.
+    With --resources logs, it also validates migrated root project-log spans by
+    comparing source _xact_id values to destination origin._xact_id values.
     """
     setup_logging(log_level, "text")  # Use text format for validation
     logger = structlog.get_logger(__name__)
@@ -942,9 +987,33 @@ def validate(
         config = Config.from_env()
         console.print("[green]✓[/green] Configuration loaded successfully")
 
+        validation_resources = _parse_validation_resources(resources)
+        if projects:
+            config.project_names = [p.strip() for p in projects.split(",") if p.strip()]
+        if created_after is not None:
+            config.migration.created_after = canonicalize_created_after(created_after)
+        if created_before is not None:
+            config.migration.created_before = canonicalize_created_before(created_before)
+        if logs_fetch_limit is not None:
+            config.migration.logs_fetch_limit = logs_fetch_limit
+
         # Test connectivity
         console.print("[blue]Testing connectivity...[/blue]")
         asyncio.run(_test_connectivity(config))
+
+        if validation_resources:
+            console.print("[blue]Running resource validation...[/blue]")
+            validation_results = asyncio.run(
+                _run_resource_validation(config, validation_resources)
+            )
+            _display_resource_validation_results(validation_results)
+            failed = [
+                result
+                for result in validation_results.values()
+                if not bool(result.get("success"))
+            ]
+            if failed:
+                raise RuntimeError("Resource validation failed")
 
         console.print("[green]✓[/green] All validation checks passed!")
 
@@ -952,6 +1021,141 @@ def validate(
         console.print(f"[red]✗ Validation failed: {e}[/red]")
         logger.error("Validation failed", error=str(e))
         sys.exit(1)
+
+
+async def _run_logs_resource_validation(
+    config: Config,
+    source_client,
+    dest_client,
+    projects: list[dict[str, str]],
+) -> dict[str, Any]:
+    from braintrust_migrate.validation.logs import validate_logs_root_xacts
+
+    summary = await validate_logs_root_xacts(
+        source_client=source_client,
+        dest_client=dest_client,
+        projects=projects,
+        page_limit=config.migration.logs_fetch_limit,
+        created_after=config.migration.created_after,
+        created_before=config.migration.created_before,
+    )
+    return summary.to_dict()
+
+
+VALIDATION_RESOURCE_RUNNERS: dict[str, ValidationResourceRunner] = {
+    "logs": _run_logs_resource_validation,
+}
+SUPPORTED_VALIDATION_RESOURCES = set(VALIDATION_RESOURCE_RUNNERS)
+
+
+def _parse_validation_resources(resources: str | None) -> list[str]:
+    if resources is None or not resources.strip():
+        return []
+    requested = [r.strip() for r in resources.split(",") if r.strip()]
+    unsupported = [r for r in requested if r not in SUPPORTED_VALIDATION_RESOURCES]
+    if unsupported:
+        supported = ", ".join(sorted(SUPPORTED_VALIDATION_RESOURCES))
+        raise ValueError(f"Resource validation currently supports only: {supported}")
+    return requested
+
+
+async def _run_resource_validation(
+    config: Config, validation_resources: list[str]
+) -> dict[str, dict[str, Any]]:
+    from braintrust_migrate.client import create_client_pair
+
+    results: dict[str, dict[str, Any]] = {}
+    async with create_client_pair(
+        config.source,
+        config.destination,
+        config.migration,
+    ) as (source_client, dest_client):
+        projects = await _discover_projects_read_only(
+            source_client,
+            dest_client,
+            config.project_names,
+        )
+        for resource in validation_resources:
+            runner = VALIDATION_RESOURCE_RUNNERS.get(resource)
+            if runner is not None:
+                results[resource] = await runner(
+                    config, source_client, dest_client, projects
+                )
+                continue
+
+            supported = ", ".join(sorted(SUPPORTED_VALIDATION_RESOURCES))
+            raise ValueError(f"Resource validation currently supports only: {supported}")
+
+    return results
+
+
+def _display_resource_validation_results(
+    validation_results: dict[str, dict[str, Any]],
+) -> None:
+    logs_result = validation_results.get("logs")
+    if logs_result is None:
+        return
+
+    table = Table(title="Logs Validation")
+    table.add_column("Project", style="cyan")
+    table.add_column("Checked", justify="right")
+    table.add_column("Matched", justify="right", style="green")
+    table.add_column("Missing", justify="right", style="red")
+    table.add_column("Duplicates", justify="right", style="red")
+    table.add_column("Unverifiable", justify="right", style="yellow")
+    table.add_column("Status")
+
+    for project in logs_result.get("projects", []):
+        if not isinstance(project, dict):
+            continue
+        missing = len(project.get("missing") or [])
+        duplicates = len(project.get("duplicate_destination") or [])
+        unverifiable = int(project.get("unverifiable_source") or 0) + int(
+            project.get("unverifiable_destination") or 0
+        )
+        skipped_reason = project.get("skipped_reason")
+        if skipped_reason:
+            status = f"[yellow]skipped: {skipped_reason}[/yellow]"
+        elif project.get("success"):
+            status = "[green]passed[/green]"
+        else:
+            status = "[red]failed[/red]"
+
+        table.add_row(
+            str(project.get("project_name") or ""),
+            str(project.get("checked") or 0),
+            str(project.get("matched") or 0),
+            str(missing),
+            str(duplicates),
+            str(unverifiable),
+            status,
+        )
+
+    console.print("\n")
+    console.print(table)
+    console.print(
+        "[bold]Logs validation totals:[/bold] "
+        f"checked={logs_result.get('checked', 0)} "
+        f"matched={logs_result.get('matched', 0)} "
+        f"missing={logs_result.get('missing', 0)} "
+        f"duplicates={logs_result.get('duplicate_destination', 0)} "
+        f"unverifiable_source={logs_result.get('unverifiable_source', 0)} "
+        f"unverifiable_destination={logs_result.get('unverifiable_destination', 0)} "
+        f"skipped_projects={logs_result.get('skipped_projects', 0)}"
+    )
+
+    displayed = 0
+    for project in logs_result.get("projects", []):
+        if not isinstance(project, dict):
+            continue
+        for field in ("missing", "duplicate_destination"):
+            for detail in project.get(field) or []:
+                if displayed >= MAX_ERRORS_TO_DISPLAY:
+                    return
+                console.print(
+                    f"[red]{field}[/red] in {project.get('project_name')}: {detail}"
+                )
+                displayed += 1
 
 
 async def _test_connectivity(config: Config) -> None:

@@ -126,6 +126,8 @@ All options can be set via environment variables or CLI flags. CLI flags take pr
 | `MIGRATION_CREATED_AFTER` | `--created-after` | *(none)* | Only applies to resources that support created-time filtering. Currently this affects project logs event streaming and experiment listing. Migrates items with `created >=` this value (**inclusive**). Format: `YYYY-MM-DD` or ISO-8601 |
 | `MIGRATION_CREATED_BEFORE` | `--created-before` | *(none)* | Only applies to resources that support created-time filtering. Currently this affects project logs event streaming and experiment listing. Migrates items with `created <` this value (**exclusive**). Format: `YYYY-MM-DD` or ISO-8601 |
 
+`braintrust-migrate validate --resources logs` uses the same `--projects`, `--created-after`, `--created-before`, and `--logs-fetch-limit` flags for post-migration logs validation. Resource validation is opt-in: `MIGRATION_RESOURCES` does not trigger validation resources, and v1 supports only `--resources logs`.
+
 #### Logging
 
 | Environment Variable | CLI Flag | Default | Description |
@@ -245,6 +247,21 @@ LOG_FORMAT=text
 # Test connectivity and permissions
 braintrust-migrate validate
 ```
+
+**Validate Migrated Logs:**
+```bash
+# Compare migrated root project-log spans by source transaction id
+braintrust-migrate validate --resources logs
+
+# Validate one project and the same date range used for migration
+braintrust-migrate validate \
+  --resources logs \
+  --projects "Project A" \
+  --created-after 2026-01-01 \
+  --created-before 2026-02-01
+```
+
+Logs validation currently supports only `logs`. It checks source root spans by `(root_span_id, _xact_id)` and compares them to destination root spans by `(root_span_id, origin._xact_id)`. Destination `_xact_id` is not expected to match because destination inserts receive new transaction ids.
 
 **Complete Migration:**
 ```bash
@@ -536,12 +553,22 @@ curl -H "Authorization: Bearer $BT_SOURCE_API_KEY" \
      https://api.braintrust.dev/v1/organization
 ```
 
-**2. Dependency Errors**
+**2. Logs Validation Failures**
+```bash
+# Validate logs for the project/date range you migrated
+braintrust-migrate validate --resources logs --projects "Project A"
+```
+
+- **Missing logs**: confirm the destination project exists with the same name, logs migration completed, and validation uses the same `--created-after` / `--created-before` range as migration.
+- **Unverifiable rows**: inspect source rows for missing `root_span_id` or `_xact_id`, and destination rows for missing `origin._xact_id`.
+- **Duplicate destination matches**: re-check whether logs were inserted more than once without using the same checkpoint/seen-id state.
+
+**3. Dependency Errors**
 - **Circular Dependencies**: If you hit a dependency loop, try migrating the involved resource types separately (or re-run; idempotent resources will skip)
 - **Missing Resources**: Check source organization for required dependencies
 - **Permission Issues**: Ensure API keys have read/write access
 
-**3. Performance Issues**
+**4. Performance Issues**
 ```bash
 # Reduce batch size
 export MIGRATION_BATCH_SIZE=25
@@ -561,7 +588,7 @@ braintrust-migrate migrate --resources ai_secrets,datasets
 braintrust-migrate migrate --resources prompts,functions
 ```
 
-**4. Network Issues**
+**5. Network Issues**
 - **Timeouts**: Increase retry attempts and delay
 - **Rate Limits**: Reduce `MIGRATION_MAX_CONCURRENT_RESOURCES` and `MIGRATION_MAX_CONCURRENT_REQUESTS`; the client respects `Retry-After` when throttled (429)
 - **Connectivity**: Verify firewall and proxy settings
@@ -814,6 +841,7 @@ This project is licensed under the MIT License. See the LICENSE file for details
 ### Essential Commands
 ```bash
 braintrust-migrate validate                    # Test setup
+braintrust-migrate validate --resources logs   # Validate migrated root log spans
 braintrust-migrate migrate                     # Full migration
 braintrust-migrate migrate --dry-run           # Validation only
 braintrust-migrate migrate --resources ai_secrets,datasets  # Selective migration
