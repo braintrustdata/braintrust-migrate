@@ -10,7 +10,7 @@ from typing import Any, ClassVar
 
 import httpx
 
-from braintrust_migrate.attachments import AttachmentCopier
+from braintrust_migrate.attachments import AttachmentCopier, OversizeFieldSpiller
 from braintrust_migrate.btql import (
     btql_quote,
     fetch_btql_sorted_page_with_retries,
@@ -43,6 +43,9 @@ class ExperimentMigrator(ResourceMigrator[dict]):
     SDK_FLUSH_MAX_ROWS: ClassVar[int] = 5_000
     SDK_FLUSH_MAX_BYTES: ClassVar[int] = 25 * 1024 * 1024
     DEFAULT_EVENT_FETCH_GROUP_SIZE: ClassVar[int] = 25
+    # Spill individual rows above this size into JSON attachments so they fit
+    # under Braintrust's ~20MB per-span logging upload limit (logs3/overflow).
+    MAX_EVENT_BYTES: ClassVar[int] = 18 * 1024 * 1024
 
     def __init__(
         self,
@@ -92,6 +95,12 @@ class ExperimentMigrator(ResourceMigrator[dict]):
             minimum=1,
         )
         self._sdk_flush_max_bytes = int(self.SDK_FLUSH_MAX_BYTES)
+        # Always-on oversize-field spilling (see OversizeFieldSpiller). Only hits
+        # the network for rows that exceed the per-span upload limit.
+        self._spiller = OversizeFieldSpiller(
+            dest_client=self.dest_client,
+            max_event_bytes=int(self.MAX_EVENT_BYTES),
+        )
         self._event_fetch_group_size = coerce_int_config(
             cfg,
             "events_fetch_group_size",
@@ -795,6 +804,7 @@ class ExperimentMigrator(ResourceMigrator[dict]):
                         if self._attachment_copier is None
                         else self._attachment_copier.rewrite_event_in_place
                     ),
+                    spill_event_in_place=self._spiller.spill_event_in_place,
                     insert_events=lambda batch: self._insert_experiment_events_grouped(
                         batch=batch,
                         writers_by_source=writers_by_source,
