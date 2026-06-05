@@ -83,6 +83,7 @@ class TestOpenAPIFieldInclusion:
             "name",
             "description",
             "project_id",
+            "tags",
         }
         assert allowed_fields == expected_allowed
 
@@ -97,7 +98,9 @@ class TestOpenAPIFieldInclusion:
             mock_source_client, mock_dest_client, temp_checkpoint_dir
         )
 
-        # Should have allowed fields from OpenAPI spec
+        # Should have allowed fields from OpenAPI spec. base_exp_id, dataset_id,
+        # and parameters_id are FK references handled (remapped/dropped) at create
+        # time, so they remain in the allow-list rather than being filtered here.
         allowed_fields = migrator.allowed_fields_for_insert
         expected_allowed = {
             "ensure_new",
@@ -105,9 +108,12 @@ class TestOpenAPIFieldInclusion:
             "base_exp_id",
             "repo_info",
             "metadata",
+            "internal_metadata",
             "dataset_version",
             "description",
             "dataset_id",
+            "parameters_id",
+            "parameters_version",
             "project_id",
             "name",
             "tags",
