@@ -54,7 +54,6 @@ class E2EScenario:
     max_concurrent: int
     max_concurrent_resources: int
     max_concurrent_requests: int
-    streaming_pipeline: bool
 
 
 @pytest.mark.asyncio
@@ -66,18 +65,16 @@ class E2EScenario:
     "scenario",
     [
         E2EScenario(
-            name="concurrent_pipeline_on",
+            name="concurrent",
             max_concurrent=3,
             max_concurrent_resources=6,
             max_concurrent_requests=30,
-            streaming_pipeline=True,
         ),
         E2EScenario(
-            name="sequential_pipeline_off",
+            name="sequential",
             max_concurrent=1,
             max_concurrent_resources=1,
             max_concurrent_requests=10,
-            streaming_pipeline=False,
         ),
     ],
     ids=lambda s: s.name,
@@ -114,7 +111,6 @@ async def test_live_e2e_matrix(
     config.migration.max_concurrent = scenario.max_concurrent
     config.migration.max_concurrent_resources = scenario.max_concurrent_resources
     config.migration.max_concurrent_requests = scenario.max_concurrent_requests
-    config.migration.streaming_pipeline = scenario.streaming_pipeline
     config.migration.created_after = created_after
     config.migration.created_before = created_before
 

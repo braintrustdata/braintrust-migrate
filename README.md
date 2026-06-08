@@ -29,7 +29,7 @@ This tool provides migration capabilities for Braintrust organizations, handling
 - **Dependency-Aware Migration**: Resources are migrated in an order that respects dependencies (see below)
 - **Organization Scoping**: AI secrets, roles, and groups migrated once at org level
 - **Batch Processing**: Configurable batch sizes for optimal performance
-- **Multi-Level Parallelization**: Concurrent resource types, concurrent items within a type, and pipelined event streaming (see [Parallelization](#parallelization) below)
+- **Multi-Level Parallelization**: Concurrent resource types and concurrent items within a type (see [Parallelization](#parallelization) below)
 
 ### Reliability Features
 - **Retry Logic**: Adaptive retries with exponential backoff + jitter; respects `Retry-After` when rate-limited (429)
@@ -154,7 +154,6 @@ All options can be set via environment variables or CLI flags. CLI flags take pr
 | Environment Variable | CLI Flag | Default | Description |
 |---------------------|----------|---------|-------------|
 | `MIGRATION_MAX_CONCURRENT_RESOURCES` | — | `5` | Max concurrent items within a resource type (e.g. 5 experiments migrating at once). Also controls concurrent event streams for datasets/experiments. Range: 1–50 |
-| `MIGRATION_STREAMING_PIPELINE` | — | `true` | Prefetch the next BTQL page while inserting the current batch, overlapping source reads with destination writes |
 | `MIGRATION_MAX_CONCURRENT_REQUESTS` | — | `20` | Global cap on concurrent HTTP requests per client (source and destination independently). Prevents API overwhelm when multiple parallelization layers are active. Range: 1–200 |
 
 #### Streaming Migration (Logs, Experiments, Datasets)
@@ -405,7 +404,7 @@ On resume: skips 1-30 (done), resumes experiment 31 from saved `_pagination_key`
 
 ## Parallelization
 
-The migration tool currently uses **two active levels of concurrency** plus pipelined event streaming. The env vars in [Parallelization Tuning](#parallelization-tuning) still matter, but the within-project resource-type DAG concurrency described below has not been implemented yet.
+The migration tool currently uses **two active levels of concurrency**. The env vars in [Parallelization Tuning](#parallelization-tuning) still matter, but the within-project resource-type DAG concurrency described below has not been implemented yet.
 
 ### How It Works
 
@@ -424,8 +423,8 @@ The migration tool currently uses **two active levels of concurrency** plus pipe
 │ │   within each project.                                 │ │
 │ │                                                         │ │
 │ │   For streaming resources (logs/datasets/exps):        │ │
-│ │   - Each stream can prefetch the next page while       │ │
-│ │     inserting the current one                          │ │
+│ │   - Each stream fetches a page, inserts it, then       │ │
+│ │     fetches the next (sequential)                      │ │
 │ │   - Dataset/experiment streams are grouped for fetch   │ │
 │ │     efficiency, not scheduled as independent parallel  │ │
 │ │     DAG tasks within a project                         │ │
@@ -448,8 +447,7 @@ For streaming resources:
 - `datasets` and `experiments` group multiple ids into one BTQL fetch stream for efficiency.
 - `MIGRATION_MAX_CONCURRENT_RESOURCES` does not currently create multiple independent resource-type DAG tasks within a single project.
 
-**Pipelined Event Streaming** (`MIGRATION_STREAMING_PIPELINE`, default true)
-For each individual event stream (logs, dataset records, experiment events), the next BTQL page is prefetched from the source while the current page's batches are being inserted into the destination. This overlaps source reads with destination writes, reducing idle time for large migrations.
+Event streams currently fetch and insert sequentially (fetch a page, insert its batches, then fetch the next page).
 
 ### Safety Mechanisms
 
@@ -464,9 +462,9 @@ State mutations (ID mappings, checkpoint files) are protected by `asyncio.Lock` 
 | **Small migration** (<5 projects, <100 resources) | Defaults work well. No tuning needed. |
 | **Many small projects** (50+ projects, small data) | Increase `MIGRATION_MAX_CONCURRENT=20` for more project-level parallelism. |
 | **Few projects with many resources** (e.g. 500 experiments in one project) | `MIGRATION_MAX_CONCURRENT_RESOURCES` helps only for migrators that support per-item fanout. Streaming resources within one project still run mostly as a single grouped stream. |
-| **Large event streams** (TB-scale logs) | Defaults are good. Pipeline is on by default. Consider increasing `MIGRATION_MAX_CONCURRENT_REQUESTS=40` if the API can handle it. |
+| **Large event streams** (TB-scale logs) | Defaults are good. Consider increasing `MIGRATION_MAX_CONCURRENT_REQUESTS=40` if the API can handle it. |
 | **Rate-limited API** (frequent 429s) | *Decrease* `MIGRATION_MAX_CONCURRENT_RESOURCES=2` and `MIGRATION_MAX_CONCURRENT_REQUESTS=10`. The tool handles 429s with backoff, but fewer concurrent requests reduces throttling. |
-| **Debugging or sequential run** | Set `MIGRATION_MAX_CONCURRENT_RESOURCES=1` and `MIGRATION_STREAMING_PIPELINE=false` for deterministic, sequential execution. |
+| **Debugging or sequential run** | Set `MIGRATION_MAX_CONCURRENT_RESOURCES=1` and `MIGRATION_MAX_CONCURRENT=1` for deterministic, sequential execution. |
 
 ### Example: Tuning for a Large Migration
 
@@ -483,9 +481,6 @@ MIGRATION_MAX_CONCURRENT_RESOURCES=8
 
 # Allow more HTTP connections (API can handle it)
 MIGRATION_MAX_CONCURRENT_REQUESTS=40
-
-# Pipeline is on by default, but explicit for clarity
-MIGRATION_STREAMING_PIPELINE=true
 ```
 
 ```bash
@@ -497,9 +492,6 @@ BT_DEST_API_KEY=...
 MIGRATION_MAX_CONCURRENT=5
 MIGRATION_MAX_CONCURRENT_RESOURCES=2
 MIGRATION_MAX_CONCURRENT_REQUESTS=10
-
-# Disable pipeline for simpler debugging
-MIGRATION_STREAMING_PIPELINE=false
 ```
 
 ## Resource Types
@@ -552,9 +544,6 @@ export MIGRATION_RETRY_DELAY=2.0
 # Reduce parallelism if hitting rate limits
 export MIGRATION_MAX_CONCURRENT_RESOURCES=2
 export MIGRATION_MAX_CONCURRENT_REQUESTS=10
-
-# Disable pipelining for simpler debugging
-export MIGRATION_STREAMING_PIPELINE=false
 
 # Migrate incrementally
 braintrust-migrate migrate --resources ai_secrets,datasets
