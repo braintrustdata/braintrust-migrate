@@ -11,6 +11,8 @@ import structlog
 
 from braintrust_migrate.client import BraintrustClient, create_client_pair
 from braintrust_migrate.config import Config
+from braintrust_migrate.resources.base import list_resources
+from braintrust_migrate.validation import validate_resource
 from braintrust_migrate.resources import (
     ACLMigrator,
     AISecretMigrator,
@@ -858,6 +860,29 @@ class MigrationOrchestrator:
                         }
                     )
 
+        # Optional post-migration validation (source vs destination parity).
+        if self.config.migration.validate_migration:
+            try:
+                project_results["validation"] = await self._validate_project(
+                    source_client=source_client,
+                    dest_client=dest_client,
+                    source_project_id=source_project_id,
+                    dest_project_id=dest_project_id,
+                    migrated_resource_types=list(project_results["resources"].keys()),
+                    id_mapping=global_id_mappings,
+                )
+            except Exception as e:
+                self._logger.error(
+                    "Project validation phase failed",
+                    project=project_name,
+                    error=str(e),
+                )
+                project_results["validation"] = {
+                    "ok": False,
+                    "error": str(e),
+                    "resources": [],
+                }
+
         self._logger.info(
             f"Completed project migration: {project_name}",
             total_resources=project_results["total_resources"],
@@ -867,6 +892,71 @@ class MigrationOrchestrator:
         )
 
         return project_results
+
+    async def _validate_project(
+        self,
+        *,
+        source_client: BraintrustClient,
+        dest_client: BraintrustClient,
+        source_project_id: str,
+        dest_project_id: str,
+        migrated_resource_types: list[str],
+        id_mapping: dict[str, str],
+    ) -> dict[str, Any]:
+        """Validate a project's migrated resources against the source.
+
+        Object parity (counts + which items are missing) plus event count-parity
+        for datasets/experiments/logs. Out-of-scope resource types are skipped
+        (validate_resource returns None).
+        """
+        results: list[dict[str, Any]] = []
+        for resource_type in migrated_resource_types:
+            try:
+                validation = await validate_resource(
+                    resource_type,
+                    source_client=source_client,
+                    dest_client=dest_client,
+                    source_project_id=source_project_id,
+                    dest_project_id=dest_project_id,
+                    list_fn=list_resources,
+                    id_mapping=id_mapping,
+                    created_after=self.config.migration.created_after,
+                    created_before=self.config.migration.created_before,
+                )
+            except Exception as e:
+                self._logger.error(
+                    "Validation failed for resource",
+                    resource=resource_type,
+                    error=str(e),
+                )
+                results.append(
+                    {
+                        "resource_type": resource_type,
+                        "ok": False,
+                        "error": str(e),
+                        "checks": [],
+                    }
+                )
+                continue
+
+            if validation is None:
+                continue
+            results.append(validation.to_dict())
+            if not validation.ok:
+                self._logger.warning(
+                    "Validation mismatch",
+                    resource=resource_type,
+                    checks=[c.to_dict() for c in validation.checks if not c.ok],
+                )
+
+        ok = all(r.get("ok", False) for r in results)
+        self._logger.info(
+            "Project validation complete",
+            project_id=dest_project_id,
+            ok=ok,
+            validated=len(results),
+        )
+        return {"ok": ok, "resources": results}
 
     def _get_organization_resources_to_migrate(self) -> list[str]:
         """Get list of organization-scoped resource types to migrate based on configuration.
@@ -1072,6 +1162,11 @@ class MigrationOrchestrator:
                             "error": error.get("error"),
                         }
                     )
+
+            # Include post-migration validation results when present.
+            validation = project_data.get("validation")
+            if validation is not None:
+                project_summary["validation"] = validation
 
             detailed_report["projects"][project_name] = project_summary
 

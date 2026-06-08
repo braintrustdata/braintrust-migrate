@@ -227,6 +227,18 @@ def migrate(
             envvar="MIGRATION_GROUP_AUTO_INVITE_USERS",
         ),
     ] = None,
+    validate: Annotated[
+        bool | None,
+        typer.Option(
+            "--validate/--no-validate",
+            help=(
+                "After migrating, validate the destination against the source "
+                "(object counts + which items are missing; event count-parity "
+                "for datasets/experiments/logs)."
+            ),
+            envvar="MIGRATION_VALIDATE",
+        ),
+    ] = None,
 ) -> None:
     """Migrate resources from source to destination Braintrust organization.
 
@@ -259,6 +271,7 @@ def migrate(
             acl_auto_invite_users,
             group_map_users,
             group_auto_invite_users,
+            validate,
         )
     )
 
@@ -280,6 +293,7 @@ async def _migrate_main(
     acl_auto_invite_users: bool | None,
     group_map_users: bool | None,
     group_auto_invite_users: bool | None,
+    validate: bool | None = None,
 ) -> None:
     """Async implementation of the migrate command."""
     setup_logging(log_level, log_format)
@@ -352,6 +366,8 @@ async def _migrate_main(
             config.migration.group_map_users = group_map_users
         if group_auto_invite_users is not None:
             config.migration.group_auto_invite_users = group_auto_invite_users
+        if validate is not None:
+            config.migration.validate_migration = validate
 
         logger.info(
             "Starting migration",
@@ -913,6 +929,52 @@ def _display_results(results: dict) -> None:
             console.print(
                 f"  ... and {len(summary['errors']) - MAX_ERRORS_TO_DISPLAY} more errors"
             )
+
+    # Validation summary (only when --validate was used).
+    validations = [
+        (pname, pdata["validation"])
+        for pname, pdata in results.get("projects", {}).items()
+        if pdata.get("validation")
+    ]
+    if validations:
+        total_checks = sum(len(v.get("resources", [])) for _, v in validations)
+        failures = [
+            (pname, r)
+            for pname, v in validations
+            for r in v.get("resources", [])
+            if not r.get("ok")
+        ]
+        console.print("\n[bold]Validation[/bold]")
+        if not failures:
+            console.print(
+                f"  [green]✅ all {total_checks} validated resource(s) match[/green]"
+            )
+        else:
+            console.print(
+                f"  [red]❌ {len(failures)} of {total_checks} validated "
+                f"resource(s) have mismatches[/red]"
+            )
+            for pname, r in failures:
+                console.print(f"  [red]• {pname}/{r['resource_type']}[/red]")
+                if r.get("error"):
+                    console.print(f"      error: {r['error']}")
+                for check in r.get("checks", []):
+                    if check.get("ok"):
+                        continue
+                    if check.get("kind") == "object" and check.get("missing"):
+                        miss = check["missing"]
+                        shown = ", ".join(miss[:MAX_ERRORS_TO_DISPLAY])
+                        more = (
+                            f" (+{len(miss) - MAX_ERRORS_TO_DISPLAY} more)"
+                            if len(miss) > MAX_ERRORS_TO_DISPLAY
+                            else ""
+                        )
+                        console.print(f"      missing {len(miss)}: {shown}{more}")
+                    elif check.get("kind") == "events":
+                        console.print(
+                            f"      {check['scope']}: "
+                            f"source={check['source_count']} dest={check['dest_count']}"
+                        )
 
     # Always point to the full per-item report so users can drill into exactly
     # what was migrated / skipped / failed (and why) — counts above, detail here.

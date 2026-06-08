@@ -8,7 +8,7 @@ The format is based on Keep a Changelog and this project follows Semantic Versio
 
 ### Added
 
-- N/A
+- Optional post-migration validation (`--validate` / `MIGRATION_VALIDATE`). After migrating, validates the destination against the source: object parity (counts + the specific items missing in the destination) for project-scoped resources, plus event count-parity for datasets, experiments, and logs. Validation mirrors migration policy (e.g. bundle-backed code functions, which are intentionally skipped, are not reported as missing), honors the same `created_after`/`created_before` window, and is reported per-resource in the console and in `migration_report.json`. Note: for high-volume event resources we compare counts only — enumerating *which* events are missing does not scale; counts are reported per dataset/experiment/project so a discrepancy can still be localized. (roles/groups/ai_secrets/ACLs are out of scope.)
 
 ### Changed
 
