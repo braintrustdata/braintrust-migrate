@@ -914,6 +914,20 @@ def _display_results(results: dict) -> None:
                 f"  ... and {len(summary['errors']) - MAX_ERRORS_TO_DISPLAY} more errors"
             )
 
+    # Skips are counted above but the per-item detail (what was skipped and why)
+    # can be large, so point to the JSON report rather than printing it inline.
+    report_path = results.get("report_path")
+    if summary["skipped_resources"]:
+        msg = (
+            f"\n[yellow]{summary['skipped_resources']} resource(s) skipped[/yellow]"
+        )
+        if report_path:
+            msg += (
+                f" — per-item detail (name + reason) in:\n  [dim]{report_path}[/dim]"
+                '  →  "detailed_breakdown.skipped"'
+            )
+        console.print(msg)
+
 
 @app.command()
 def validate(
