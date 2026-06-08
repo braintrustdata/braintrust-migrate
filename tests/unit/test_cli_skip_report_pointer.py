@@ -1,4 +1,4 @@
-"""The console summary points to the JSON report for per-item skip detail."""
+"""The console summary always points to the JSON report to drill into detail."""
 
 from __future__ import annotations
 
@@ -24,28 +24,32 @@ def _results(*, skipped: int, report_path: str | None) -> dict:
     return res
 
 
-def test_skip_pointer_shown_when_resources_skipped(monkeypatch):
+def _render(monkeypatch, results: dict) -> str:
     rec = Console(record=True, width=200)
     monkeypatch.setattr(cli_module, "console", rec)
+    cli_module._display_results(results)
+    return rec.export_text()
 
-    cli_module._display_results(
-        _results(skipped=2, report_path="/tmp/checkpoints/migration_report.json")
+
+def test_report_path_shown_when_resources_skipped(monkeypatch):
+    out = _render(
+        monkeypatch,
+        _results(skipped=2, report_path="/tmp/checkpoints/migration_report.json"),
     )
-
-    out = rec.export_text()
-    assert "2 resource(s) skipped" in out
     assert "/tmp/checkpoints/migration_report.json" in out
-    assert "detailed_breakdown.skipped" in out
+    assert "Full per-item report" in out
 
 
-def test_no_skip_pointer_when_nothing_skipped(monkeypatch):
-    rec = Console(record=True, width=200)
-    monkeypatch.setattr(cli_module, "console", rec)
-
-    cli_module._display_results(
-        _results(skipped=0, report_path="/tmp/checkpoints/migration_report.json")
+def test_report_path_shown_even_when_nothing_skipped(monkeypatch):
+    # The report pointer is general drill-in info, not gated on skips.
+    out = _render(
+        monkeypatch,
+        _results(skipped=0, report_path="/tmp/checkpoints/migration_report.json"),
     )
+    assert "/tmp/checkpoints/migration_report.json" in out
+    assert "Full per-item report" in out
 
-    out = rec.export_text()
-    assert "resource(s) skipped" not in out
-    assert "detailed_breakdown.skipped" not in out
+
+def test_no_report_line_when_report_path_absent(monkeypatch):
+    out = _render(monkeypatch, _results(skipped=1, report_path=None))
+    assert "Full per-item report" not in out
