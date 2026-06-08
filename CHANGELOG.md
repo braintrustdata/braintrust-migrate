@@ -18,6 +18,23 @@ The format is based on Keep a Changelog and this project follows Semantic Versio
 
 - N/A
 
+## [0.4.0] - 2026-06-08
+
+### Added
+
+- Automatic spilling of oversized event fields into JSON attachments: when a row exceeds the ~20MB per-span logging upload limit, the largest of `input`, `output`, `metadata`, `expected`, `error`, and `span_attributes` are uploaded to the destination as `braintrust_attachment` references so the span migrates successfully instead of failing on `/logs3/overflow`. Applies to logs, experiment events, and dataset events; always on, no configuration required.
+- End-to-end and unit coverage for oversize-field spilling, including a full `LogsMigrator` run over a >20MB event.
+
+### Changed
+
+- Folded per-event size measurement into a single pass in the streaming insert path, reusing the result for both oversize detection and byte accounting (removes a redundant serialization).
+- Tracked spilled-field counts in streaming checkpoint state and migration reports.
+
+### Fixed
+
+- Experiment migration now remaps `parameters_id` (a foreign key to the prompts table) to the destination prompt id, or drops it together with `parameters_version` when the prompt was not migrated, preventing foreign-key violations introduced by recent OpenAPI schema additions.
+- Migrated `tags` for datasets, now that it is part of the dataset create schema.
+
 ## [0.3.0] - 2026-04-07
 
 ### Added
