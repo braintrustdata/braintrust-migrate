@@ -28,6 +28,7 @@ from braintrust_migrate.streaming_utils import (
     build_btql_sorted_page_query,
     dump_oversize_event_summary,
     is_http_413,
+    make_stream_progress_hooks,
     stream_btql_sorted_events_buffered,
 )
 
@@ -658,105 +659,15 @@ class DatasetMigrator(ResourceMigrator[dict]):
                 flush_max_bytes=self._sdk_flush_max_bytes,
                 is_http_413=is_http_413,
                 on_single_413=_on_single_413,
-                hooks=None
-                if progress is None
-                else {
-                    "on_fetch": lambda info, _p=progress: _p(
-                        {
-                            "resource": "dataset_events",
-                            "phase": "fetch",
-                            "source_dataset_ids": source_dataset_ids,
-                            "dest_dataset_ids": list(source_to_dest_dataset_ids.values()),
-                            "page_num": info.get("page_num"),
-                            "page_events": info.get("page_events"),
-                            "fetched_total": info.get("fetched_total"),
-                            "inserted_total": info.get("inserted_total"),
-                            "inserted_bytes_total": info.get("inserted_bytes_total"),
-                            "skipped_deleted_total": info.get("skipped_deleted_total"),
-                            "skipped_seen_total": info.get("skipped_seen_total"),
-                            "attachments_copied_total": info.get("attachments_copied_total"),
-                            "pending_buffered_rows": info.get("pending_buffered_rows"),
-                            "pending_buffered_bytes": info.get("pending_buffered_bytes"),
-                            "cursor": (
-                                (state.btql_min_pagination_key[:16] + "…")
-                                if isinstance(state.btql_min_pagination_key, str)
-                                else None
-                            ),
-                            "next_cursor": None,
-                        }
-                    ),
-                    "on_page": lambda info, _p=progress: _p(
-                        {
-                            "resource": "dataset_events",
-                            "phase": "page",
-                            "source_dataset_ids": source_dataset_ids,
-                            "dest_dataset_ids": list(source_to_dest_dataset_ids.values()),
-                            "page_num": info.get("page_num"),
-                            "page_events": info.get("page_events"),
-                            "fetched_total": info.get("fetched_total"),
-                            "inserted_total": info.get("inserted_total"),
-                            "inserted_bytes_total": info.get("inserted_bytes_total"),
-                            "skipped_deleted_total": info.get("skipped_deleted_total"),
-                            "skipped_seen_total": info.get("skipped_seen_total"),
-                            "attachments_copied_total": info.get("attachments_copied_total"),
-                            "pending_buffered_rows": info.get("pending_buffered_rows"),
-                            "pending_buffered_bytes": info.get("pending_buffered_bytes"),
-                            "cursor": (
-                                (state.btql_min_pagination_key[:16] + "…")
-                                if isinstance(state.btql_min_pagination_key, str)
-                                else None
-                            ),
-                            "next_cursor": None,
-                        }
-                    ),
-                    "on_insert": lambda info, _p=progress: _p(
-                        {
-                            "resource": "dataset_events",
-                            "phase": "insert",
-                            "source_dataset_ids": source_dataset_ids,
-                            "dest_dataset_ids": list(source_to_dest_dataset_ids.values()),
-                            "page_num": None,
-                            "page_events": None,
-                            "inserted_last": info.get("inserted_last"),
-                            "inserted_bytes_last": info.get("inserted_bytes_last"),
-                            "insert_seconds": info.get("insert_seconds"),
-                            "flush_rows": info.get("flush_rows"),
-                            "flush_buffer_bytes": info.get("flush_buffer_bytes"),
-                            "fetched_total": state.fetched_events,
-                            "inserted_total": state.inserted_events,
-                            "inserted_bytes_total": state.inserted_bytes,
-                            "skipped_deleted_total": state.skipped_deleted,
-                            "skipped_seen_total": state.skipped_seen,
-                            "attachments_copied_total": state.attachments_copied,
-                            "pending_buffered_rows": 0,
-                            "pending_buffered_bytes": 0,
-                            "cursor": (
-                                (state.btql_min_pagination_key[:16] + "…")
-                                if isinstance(state.btql_min_pagination_key, str)
-                                else None
-                            ),
-                            "next_cursor": None,
-                        }
-                    ),
-                    "on_done": lambda info, _p=progress: _p(
-                        {
-                            "resource": "dataset_events",
-                            "phase": "done",
-                            "source_dataset_ids": source_dataset_ids,
-                            "dest_dataset_ids": list(source_to_dest_dataset_ids.values()),
-                            "fetched_total": info.get("fetched_total"),
-                            "inserted_total": info.get("inserted_total"),
-                            "inserted_bytes_total": info.get("inserted_bytes_total"),
-                            "skipped_deleted_total": info.get("skipped_deleted_total"),
-                            "skipped_seen_total": info.get("skipped_seen_total"),
-                            "attachments_copied_total": info.get("attachments_copied_total"),
-                            "pending_buffered_rows": info.get("pending_buffered_rows"),
-                            "pending_buffered_bytes": info.get("pending_buffered_bytes"),
-                            "cursor": None,
-                            "next_cursor": None,
-                        }
-                    ),
-                },
+                hooks=make_stream_progress_hooks(
+                    progress,
+                    state,
+                    resource="dataset_events",
+                    id_fields={
+                        "source_dataset_ids": source_dataset_ids,
+                        "dest_dataset_ids": list(source_to_dest_dataset_ids.values()),
+                    },
+                ),
             )
 
             self._logger.info(

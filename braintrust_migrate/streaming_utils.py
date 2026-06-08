@@ -275,6 +275,120 @@ class StreamingConfig:
         )
 
 
+def _truncate_cursor(state: Any) -> str | None:
+    """Short, display-friendly form of the current pagination key."""
+    pk = state.btql_min_pagination_key
+    return (pk[:16] + "…") if isinstance(pk, str) else None
+
+
+def build_stream_progress(
+    phase: str,
+    info: dict[str, Any],
+    state: Any,
+    *,
+    resource: str,
+    id_fields: dict[str, Any],
+) -> dict[str, Any]:
+    """Build a normalized streaming progress payload for the dataset/experiment
+    event migrators.
+
+    Replaces the four near-identical per-migrator hook lambdas. ``resource`` and
+    ``id_fields`` carry the per-resource bits (e.g. ``"dataset_events"`` and
+    ``{"source_dataset_ids": [...], "dest_dataset_ids": [...]}``); everything else
+    comes from the loop's ``info`` payload or ``state`` exactly as before.
+    """
+    payload: dict[str, Any] = {"resource": resource, "phase": phase, **id_fields}
+
+    if phase in ("fetch", "page"):
+        payload.update(
+            {
+                "page_num": info.get("page_num"),
+                "page_events": info.get("page_events"),
+                "fetched_total": info.get("fetched_total"),
+                "inserted_total": info.get("inserted_total"),
+                "inserted_bytes_total": info.get("inserted_bytes_total"),
+                "skipped_deleted_total": info.get("skipped_deleted_total"),
+                "skipped_seen_total": info.get("skipped_seen_total"),
+                "attachments_copied_total": info.get("attachments_copied_total"),
+                "pending_buffered_rows": info.get("pending_buffered_rows"),
+                "pending_buffered_bytes": info.get("pending_buffered_bytes"),
+                "cursor": _truncate_cursor(state),
+                "next_cursor": None,
+            }
+        )
+    elif phase == "insert":
+        # Totals come from committed state (not the per-batch info); page fields
+        # are not meaningful for an insert event.
+        payload.update(
+            {
+                "page_num": None,
+                "page_events": None,
+                "inserted_last": info.get("inserted_last"),
+                "inserted_bytes_last": info.get("inserted_bytes_last"),
+                "insert_seconds": info.get("insert_seconds"),
+                "flush_rows": info.get("flush_rows"),
+                "flush_buffer_bytes": info.get("flush_buffer_bytes"),
+                "fetched_total": state.fetched_events,
+                "inserted_total": state.inserted_events,
+                "inserted_bytes_total": state.inserted_bytes,
+                "skipped_deleted_total": state.skipped_deleted,
+                "skipped_seen_total": state.skipped_seen,
+                "attachments_copied_total": state.attachments_copied,
+                "pending_buffered_rows": 0,
+                "pending_buffered_bytes": 0,
+                "cursor": _truncate_cursor(state),
+                "next_cursor": None,
+            }
+        )
+    elif phase == "done":
+        payload.update(
+            {
+                "fetched_total": info.get("fetched_total"),
+                "inserted_total": info.get("inserted_total"),
+                "inserted_bytes_total": info.get("inserted_bytes_total"),
+                "skipped_deleted_total": info.get("skipped_deleted_total"),
+                "skipped_seen_total": info.get("skipped_seen_total"),
+                "attachments_copied_total": info.get("attachments_copied_total"),
+                "pending_buffered_rows": info.get("pending_buffered_rows"),
+                "pending_buffered_bytes": info.get("pending_buffered_bytes"),
+                "cursor": None,
+                "next_cursor": None,
+            }
+        )
+
+    return payload
+
+
+def make_stream_progress_hooks(
+    progress: Callable[[dict[str, Any]], None] | None,
+    state: Any,
+    *,
+    resource: str,
+    id_fields: dict[str, Any],
+) -> StreamHooks | None:
+    """Build the four streaming hooks that emit normalized progress payloads.
+
+    Returns ``None`` when no progress callback is provided, matching the
+    ``hooks=None`` shape ``stream_btql_sorted_events_buffered`` expects.
+    """
+    if progress is None:
+        return None
+
+    def _hook(phase: str) -> Callable[[dict[str, Any]], None]:
+        return lambda info, _p=progress: _p(
+            build_stream_progress(
+                phase, info, state, resource=resource, id_fields=id_fields
+            )
+        )
+
+    return {
+        "on_fetch": _hook("fetch"),
+        "on_page": _hook("page"),
+        "on_insert": _hook("insert"),
+        "on_done": _hook("done"),
+    }
+
+
 def build_btql_sorted_page_query(
     *,
     from_expr: str,

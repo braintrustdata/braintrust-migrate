@@ -14,10 +14,13 @@ from typing import Any
 import httpx
 
 from braintrust_migrate.streaming_utils import (
+    EventsStreamState,
     approx_event_size_bytes,
+    build_stream_progress,
     count_attachment_refs,
     dump_oversize_event_summary,
     is_http_413,
+    make_stream_progress_hooks,
 )
 
 
@@ -112,3 +115,109 @@ def test_dump_oversize_event_summary_unknown_id_and_prefix(tmp_path: Path):
     )
     assert (tmp_path / "oversize_project_logs_event_unknown.json").exists()
     assert logger.calls[0][0].startswith("Oversize event isolated (413).")
+
+
+def _events_state() -> EventsStreamState:
+    return EventsStreamState(
+        btql_min_pagination_key="0123456789ABCDEFGHIJ",  # 20 chars
+        fetched_events=10,
+        inserted_events=8,
+        inserted_bytes=100,
+        skipped_deleted=1,
+        skipped_seen=2,
+        attachments_copied=3,
+    )
+
+
+def test_build_stream_progress_fetch_uses_info_and_truncates_cursor():
+    state = _events_state()
+    info = {
+        "page_num": 2,
+        "page_events": 50,
+        "fetched_total": 7,
+        "inserted_total": 5,
+        "inserted_bytes_total": 60,
+        "skipped_deleted_total": 0,
+        "skipped_seen_total": 1,
+        "attachments_copied_total": 0,
+        "pending_buffered_rows": 3,
+        "pending_buffered_bytes": 30,
+    }
+    p = build_stream_progress(
+        "fetch",
+        info,
+        state,
+        resource="dataset_events",
+        id_fields={"source_dataset_ids": ["s"], "dest_dataset_ids": ["d"]},
+    )
+    assert p["resource"] == "dataset_events"
+    assert p["phase"] == "fetch"
+    assert p["source_dataset_ids"] == ["s"]
+    assert p["dest_dataset_ids"] == ["d"]
+    # fetch/page totals come from info, not state.
+    assert p["fetched_total"] == 7
+    assert p["pending_buffered_rows"] == 3
+    # cursor is the first 16 chars + ellipsis.
+    assert p["cursor"] == "0123456789ABCDEF…"
+    assert p["next_cursor"] is None
+
+
+def test_build_stream_progress_insert_uses_state_totals():
+    state = _events_state()
+    info = {
+        "inserted_last": 4,
+        "inserted_bytes_last": 40,
+        "insert_seconds": 0.5,
+        "flush_rows": 4,
+        "flush_buffer_bytes": 40,
+    }
+    p = build_stream_progress(
+        "insert",
+        info,
+        state,
+        resource="experiment_events",
+        id_fields={"source_experiment_ids": ["s"]},
+    )
+    assert p["phase"] == "insert"
+    # insert totals come from committed state, not the per-batch info.
+    assert p["fetched_total"] == state.fetched_events
+    assert p["inserted_total"] == state.inserted_events
+    assert p["inserted_bytes_total"] == state.inserted_bytes
+    assert p["page_num"] is None
+    assert p["pending_buffered_rows"] == 0
+    assert p["inserted_last"] == 4
+    assert p["insert_seconds"] == 0.5
+
+
+def test_build_stream_progress_done_nulls_cursor():
+    state = _events_state()
+    info = {"fetched_total": 10, "inserted_total": 8, "inserted_bytes_total": 100}
+    p = build_stream_progress(
+        "done", info, state, resource="dataset_events", id_fields={}
+    )
+    assert p["phase"] == "done"
+    assert p["fetched_total"] == 10
+    assert p["cursor"] is None
+
+
+def test_make_stream_progress_hooks_none_passthrough():
+    assert (
+        make_stream_progress_hooks(None, _events_state(), resource="x", id_fields={})
+        is None
+    )
+
+
+def test_make_stream_progress_hooks_emits_via_callback():
+    captured: list[dict] = []
+    hooks = make_stream_progress_hooks(
+        captured.append,
+        _events_state(),
+        resource="dataset_events",
+        id_fields={"source_dataset_ids": ["s"]},
+    )
+    assert set(hooks) == {"on_fetch", "on_page", "on_insert", "on_done"}
+    hooks["on_fetch"]({"page_num": 1})
+    assert captured[-1]["phase"] == "fetch"
+    assert captured[-1]["resource"] == "dataset_events"
+    hooks["on_done"]({})
+    assert captured[-1]["phase"] == "done"
