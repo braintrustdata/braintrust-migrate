@@ -6,6 +6,7 @@ from typing import Any
 import pytest
 
 import braintrust_migrate.resources.datasets as datasets_module
+from braintrust_migrate.config import MigrationConfig
 from braintrust_migrate.resources.datasets import DatasetMigrator
 
 
@@ -96,10 +97,10 @@ async def test_dataset_streaming_resume_after_insert_failure(tmp_path: Path) -> 
     source = _StubClient(page1=page1, page2=page2)
     dest = _StubClient()
     dest.fail_on_insert_call = 2
+    # Flush one row at a time via the real config lever so the second insert fails.
+    dest.migration_config = MigrationConfig(events_flush_max_rows=1)
     original_writer = datasets_module.SDKDatasetWriter
-    original_flush_max_rows = datasets_module.DatasetMigrator.SDK_FLUSH_MAX_ROWS
     datasets_module.SDKDatasetWriter = _FakeSDKDatasetWriter
-    datasets_module.DatasetMigrator.SDK_FLUSH_MAX_ROWS = 1
 
     try:
         migrator = DatasetMigrator(
@@ -126,4 +127,3 @@ async def test_dataset_streaming_resume_after_insert_failure(tmp_path: Path) -> 
         assert inserted_all == ["a", "b"]
     finally:
         datasets_module.SDKDatasetWriter = original_writer
-        datasets_module.DatasetMigrator.SDK_FLUSH_MAX_ROWS = original_flush_max_rows

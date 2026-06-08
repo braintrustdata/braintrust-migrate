@@ -16,10 +16,14 @@ from braintrust_migrate.btql import (
 from braintrust_migrate.resources.base import MigrationResult, ResourceMigrator
 from braintrust_migrate.sdk_logs import SDKExperimentWriter
 from braintrust_migrate.streaming_utils import (
+    STREAMING_EVENT_FETCH_GROUP_SIZE,
+    STREAMING_FLUSH_MAX_BYTES,
+    STREAMING_FLUSH_MAX_ROWS,
+    STREAMING_MAX_EVENT_BYTES,
     EventsStreamState,
     SeenIdsDB,
+    StreamingConfig,
     build_btql_sorted_page_query,
-    coerce_int_config,
     dump_oversize_event_summary,
     is_http_413,
     stream_btql_sorted_events_buffered,
@@ -37,12 +41,12 @@ class ExperimentMigrator(ResourceMigrator[dict]):
     Uses raw API requests instead of SDK to avoid model dependencies.
     """
 
-    SDK_FLUSH_MAX_ROWS: ClassVar[int] = 5_000
-    SDK_FLUSH_MAX_BYTES: ClassVar[int] = 25 * 1024 * 1024
-    DEFAULT_EVENT_FETCH_GROUP_SIZE: ClassVar[int] = 25
+    SDK_FLUSH_MAX_ROWS: ClassVar[int] = STREAMING_FLUSH_MAX_ROWS
+    SDK_FLUSH_MAX_BYTES: ClassVar[int] = STREAMING_FLUSH_MAX_BYTES
+    DEFAULT_EVENT_FETCH_GROUP_SIZE: ClassVar[int] = STREAMING_EVENT_FETCH_GROUP_SIZE
     # Spill individual rows above this size into JSON attachments so they fit
     # under Braintrust's ~20MB per-span logging upload limit (logs3/overflow).
-    MAX_EVENT_BYTES: ClassVar[int] = 18 * 1024 * 1024
+    MAX_EVENT_BYTES: ClassVar[int] = STREAMING_MAX_EVENT_BYTES
 
     def __init__(
         self,
@@ -73,36 +77,15 @@ class ExperimentMigrator(ResourceMigrator[dict]):
                 ),
             )
 
-        # Byte-aware insert batching config (best-effort; falls back to count-only if missing).
-        cfg = getattr(self.dest_client, "migration_config", None) or getattr(
-            self.source_client, "migration_config", None
-        )
-        try:
-            max_req = int(getattr(cfg, "insert_max_request_bytes", 6 * 1024 * 1024))
-            headroom = float(getattr(cfg, "insert_request_headroom_ratio", 0.5))
-            if headroom <= 0:
-                raise ValueError("headroom must be > 0")
-            self._insert_max_bytes: int | None = int(max_req * headroom)
-        except Exception:
-            self._insert_max_bytes = None
-        self._sdk_flush_max_rows = coerce_int_config(
-            cfg,
-            "events_flush_max_rows",
-            self.SDK_FLUSH_MAX_ROWS,
-            minimum=1,
-        )
-        self._sdk_flush_max_bytes = int(self.SDK_FLUSH_MAX_BYTES)
+        stream_cfg = StreamingConfig.resolve(self.source_client, self.dest_client)
+        self._sdk_flush_max_rows = stream_cfg.sdk_flush_max_rows
+        self._sdk_flush_max_bytes = stream_cfg.sdk_flush_max_bytes
+        self._event_fetch_group_size = stream_cfg.event_fetch_group_size
         # Always-on oversize-field spilling (see OversizeFieldSpiller). Only hits
         # the network for rows that exceed the per-span upload limit.
         self._spiller = OversizeFieldSpiller(
             dest_client=self.dest_client,
-            max_event_bytes=int(self.MAX_EVENT_BYTES),
-        )
-        self._event_fetch_group_size = coerce_int_config(
-            cfg,
-            "events_fetch_group_size",
-            self.DEFAULT_EVENT_FETCH_GROUP_SIZE,
-            minimum=1,
+            max_event_bytes=stream_cfg.max_event_bytes,
         )
 
     @property

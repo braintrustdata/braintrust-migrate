@@ -6,6 +6,7 @@ from typing import Any
 import pytest
 
 import braintrust_migrate.resources.logs as logs_module
+from braintrust_migrate.config import MigrationConfig
 from braintrust_migrate.resources.logs import LogsMigrator
 
 
@@ -103,10 +104,11 @@ async def test_logs_migrator_resume_after_insert_failure(tmp_path: Path) -> None
     source = _StubClient(page1=page1, page2=page2)
     dest = _StubClient(page1=page1, page2=page2)
     dest.fail_on_insert_call = 2  # fail on second insert (page2) during first run
+    # Flush one row at a time via the real config lever so the second insert
+    # (page2) is the one that fails.
+    dest.migration_config = MigrationConfig(events_flush_max_rows=1)
     original_writer = logs_module.SDKProjectLogsWriter
-    original_flush_max_rows = logs_module.LogsMigrator.SDK_FLUSH_MAX_ROWS
     logs_module.SDKProjectLogsWriter = _FakeSDKProjectLogsWriter
-    logs_module.LogsMigrator.SDK_FLUSH_MAX_ROWS = 1
 
     try:
         migrator = LogsMigrator(
@@ -132,4 +134,3 @@ async def test_logs_migrator_resume_after_insert_failure(tmp_path: Path) -> None
         assert inserted_all == ["a", "b"]
     finally:
         logs_module.SDKProjectLogsWriter = original_writer
-        logs_module.LogsMigrator.SDK_FLUSH_MAX_ROWS = original_flush_max_rows

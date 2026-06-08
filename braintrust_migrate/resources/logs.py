@@ -30,9 +30,12 @@ from braintrust_migrate.client import BraintrustClient
 from braintrust_migrate.resources.base import MigrationState, ResourceMigrator
 from braintrust_migrate.sdk_logs import SDKProjectLogsWriter
 from braintrust_migrate.streaming_utils import (
+    STREAMING_FLUSH_MAX_BYTES,
+    STREAMING_FLUSH_MAX_ROWS,
+    STREAMING_MAX_EVENT_BYTES,
     SeenIdsDB,
+    StreamingConfig,
     build_btql_sorted_page_query,
-    coerce_int_config,
     dump_oversize_event_summary,
     is_http_413,
 )
@@ -107,11 +110,11 @@ class _LogsStreamingState:
 class LogsMigrator(ResourceMigrator[dict[str, Any]]):
     """Streaming migrator for Braintrust project logs."""
 
-    SDK_FLUSH_MAX_ROWS: ClassVar[int] = 5_000
-    SDK_FLUSH_MAX_BYTES: ClassVar[int] = 25 * 1024 * 1024
+    SDK_FLUSH_MAX_ROWS: ClassVar[int] = STREAMING_FLUSH_MAX_ROWS
+    SDK_FLUSH_MAX_BYTES: ClassVar[int] = STREAMING_FLUSH_MAX_BYTES
     # Spill individual rows above this size into JSON attachments so they fit
     # under Braintrust's ~20MB per-span logging upload limit (logs3/overflow).
-    MAX_EVENT_BYTES: ClassVar[int] = 18 * 1024 * 1024
+    MAX_EVENT_BYTES: ClassVar[int] = STREAMING_MAX_EVENT_BYTES
 
     _INSERT_FIELDS: ClassVar[set[str]] = {
         "input",
@@ -161,16 +164,9 @@ class LogsMigrator(ResourceMigrator[dict[str, Any]]):
 
         self._logger = logger.bind(migrator=self.__class__.__name__)
         self._sdk_logs_writer: SDKProjectLogsWriter | None = None
-        cfg = getattr(self.dest_client, "migration_config", None) or getattr(
-            self.source_client, "migration_config", None
-        )
-        self._sdk_flush_max_rows = coerce_int_config(
-            cfg,
-            "events_flush_max_rows",
-            self.SDK_FLUSH_MAX_ROWS,
-            minimum=1,
-        )
-        self._sdk_flush_max_bytes = int(self.SDK_FLUSH_MAX_BYTES)
+        stream_cfg = StreamingConfig.resolve(self.source_client, self.dest_client)
+        self._sdk_flush_max_rows = stream_cfg.sdk_flush_max_rows
+        self._sdk_flush_max_bytes = stream_cfg.sdk_flush_max_bytes
 
         self._stream_state_path = self.checkpoint_dir / "logs_streaming_state.json"
         self._stream_state = _LogsStreamingState.from_path(self._stream_state_path)
@@ -203,21 +199,11 @@ class LogsMigrator(ResourceMigrator[dict[str, Any]]):
         # Always-on: rows larger than the per-span upload limit get their biggest
         # fields spilled into JSON attachments. The spiller only touches the
         # network for rows that actually exceed the cap, so it is free otherwise.
-        self._max_event_bytes = int(self.MAX_EVENT_BYTES)
+        self._max_event_bytes = stream_cfg.max_event_bytes
         self._spiller = OversizeFieldSpiller(
             dest_client=self.dest_client,
             max_event_bytes=self._max_event_bytes,
         )
-
-        # Byte-aware insert batching config (best-effort; falls back to count-only if missing).
-        try:
-            max_req = int(getattr(cfg, "insert_max_request_bytes", 6 * 1024 * 1024))
-            headroom = float(getattr(cfg, "insert_request_headroom_ratio", 0.5))
-            if headroom <= 0:
-                raise ValueError("headroom must be > 0")
-            self._insert_max_bytes: int | None = int(max_req * headroom)
-        except Exception:
-            self._insert_max_bytes = None
 
     @property
     def resource_name(self) -> str:
