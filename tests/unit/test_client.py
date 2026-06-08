@@ -122,3 +122,65 @@ class TestBraintrustClient:
 
         result = await client.with_retry("test_operation", mock_operation)
         assert result == "success"
+
+
+async def test_get_org_id_queries_project_when_not_cached(
+    org_config, migration_config
+):
+    """When org_id hasn't been seen yet, fetch one project and read it."""
+    client = BraintrustClient(org_config, migration_config, "test-org")
+
+    async def _raw(method, path, **kwargs):
+        if method == "GET" and path == "/v1/project":
+            return {"objects": [{"id": "p1", "org_id": "org-xyz"}]}
+        raise AssertionError(f"unexpected request: {method} {path}")
+
+    with patch.object(client, "raw_request", new=AsyncMock(side_effect=_raw)):
+        assert await client.get_org_id() == "org-xyz"
+        # Cached on subsequent calls (no further requests).
+        assert await client.get_org_id() == "org-xyz"
+
+
+async def test_get_org_id_raises_when_no_project(org_config, migration_config):
+    """If no project (with an org_id) is found, raise a clear error."""
+    from braintrust_migrate.client import BraintrustAPIError
+
+    client = BraintrustClient(org_config, migration_config, "test-org")
+
+    async def _raw(method, path, **kwargs):
+        if method == "GET" and path == "/v1/project":
+            return {"objects": []}
+        raise AssertionError(f"unexpected request: {method} {path}")
+
+    with patch.object(client, "raw_request", new=AsyncMock(side_effect=_raw)):
+        with pytest.raises(BraintrustAPIError, match="Unable to determine org_id"):
+            await client.get_org_id()
+
+
+async def test_get_org_id_captured_from_list_projects(org_config, migration_config):
+    """Listing a project caches org_id, so get_org_id needs no extra request."""
+    client = BraintrustClient(org_config, migration_config, "test-org")
+
+    async def _raw(method, path, **kwargs):
+        if method == "GET" and path == "/v1/project":
+            return {"objects": [{"id": "p1", "org_id": "org-from-list"}]}
+        raise AssertionError(f"unexpected request: {method} {path}")
+
+    with patch.object(client, "raw_request", new=AsyncMock(side_effect=_raw)):
+        await client.list_projects(limit=1)
+        # No /ping or extra project call — org_id was captured during listing.
+        assert await client.get_org_id() == "org-from-list"
+
+
+async def test_get_org_id_captured_from_create_project(org_config, migration_config):
+    """Creating a project caches org_id."""
+    client = BraintrustClient(org_config, migration_config, "test-org")
+
+    async def _raw(method, path, **kwargs):
+        if method == "POST" and path == "/v1/project":
+            return {"id": "p1", "org_id": "org-from-create", "name": "x"}
+        raise AssertionError(f"unexpected request: {method} {path}")
+
+    with patch.object(client, "raw_request", new=AsyncMock(side_effect=_raw)):
+        await client.create_project(name="x")
+        assert await client.get_org_id() == "org-from-create"

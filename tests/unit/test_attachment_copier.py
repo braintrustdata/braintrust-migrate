@@ -27,8 +27,10 @@ async def test_attachment_copier_rewrites_braintrust_attachment_reference_and_do
 
     def source_handler(request: httpx.Request) -> httpx.Response:
         nonlocal src_attachment_meta_calls, src_download_calls
-        if str(request.url) == f"{src_base}/ping":
-            return httpx.Response(200, json={"org_id": src_org_id})
+        if request.url.path == "/v1/project":
+            return httpx.Response(
+                200, json={"objects": [{"id": "p1", "org_id": src_org_id}]}
+            )
         if str(request.url).startswith(f"{src_base}/attachment"):
             src_attachment_meta_calls += 1
             assert request.method == "GET"
@@ -48,8 +50,10 @@ async def test_attachment_copier_rewrites_braintrust_attachment_reference_and_do
 
     def dest_handler(request: httpx.Request) -> httpx.Response:
         nonlocal dst_upload_meta_calls, dst_upload_put_calls, dst_status_calls
-        if str(request.url) == f"{dst_base}/ping":
-            return httpx.Response(200, json={"org_id": dst_org_id})
+        if request.url.path == "/v1/project":
+            return httpx.Response(
+                200, json={"objects": [{"id": "p1", "org_id": dst_org_id}]}
+            )
         if str(request.url) == f"{dst_base}/attachment":
             dst_upload_meta_calls += 1
             assert request.method == "POST"

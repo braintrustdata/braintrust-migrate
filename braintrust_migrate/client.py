@@ -174,6 +174,7 @@ class BraintrustClient:
             for obj in objs:
                 if isinstance(obj, dict):
                     batch.append(obj)
+                    self._maybe_capture_org_id(obj)
 
             projects.extend(batch)
 
@@ -202,6 +203,7 @@ class BraintrustClient:
         resp = await self.raw_request("POST", "/v1/project", json=payload)
         if not isinstance(resp, dict):
             raise BraintrustAPIError(f"Unexpected create project response: {type(resp)}")
+        self._maybe_capture_org_id(resp)
         return resp
 
     async def raw_request(
@@ -326,6 +328,19 @@ class BraintrustClient:
         resp.raise_for_status()
         return resp.json()
 
+    def _maybe_capture_org_id(self, obj: Any) -> None:
+        """Opportunistically cache org_id from any object that carries it.
+
+        Project (and most resource) objects include the org_id of the org they
+        belong to, so once the client has listed or created a project we already
+        know the org_id without a dedicated request.
+        """
+        if self._org_id or not isinstance(obj, dict):
+            return
+        v = obj.get("org_id")
+        if isinstance(v, str) and v:
+            self._org_id = v
+
     async def get_org_id(self) -> str:
         """Best-effort: get the org_id for this API key.
 
@@ -334,28 +349,30 @@ class BraintrustClient:
         if self._org_id:
             return self._org_id
 
-        # The Braintrust SDK uses GET /ping (no /v1) on the api_url.
-        candidates = ["/ping", "/v1/ping"]
-        last_err: Exception | None = None
-        for path in candidates:
-            try:
-                resp = await self.with_retry(
-                    "ping", lambda p=path: self.raw_request("GET", p)
-                )
-                if isinstance(resp, dict):
-                    for key in ("org_id", "orgId"):
-                        v = resp.get(key)
-                        if isinstance(v, str) and v:
-                            self._org_id = v
-                            return v
-            except Exception as e:
-                last_err = e
-                continue
+        # org_id is reliably present on every Project object (and is captured
+        # opportunistically whenever the client lists or creates a project), so
+        # if it hasn't been seen yet, fetch one project and read it from there.
+        # Every project visible to an org-scoped API key is in that org.
+        try:
+            resp = await self.with_retry(
+                "get_org_id_via_project",
+                lambda: self.raw_request("GET", "/v1/project", params={"limit": 1}),
+            )
+        except Exception as e:
+            raise BraintrustAPIError(
+                f"Unable to determine org_id for attachment operations: {e}"
+            ) from e
+
+        objects = resp.get("objects") if isinstance(resp, dict) else None
+        if isinstance(objects, list):
+            for obj in objects:
+                self._maybe_capture_org_id(obj)
+                if self._org_id:
+                    return self._org_id
 
         raise BraintrustAPIError(
-            "Unable to determine org_id for attachment operations. "
-            "Tried /ping and /v1/ping; last error: "
-            f"{last_err}"
+            "Unable to determine org_id for attachment operations: "
+            "no project with an org_id was found."
         )
 
     async def health_check(self) -> dict[str, Any]:
