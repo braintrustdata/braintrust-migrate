@@ -5,6 +5,7 @@ import inspect
 import json
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Generic, TypeVar
 
@@ -258,7 +259,7 @@ class ResourceMigrator(ABC, Generic[T]):
         # Store error in metadata
         self.state.metadata[source_id] = {
             "error": error,
-            "failed_at": str(Path(__file__).stat().st_mtime),  # Timestamp
+            "failed_at": datetime.now(UTC).isoformat(),
         }
 
         self._logger.error(
@@ -315,63 +316,6 @@ class ResourceMigrator(ABC, Generic[T]):
             Exception: If migration fails.
         """
         pass
-
-    def _get_client_resource_attr(self, client, resource_type: str):
-        """Get the resource attribute from a client (e.g., client.datasets).
-
-        Args:
-            client: Braintrust client instance
-            resource_type: Resource type name (e.g., 'datasets', 'experiments')
-
-        Returns:
-            Resource client attribute
-        """
-        return getattr(client.client, resource_type)
-
-    async def _handle_api_response_to_list(self, response) -> list[T]:
-        """Convert various API response formats to a list.
-
-        Handles:
-        - Async iterators
-        - Paginated responses with .objects
-        - Direct lists
-
-        Args:
-            response: API response in various formats
-
-        Returns:
-            List of resources
-        """
-        # Handle None or empty response
-        if response is None:
-            return []
-
-        # Handle async iterator
-        if hasattr(response, "__aiter__"):
-            result_list = []
-            async for item in response:
-                result_list.append(item)
-            return result_list
-
-        # Handle paginated response with objects
-        elif hasattr(response, "objects"):
-            return list(response.objects)
-
-        # Handle already a list
-        elif isinstance(response, list):
-            return response
-
-        # Handle direct iterable (convert to list)
-        else:
-            try:
-                return list(response)
-            except (TypeError, ValueError) as e:
-                self._logger.warning(
-                    "Could not convert API response to list",
-                    response_type=type(response).__name__,
-                    error=str(e),
-                )
-                return []
 
     async def _list_resources_with_client(
         self,
