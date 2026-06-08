@@ -375,7 +375,7 @@ def make_stream_progress_hooks(
         return None
 
     def _hook(phase: str) -> Callable[[dict[str, Any]], None]:
-        return lambda info, _p=progress: _p(
+        return lambda info: progress(
             build_stream_progress(
                 phase, info, state, resource=resource, id_fields=id_fields
             )

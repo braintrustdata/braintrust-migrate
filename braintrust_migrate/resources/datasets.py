@@ -605,6 +605,7 @@ class DatasetMigrator(ResourceMigrator[dict]):
                 )
 
             async def _on_single_413(event: dict[str, Any], err: Exception) -> None:
+                source_dataset_id = event.get("dataset_id")
                 dump_oversize_event_summary(
                     out_dir=events_dir,
                     filename_prefix="oversize_dataset_event_",
