@@ -3,6 +3,7 @@
 import asyncio
 
 from braintrust_migrate.resources.base import ResourceMigrator
+from braintrust_migrate.user_resolver import UserResolver
 
 
 class GroupMigrator(ResourceMigrator[dict]):
@@ -20,9 +21,9 @@ class GroupMigrator(ResourceMigrator[dict]):
 
     def __init__(self, source_client, dest_client, checkpoint_dir, batch_size: int = 100):
         super().__init__(source_client, dest_client, checkpoint_dir, batch_size=batch_size)
-        self._source_user_email_cache: dict[str, str | None] = {}
-        self._dest_user_id_by_email_cache: dict[str, str | None] = {}
-        self._invited_user_emails: set[str] = set()
+        self._user_resolver = UserResolver(
+            self.source_client, self.dest_client, op_suffix="_for_group_members"
+        )
 
     @property
     def resource_name(self) -> str:
@@ -53,118 +54,25 @@ class GroupMigrator(ResourceMigrator[dict]):
             return value.strip().lower() in {"1", "true", "yes", "y", "on"}
         return False
 
-    async def _get_source_user_email(self, source_user_id: str) -> str | None:
-        """Get source user email by user ID."""
-        if source_user_id in self._source_user_email_cache:
-            return self._source_user_email_cache[source_user_id]
-
-        try:
-            response = await self.source_client.with_retry(
-                "get_source_user_for_group_member",
-                lambda uid=source_user_id: self.source_client.raw_request(
-                    "GET",
-                    f"/v1/user/{uid}",
-                ),
-            )
-            email = response.get("email") if isinstance(response, dict) else None
-            email = email.strip().lower() if isinstance(email, str) and email.strip() else None
-            self._source_user_email_cache[source_user_id] = email
-            return email
-        except Exception:
-            self._source_user_email_cache[source_user_id] = None
-            return None
-
-    async def _find_dest_user_id_by_email(
-        self, email: str, *, force_refresh: bool = False
-    ) -> str | None:
-        """Find destination user ID by email."""
-        normalized_email = email.strip().lower()
-        if force_refresh:
-            self._dest_user_id_by_email_cache.pop(normalized_email, None)
-        if normalized_email in self._dest_user_id_by_email_cache:
-            return self._dest_user_id_by_email_cache[normalized_email]
-
-        try:
-            response = await self.dest_client.with_retry(
-                "list_dest_users_by_email_for_group_members",
-                lambda e=normalized_email: self.dest_client.raw_request(
-                    "GET",
-                    "/v1/user",
-                    params={"email": e, "limit": 100},
-                ),
-            )
-
-            if isinstance(response, dict):
-                objects = response.get("objects", [])
-            elif isinstance(response, list):
-                objects = response
-            else:
-                objects = []
-
-            dest_user_id = None
-            for user in objects:
-                if not isinstance(user, dict):
-                    continue
-                user_email = user.get("email")
-                user_id = user.get("id")
-                if (
-                    isinstance(user_email, str)
-                    and user_email.strip().lower() == normalized_email
-                    and isinstance(user_id, str)
-                    and user_id
-                ):
-                    dest_user_id = user_id
-                    break
-
-            self._dest_user_id_by_email_cache[normalized_email] = dest_user_id
-            return dest_user_id
-        except Exception:
-            self._dest_user_id_by_email_cache[normalized_email] = None
-            return None
-
-    async def _invite_user_to_dest_org(self, email: str) -> bool:
-        """Invite a user to destination org via organization members API."""
-        normalized_email = email.strip().lower()
-        if normalized_email in self._invited_user_emails:
-            return True
-
-        try:
-            await self.dest_client.with_retry(
-                "invite_user_to_dest_org_for_group_members",
-                lambda e=normalized_email: self.dest_client.raw_request(
-                    "PATCH",
-                    "/v1/organization/members",
-                    json={
-                        "invite_users": {
-                            "emails": [e],
-                            "send_invite_emails": False,
-                        }
-                    },
-                ),
-            )
-            self._invited_user_emails.add(normalized_email)
-            self._dest_user_id_by_email_cache.pop(normalized_email, None)
-            return True
-        except Exception:
-            return False
-
     async def _resolve_group_member_user_id(self, source_user_id: str) -> str | None:
         """Resolve group member user_id by source/destination email matching."""
         existing_mapping = self.state.id_mapping.get(source_user_id)
         if existing_mapping:
             return existing_mapping
 
-        source_email = await self._get_source_user_email(source_user_id)
+        source_email = await self._user_resolver.source_user_email(source_user_id)
         if not source_email:
             return None
 
-        dest_user_id = await self._find_dest_user_id_by_email(source_email)
+        dest_user_id = await self._user_resolver.find_dest_user_id_by_email(
+            source_email
+        )
         if not dest_user_id and self._group_auto_invite_enabled():
-            invited = await self._invite_user_to_dest_org(source_email)
+            invited = await self._user_resolver.invite_user_to_dest_org(source_email)
             if invited:
                 post_invite_attempts = 4
                 for attempt in range(post_invite_attempts):
-                    dest_user_id = await self._find_dest_user_id_by_email(
+                    dest_user_id = await self._user_resolver.find_dest_user_id_by_email(
                         source_email,
                         force_refresh=True,
                     )
