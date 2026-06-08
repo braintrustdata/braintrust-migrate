@@ -16,10 +16,6 @@ class TestParallelizationConfigDefaults:
         config = MigrationConfig()
         assert config.max_concurrent_resources == 5
 
-    def test_streaming_pipeline_default(self):
-        config = MigrationConfig()
-        assert config.streaming_pipeline is True
-
     def test_max_concurrent_requests_default(self):
         config = MigrationConfig()
         assert config.max_concurrent_requests == 20
@@ -58,13 +54,6 @@ class TestParallelizationConfigBounds:
         with pytest.raises(ValueError):
             MigrationConfig(max_concurrent_requests=201)
 
-    def test_streaming_pipeline_bool(self):
-        config = MigrationConfig(streaming_pipeline=False)
-        assert config.streaming_pipeline is False
-
-        config = MigrationConfig(streaming_pipeline=True)
-        assert config.streaming_pipeline is True
-
 
 class TestParallelizationConfigFromEnv:
     """Verify env var parsing for parallelization fields."""
@@ -85,22 +74,6 @@ class TestParallelizationConfigFromEnv:
         config = Config.from_env()
         assert config.migration.max_concurrent_resources == 10
 
-    def test_streaming_pipeline_from_env_true(self, monkeypatch):
-        monkeypatch.setenv("BT_SOURCE_API_KEY", "src")
-        monkeypatch.setenv("BT_DEST_API_KEY", "dst")
-        monkeypatch.setenv("MIGRATION_STREAMING_PIPELINE", "true")
-
-        config = Config.from_env()
-        assert config.migration.streaming_pipeline is True
-
-    def test_streaming_pipeline_from_env_false(self, monkeypatch):
-        monkeypatch.setenv("BT_SOURCE_API_KEY", "src")
-        monkeypatch.setenv("BT_DEST_API_KEY", "dst")
-        monkeypatch.setenv("MIGRATION_STREAMING_PIPELINE", "false")
-
-        config = Config.from_env()
-        assert config.migration.streaming_pipeline is False
-
     def test_max_concurrent_requests_from_env(self, monkeypatch):
         monkeypatch.setenv("BT_SOURCE_API_KEY", "src")
         monkeypatch.setenv("BT_DEST_API_KEY", "dst")
@@ -115,11 +88,9 @@ class TestParallelizationConfigFromEnv:
         # Ensure the parallelization env vars are NOT set
         monkeypatch.delenv("MIGRATION_MAX_CONCURRENT", raising=False)
         monkeypatch.delenv("MIGRATION_MAX_CONCURRENT_RESOURCES", raising=False)
-        monkeypatch.delenv("MIGRATION_STREAMING_PIPELINE", raising=False)
         monkeypatch.delenv("MIGRATION_MAX_CONCURRENT_REQUESTS", raising=False)
 
         config = Config.from_env()
         assert config.migration.max_concurrent == 1
         assert config.migration.max_concurrent_resources == 5
-        assert config.migration.streaming_pipeline is True
         assert config.migration.max_concurrent_requests == 20

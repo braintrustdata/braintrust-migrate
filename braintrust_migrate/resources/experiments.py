@@ -8,8 +8,6 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any, ClassVar
 
-import httpx
-
 from braintrust_migrate.attachments import AttachmentCopier, OversizeFieldSpiller
 from braintrust_migrate.btql import (
     btql_quote,
@@ -18,15 +16,19 @@ from braintrust_migrate.btql import (
 from braintrust_migrate.resources.base import MigrationResult, ResourceMigrator
 from braintrust_migrate.sdk_logs import SDKExperimentWriter
 from braintrust_migrate.streaming_utils import (
+    STREAMING_EVENT_FETCH_GROUP_SIZE,
+    STREAMING_FLUSH_MAX_BYTES,
+    STREAMING_FLUSH_MAX_ROWS,
+    STREAMING_MAX_EVENT_BYTES,
     EventsStreamState,
     SeenIdsDB,
+    StreamingConfig,
     build_btql_sorted_page_query,
-    coerce_int_config,
+    dump_oversize_event_summary,
+    is_http_413,
+    make_stream_progress_hooks,
     stream_btql_sorted_events_buffered,
 )
-
-# HTTP status codes
-HTTP_STATUS_REQUEST_ENTITY_TOO_LARGE = 413
 
 class ExperimentMigrator(ResourceMigrator[dict]):
     """Migrator for Braintrust experiments.
@@ -40,12 +42,12 @@ class ExperimentMigrator(ResourceMigrator[dict]):
     Uses raw API requests instead of SDK to avoid model dependencies.
     """
 
-    SDK_FLUSH_MAX_ROWS: ClassVar[int] = 5_000
-    SDK_FLUSH_MAX_BYTES: ClassVar[int] = 25 * 1024 * 1024
-    DEFAULT_EVENT_FETCH_GROUP_SIZE: ClassVar[int] = 25
+    SDK_FLUSH_MAX_ROWS: ClassVar[int] = STREAMING_FLUSH_MAX_ROWS
+    SDK_FLUSH_MAX_BYTES: ClassVar[int] = STREAMING_FLUSH_MAX_BYTES
+    DEFAULT_EVENT_FETCH_GROUP_SIZE: ClassVar[int] = STREAMING_EVENT_FETCH_GROUP_SIZE
     # Spill individual rows above this size into JSON attachments so they fit
     # under Braintrust's ~20MB per-span logging upload limit (logs3/overflow).
-    MAX_EVENT_BYTES: ClassVar[int] = 18 * 1024 * 1024
+    MAX_EVENT_BYTES: ClassVar[int] = STREAMING_MAX_EVENT_BYTES
 
     def __init__(
         self,
@@ -76,36 +78,15 @@ class ExperimentMigrator(ResourceMigrator[dict]):
                 ),
             )
 
-        # Byte-aware insert batching config (best-effort; falls back to count-only if missing).
-        cfg = getattr(self.dest_client, "migration_config", None) or getattr(
-            self.source_client, "migration_config", None
-        )
-        try:
-            max_req = int(getattr(cfg, "insert_max_request_bytes", 6 * 1024 * 1024))
-            headroom = float(getattr(cfg, "insert_request_headroom_ratio", 0.5))
-            if headroom <= 0:
-                raise ValueError("headroom must be > 0")
-            self._insert_max_bytes: int | None = int(max_req * headroom)
-        except Exception:
-            self._insert_max_bytes = None
-        self._sdk_flush_max_rows = coerce_int_config(
-            cfg,
-            "events_flush_max_rows",
-            self.SDK_FLUSH_MAX_ROWS,
-            minimum=1,
-        )
-        self._sdk_flush_max_bytes = int(self.SDK_FLUSH_MAX_BYTES)
+        stream_cfg = StreamingConfig.resolve(self.source_client, self.dest_client)
+        self._sdk_flush_max_rows = stream_cfg.sdk_flush_max_rows
+        self._sdk_flush_max_bytes = stream_cfg.sdk_flush_max_bytes
+        self._event_fetch_group_size = stream_cfg.event_fetch_group_size
         # Always-on oversize-field spilling (see OversizeFieldSpiller). Only hits
         # the network for rows that exceed the per-span upload limit.
         self._spiller = OversizeFieldSpiller(
             dest_client=self.dest_client,
-            max_event_bytes=int(self.MAX_EVENT_BYTES),
-        )
-        self._event_fetch_group_size = coerce_int_config(
-            cfg,
-            "events_fetch_group_size",
-            self.DEFAULT_EVENT_FETCH_GROUP_SIZE,
-            minimum=1,
+            max_event_bytes=stream_cfg.max_event_bytes,
         )
 
     @property
@@ -653,86 +634,6 @@ class ExperimentMigrator(ResourceMigrator[dict]):
         )
 
     @staticmethod
-    def _is_http_413(exc: Exception) -> bool:
-        return (
-            isinstance(exc, httpx.HTTPStatusError)
-            and exc.response is not None
-            and int(exc.response.status_code) == HTTP_STATUS_REQUEST_ENTITY_TOO_LARGE
-        )
-
-    @staticmethod
-    def _approx_event_size_bytes(event: dict[str, Any]) -> int | None:
-        try:
-            return len(_json.dumps(event, separators=(",", ":"), ensure_ascii=False))
-        except Exception:
-            return None
-
-    @staticmethod
-    def _count_attachment_refs(event: dict[str, Any]) -> int:
-        def _walk(v: Any) -> int:
-            if isinstance(v, dict):
-                if v.get("type") == "braintrust_attachment" and isinstance(
-                    v.get("key"), str
-                ):
-                    return 1
-                return sum(_walk(x) for x in v.values())
-            if isinstance(v, list):
-                return sum(_walk(x) for x in v)
-            return 0
-
-        return _walk(event)
-
-    def _dump_oversize_event_summary(
-        self,
-        *,
-        events_dir: Path,
-        cursor: str | None,
-        dest_experiment_id: str,
-        event: dict[str, Any],
-        error: Exception,
-    ) -> None:
-        event_id = event.get("id")
-        safe_id = str(event_id) if isinstance(event_id, str) and event_id else "unknown"
-        root_span_id = event.get("root_span_id")
-        span_id = event.get("span_id")
-        approx_size = self._approx_event_size_bytes(event)
-        attachment_refs = self._count_attachment_refs(event)
-        path = events_dir / f"oversize_experiment_event_{safe_id}.json"
-        summary = {
-            "error": str(error),
-            "cursor": cursor,
-            "dest_experiment_id": dest_experiment_id,
-            "event_id": event.get("id"),
-            "root_span_id": root_span_id,
-            "span_id": span_id,
-            "created": event.get("created"),
-            "approx_size_bytes": approx_size,
-            "attachment_refs": attachment_refs,
-            "top_level_keys": sorted(list(event.keys())),
-        }
-        try:
-            with open(path, "w") as f:
-                _json.dump(summary, f, indent=2)
-            self._logger.error(
-                "Oversize experiment event isolated (413). This specific event cannot be inserted.",
-                summary_path=str(path),
-                event_id=safe_id,
-                root_span_id=root_span_id,
-                span_id=span_id,
-                approx_size_bytes=approx_size,
-                attachment_refs=attachment_refs,
-                cursor=cursor,
-            )
-        except Exception:
-            self._logger.error(
-                "Oversize experiment event isolated; failed to write summary",
-                event_id=safe_id,
-                root_span_id=root_span_id,
-                span_id=span_id,
-                cursor=cursor,
-            )
-
-    @staticmethod
     def _group_stream_basename(source_experiment_ids: list[str]) -> str:
         if len(source_experiment_ids) == 1:
             return source_experiment_ids[0]
@@ -815,17 +716,21 @@ class ExperimentMigrator(ResourceMigrator[dict]):
 
                 async def _on_single_413(event: dict[str, Any], err: Exception) -> None:
                     source_experiment_id = event.get("experiment_id")
-                    self._dump_oversize_event_summary(
-                        events_dir=events_dir,
-                        cursor=state.btql_min_pagination_key,
-                        dest_experiment_id=(
+                    dump_oversize_event_summary(
+                        out_dir=events_dir,
+                        filename_prefix="oversize_experiment_event_",
+                        event_label="experiment event",
+                        dest_id_field="dest_experiment_id",
+                        dest_id_value=(
                             source_to_dest_experiment_ids.get(source_experiment_id)
                             if isinstance(source_experiment_id, str)
                             else None
                         )
                         or "unknown",
+                        cursor=state.btql_min_pagination_key,
                         event=event,
                         error=err,
+                        logger=self._logger,
                     )
 
                 await stream_btql_sorted_events_buffered(
@@ -848,149 +753,19 @@ class ExperimentMigrator(ResourceMigrator[dict]):
                     ),
                     flush_max_rows=self._sdk_flush_max_rows,
                     flush_max_bytes=self._sdk_flush_max_bytes,
-                    is_http_413=self._is_http_413,
+                    is_http_413=is_http_413,
                     on_single_413=_on_single_413,
-                    hooks=None
-                    if progress is None
-                    else {
-                        "on_fetch": lambda info, _p=progress: _p(
-                            {
-                                "resource": "experiment_events",
-                                "phase": "fetch",
-                                "source_experiment_ids": source_experiment_ids,
-                                "dest_experiment_ids": list(
-                                    source_to_dest_experiment_ids.values()
-                                ),
-                                "page_num": info.get("page_num"),
-                                "page_events": info.get("page_events"),
-                                "fetched_total": info.get("fetched_total"),
-                                "inserted_total": info.get("inserted_total"),
-                                "inserted_bytes_total": info.get(
-                                    "inserted_bytes_total"
-                                ),
-                                "skipped_deleted_total": info.get(
-                                    "skipped_deleted_total"
-                                ),
-                                "skipped_seen_total": info.get("skipped_seen_total"),
-                                "attachments_copied_total": info.get(
-                                    "attachments_copied_total"
-                                ),
-                                "pending_buffered_rows": info.get(
-                                    "pending_buffered_rows"
-                                ),
-                                "pending_buffered_bytes": info.get(
-                                    "pending_buffered_bytes"
-                                ),
-                                "cursor": (
-                                    (state.btql_min_pagination_key[:16] + "…")
-                                    if isinstance(state.btql_min_pagination_key, str)
-                                    else None
-                                ),
-                                "next_cursor": None,
-                            }
-                        ),
-                        "on_page": lambda info, _p=progress: _p(
-                            {
-                                "resource": "experiment_events",
-                                "phase": "page",
-                                "source_experiment_ids": source_experiment_ids,
-                                "dest_experiment_ids": list(
-                                    source_to_dest_experiment_ids.values()
-                                ),
-                                "page_num": info.get("page_num"),
-                                "page_events": info.get("page_events"),
-                                "fetched_total": info.get("fetched_total"),
-                                "inserted_total": info.get("inserted_total"),
-                                "inserted_bytes_total": info.get(
-                                    "inserted_bytes_total"
-                                ),
-                                "skipped_deleted_total": info.get(
-                                    "skipped_deleted_total"
-                                ),
-                                "skipped_seen_total": info.get("skipped_seen_total"),
-                                "attachments_copied_total": info.get(
-                                    "attachments_copied_total"
-                                ),
-                                "pending_buffered_rows": info.get(
-                                    "pending_buffered_rows"
-                                ),
-                                "pending_buffered_bytes": info.get(
-                                    "pending_buffered_bytes"
-                                ),
-                                "cursor": (
-                                    (state.btql_min_pagination_key[:16] + "…")
-                                    if isinstance(state.btql_min_pagination_key, str)
-                                    else None
-                                ),
-                                "next_cursor": None,
-                            }
-                        ),
-                        "on_insert": lambda info, _p=progress: _p(
-                            {
-                                "resource": "experiment_events",
-                                "phase": "insert",
-                                "source_experiment_ids": source_experiment_ids,
-                                "dest_experiment_ids": list(
-                                    source_to_dest_experiment_ids.values()
-                                ),
-                                "page_num": None,
-                                "page_events": None,
-                                "inserted_last": info.get("inserted_last"),
-                                "inserted_bytes_last": info.get(
-                                    "inserted_bytes_last"
-                                ),
-                                "insert_seconds": info.get("insert_seconds"),
-                                "flush_rows": info.get("flush_rows"),
-                                "flush_buffer_bytes": info.get(
-                                    "flush_buffer_bytes"
-                                ),
-                                "fetched_total": state.fetched_events,
-                                "inserted_total": state.inserted_events,
-                                "inserted_bytes_total": state.inserted_bytes,
-                                "skipped_deleted_total": state.skipped_deleted,
-                                "skipped_seen_total": state.skipped_seen,
-                                "attachments_copied_total": state.attachments_copied,
-                                "pending_buffered_rows": 0,
-                                "pending_buffered_bytes": 0,
-                                "cursor": (
-                                    (state.btql_min_pagination_key[:16] + "…")
-                                    if isinstance(state.btql_min_pagination_key, str)
-                                    else None
-                                ),
-                                "next_cursor": None,
-                            }
-                        ),
-                        "on_done": lambda info, _p=progress: _p(
-                            {
-                                "resource": "experiment_events",
-                                "phase": "done",
-                                "source_experiment_ids": source_experiment_ids,
-                                "dest_experiment_ids": list(
-                                    source_to_dest_experiment_ids.values()
-                                ),
-                                "fetched_total": info.get("fetched_total"),
-                                "inserted_total": info.get("inserted_total"),
-                                "inserted_bytes_total": info.get(
-                                    "inserted_bytes_total"
-                                ),
-                                "skipped_deleted_total": info.get(
-                                    "skipped_deleted_total"
-                                ),
-                                "skipped_seen_total": info.get("skipped_seen_total"),
-                                "attachments_copied_total": info.get(
-                                    "attachments_copied_total"
-                                ),
-                                "pending_buffered_rows": info.get(
-                                    "pending_buffered_rows"
-                                ),
-                                "pending_buffered_bytes": info.get(
-                                    "pending_buffered_bytes"
-                                ),
-                                "cursor": None,
-                                "next_cursor": None,
-                            }
-                        ),
-                    },
+                    hooks=make_stream_progress_hooks(
+                        progress,
+                        state,
+                        resource="experiment_events",
+                        id_fields={
+                            "source_experiment_ids": source_experiment_ids,
+                            "dest_experiment_ids": list(
+                                source_to_dest_experiment_ids.values()
+                            ),
+                        },
+                    ),
                 )
 
                 self._logger.info(

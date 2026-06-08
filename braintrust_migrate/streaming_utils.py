@@ -15,11 +15,110 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, TypedDict, cast
 
+import httpx
+
 from braintrust_migrate.batching import (
     approx_events_insert_payload_bytes,
     approx_json_bytes,
 )
 from braintrust_migrate.btql import btql_quote
+
+# HTTP status codes
+HTTP_STATUS_REQUEST_ENTITY_TOO_LARGE = 413
+
+
+def is_http_413(exc: Exception) -> bool:
+    """Whether ``exc`` is an HTTP 413 (Request Entity Too Large) error."""
+    return (
+        isinstance(exc, httpx.HTTPStatusError)
+        and exc.response is not None
+        and int(exc.response.status_code) == HTTP_STATUS_REQUEST_ENTITY_TOO_LARGE
+    )
+
+
+def approx_event_size_bytes(event: dict[str, Any]) -> int | None:
+    """Compact serialized size of an event, or None if it can't be serialized."""
+    try:
+        return len(_json.dumps(event, separators=(",", ":"), ensure_ascii=False))
+    except Exception:
+        return None
+
+
+def count_attachment_refs(event: dict[str, Any]) -> int:
+    """Count braintrust_attachment references anywhere within an event."""
+
+    def _walk(v: Any) -> int:
+        if isinstance(v, dict):
+            if v.get("type") == "braintrust_attachment" and isinstance(
+                v.get("key"), str
+            ):
+                return 1
+            return sum(_walk(x) for x in v.values())
+        if isinstance(v, list):
+            return sum(_walk(x) for x in v)
+        return 0
+
+    return _walk(event)
+
+
+def dump_oversize_event_summary(
+    *,
+    out_dir: Path,
+    filename_prefix: str,
+    event_label: str,
+    dest_id_field: str,
+    dest_id_value: str | None,
+    cursor: str | None,
+    event: dict[str, Any],
+    error: Exception,
+    logger: Any,
+) -> None:
+    """Write a diagnostic summary for a single event that cannot be inserted (413).
+
+    Pure side effect: writes a JSON file under ``out_dir`` and logs. Never touches
+    stream state, the seen-ids DB, or the insert flow, and never raises (a failed
+    write is logged and swallowed so it cannot abort the streaming loop).
+    """
+    event_id = event.get("id")
+    safe_id = str(event_id) if isinstance(event_id, str) and event_id else "unknown"
+    root_span_id = event.get("root_span_id")
+    span_id = event.get("span_id")
+    approx_size = approx_event_size_bytes(event)
+    attachment_refs = count_attachment_refs(event)
+    path = out_dir / f"{filename_prefix}{safe_id}.json"
+    summary = {
+        "error": str(error),
+        "cursor": cursor,
+        dest_id_field: dest_id_value,
+        "event_id": event.get("id"),
+        "root_span_id": root_span_id,
+        "span_id": span_id,
+        "created": event.get("created"),
+        "approx_size_bytes": approx_size,
+        "attachment_refs": attachment_refs,
+        "top_level_keys": sorted(list(event.keys())),
+    }
+    try:
+        with open(path, "w") as f:
+            _json.dump(summary, f, indent=2)
+        logger.error(
+            f"Oversize {event_label} isolated (413). This specific event cannot be inserted.",
+            summary_path=str(path),
+            event_id=safe_id,
+            root_span_id=root_span_id,
+            span_id=span_id,
+            approx_size_bytes=approx_size,
+            attachment_refs=attachment_refs,
+            cursor=cursor,
+        )
+    except Exception:
+        logger.error(
+            f"Oversize {event_label} isolated; failed to write summary",
+            event_id=safe_id,
+            root_span_id=root_span_id,
+            span_id=span_id,
+            cursor=cursor,
+        )
 
 
 @dataclass
@@ -127,6 +226,167 @@ def coerce_int_config(
     if minimum is not None and value < minimum:
         return default
     return value
+
+
+# Default streaming flush/fetch knobs. Single source of truth: the migrators
+# expose these as ClassVars for back-compat and tests.
+STREAMING_FLUSH_MAX_ROWS = 5_000
+STREAMING_FLUSH_MAX_BYTES = 25 * 1024 * 1024
+STREAMING_MAX_EVENT_BYTES = 18 * 1024 * 1024
+STREAMING_EVENT_FETCH_GROUP_SIZE = 25
+
+
+@dataclass(frozen=True)
+class StreamingConfig:
+    """Resolved streaming flush/fetch configuration for the event migrators.
+
+    Replaces the byte-batching config block that was duplicated (with a drifting
+    headroom default) across the logs, dataset, and experiment migrators.
+    """
+
+    sdk_flush_max_rows: int
+    sdk_flush_max_bytes: int
+    max_event_bytes: int
+    event_fetch_group_size: int
+
+    @classmethod
+    def resolve(cls, source_client: Any, dest_client: Any) -> StreamingConfig:
+        """Resolve config from the dest client's migration_config (or source's).
+
+        ``events_flush_max_rows`` / ``events_fetch_group_size`` are the only
+        env-overridable knobs; the byte caps are fixed. Falls back to the module
+        defaults and is tolerant of lightweight test doubles / missing config.
+        """
+        cfg = getattr(dest_client, "migration_config", None) or getattr(
+            source_client, "migration_config", None
+        )
+        return cls(
+            sdk_flush_max_rows=coerce_int_config(
+                cfg, "events_flush_max_rows", STREAMING_FLUSH_MAX_ROWS, minimum=1
+            ),
+            sdk_flush_max_bytes=STREAMING_FLUSH_MAX_BYTES,
+            max_event_bytes=STREAMING_MAX_EVENT_BYTES,
+            event_fetch_group_size=coerce_int_config(
+                cfg,
+                "events_fetch_group_size",
+                STREAMING_EVENT_FETCH_GROUP_SIZE,
+                minimum=1,
+            ),
+        )
+
+
+def _truncate_cursor(state: Any) -> str | None:
+    """Short, display-friendly form of the current pagination key."""
+    pk = state.btql_min_pagination_key
+    return (pk[:16] + "…") if isinstance(pk, str) else None
+
+
+def build_stream_progress(
+    phase: str,
+    info: dict[str, Any],
+    state: Any,
+    *,
+    resource: str,
+    id_fields: dict[str, Any],
+) -> dict[str, Any]:
+    """Build a normalized streaming progress payload for the dataset/experiment
+    event migrators.
+
+    Replaces the four near-identical per-migrator hook lambdas. ``resource`` and
+    ``id_fields`` carry the per-resource bits (e.g. ``"dataset_events"`` and
+    ``{"source_dataset_ids": [...], "dest_dataset_ids": [...]}``); everything else
+    comes from the loop's ``info`` payload or ``state`` exactly as before.
+    """
+    payload: dict[str, Any] = {"resource": resource, "phase": phase, **id_fields}
+
+    if phase in ("fetch", "page"):
+        payload.update(
+            {
+                "page_num": info.get("page_num"),
+                "page_events": info.get("page_events"),
+                "fetched_total": info.get("fetched_total"),
+                "inserted_total": info.get("inserted_total"),
+                "inserted_bytes_total": info.get("inserted_bytes_total"),
+                "skipped_deleted_total": info.get("skipped_deleted_total"),
+                "skipped_seen_total": info.get("skipped_seen_total"),
+                "attachments_copied_total": info.get("attachments_copied_total"),
+                "pending_buffered_rows": info.get("pending_buffered_rows"),
+                "pending_buffered_bytes": info.get("pending_buffered_bytes"),
+                "cursor": _truncate_cursor(state),
+                "next_cursor": None,
+            }
+        )
+    elif phase == "insert":
+        # Totals come from committed state (not the per-batch info); page fields
+        # are not meaningful for an insert event.
+        payload.update(
+            {
+                "page_num": None,
+                "page_events": None,
+                "inserted_last": info.get("inserted_last"),
+                "inserted_bytes_last": info.get("inserted_bytes_last"),
+                "insert_seconds": info.get("insert_seconds"),
+                "flush_rows": info.get("flush_rows"),
+                "flush_buffer_bytes": info.get("flush_buffer_bytes"),
+                "fetched_total": state.fetched_events,
+                "inserted_total": state.inserted_events,
+                "inserted_bytes_total": state.inserted_bytes,
+                "skipped_deleted_total": state.skipped_deleted,
+                "skipped_seen_total": state.skipped_seen,
+                "attachments_copied_total": state.attachments_copied,
+                "pending_buffered_rows": 0,
+                "pending_buffered_bytes": 0,
+                "cursor": _truncate_cursor(state),
+                "next_cursor": None,
+            }
+        )
+    elif phase == "done":
+        payload.update(
+            {
+                "fetched_total": info.get("fetched_total"),
+                "inserted_total": info.get("inserted_total"),
+                "inserted_bytes_total": info.get("inserted_bytes_total"),
+                "skipped_deleted_total": info.get("skipped_deleted_total"),
+                "skipped_seen_total": info.get("skipped_seen_total"),
+                "attachments_copied_total": info.get("attachments_copied_total"),
+                "pending_buffered_rows": info.get("pending_buffered_rows"),
+                "pending_buffered_bytes": info.get("pending_buffered_bytes"),
+                "cursor": None,
+                "next_cursor": None,
+            }
+        )
+
+    return payload
+
+
+def make_stream_progress_hooks(
+    progress: Callable[[dict[str, Any]], None] | None,
+    state: Any,
+    *,
+    resource: str,
+    id_fields: dict[str, Any],
+) -> StreamHooks | None:
+    """Build the four streaming hooks that emit normalized progress payloads.
+
+    Returns ``None`` when no progress callback is provided, matching the
+    ``hooks=None`` shape ``stream_btql_sorted_events_buffered`` expects.
+    """
+    if progress is None:
+        return None
+
+    def _hook(phase: str) -> Callable[[dict[str, Any]], None]:
+        return lambda info: progress(
+            build_stream_progress(
+                phase, info, state, resource=resource, id_fields=id_fields
+            )
+        )
+
+    return {
+        "on_fetch": _hook("fetch"),
+        "on_page": _hook("page"),
+        "on_insert": _hook("insert"),
+        "on_done": _hook("done"),
+    }
 
 
 def build_btql_sorted_page_query(

@@ -103,10 +103,6 @@ class MigrationConfig(BaseModel):
         le=50,
         description="Maximum number of resources migrated concurrently within a batch",
     )
-    streaming_pipeline: bool = Field(
-        default=True,
-        description="Enable pipelined page prefetch during streaming event migrations",
-    )
     max_concurrent_requests: int = Field(
         default=20,
         ge=1,
@@ -357,13 +353,6 @@ class Config(BaseModel):
         max_concurrent_resources = int(
             os.getenv("MIGRATION_MAX_CONCURRENT_RESOURCES", "5")
         )
-        streaming_pipeline = os.getenv("MIGRATION_STREAMING_PIPELINE", "true").lower() in {
-            "1",
-            "true",
-            "yes",
-            "y",
-            "on",
-        }
         max_concurrent_requests = int(
             os.getenv("MIGRATION_MAX_CONCURRENT_REQUESTS", "20")
         )
@@ -509,7 +498,6 @@ class Config(BaseModel):
                 retry_delay=retry_delay,
                 max_concurrent=max_concurrent,
                 max_concurrent_resources=max_concurrent_resources,
-                streaming_pipeline=streaming_pipeline,
                 max_concurrent_requests=max_concurrent_requests,
                 checkpoint_interval=checkpoint_interval,
                 insert_max_request_bytes=insert_max_request_bytes,

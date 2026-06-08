@@ -6,6 +6,7 @@ from typing import Any
 import pytest
 
 import braintrust_migrate.resources.experiments as experiments_module
+from braintrust_migrate.config import MigrationConfig
 from braintrust_migrate.resources.experiments import ExperimentMigrator
 
 
@@ -100,10 +101,10 @@ async def test_experiment_streaming_resume_after_insert_failure(tmp_path: Path) 
     source = _StubClient(page1=page1, page2=page2)
     dest = _StubClient()
     dest.fail_on_insert_call = 2  # fail on second insert during first run
+    # Flush one row at a time via the real config lever so the second insert fails.
+    dest.migration_config = MigrationConfig(events_flush_max_rows=1)
     original_writer = experiments_module.SDKExperimentWriter
-    original_flush_max_rows = experiments_module.ExperimentMigrator.SDK_FLUSH_MAX_ROWS
     experiments_module.SDKExperimentWriter = _FakeSDKExperimentWriter
-    experiments_module.ExperimentMigrator.SDK_FLUSH_MAX_ROWS = 1
 
     try:
         migrator = ExperimentMigrator(
@@ -130,4 +131,3 @@ async def test_experiment_streaming_resume_after_insert_failure(tmp_path: Path) 
         assert inserted_all == ["a", "b"]
     finally:
         experiments_module.SDKExperimentWriter = original_writer
-        experiments_module.ExperimentMigrator.SDK_FLUSH_MAX_ROWS = original_flush_max_rows
