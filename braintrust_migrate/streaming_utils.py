@@ -15,11 +15,110 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, TypedDict, cast
 
+import httpx
+
 from braintrust_migrate.batching import (
     approx_events_insert_payload_bytes,
     approx_json_bytes,
 )
 from braintrust_migrate.btql import btql_quote
+
+# HTTP status codes
+HTTP_STATUS_REQUEST_ENTITY_TOO_LARGE = 413
+
+
+def is_http_413(exc: Exception) -> bool:
+    """Whether ``exc`` is an HTTP 413 (Request Entity Too Large) error."""
+    return (
+        isinstance(exc, httpx.HTTPStatusError)
+        and exc.response is not None
+        and int(exc.response.status_code) == HTTP_STATUS_REQUEST_ENTITY_TOO_LARGE
+    )
+
+
+def approx_event_size_bytes(event: dict[str, Any]) -> int | None:
+    """Compact serialized size of an event, or None if it can't be serialized."""
+    try:
+        return len(_json.dumps(event, separators=(",", ":"), ensure_ascii=False))
+    except Exception:
+        return None
+
+
+def count_attachment_refs(event: dict[str, Any]) -> int:
+    """Count braintrust_attachment references anywhere within an event."""
+
+    def _walk(v: Any) -> int:
+        if isinstance(v, dict):
+            if v.get("type") == "braintrust_attachment" and isinstance(
+                v.get("key"), str
+            ):
+                return 1
+            return sum(_walk(x) for x in v.values())
+        if isinstance(v, list):
+            return sum(_walk(x) for x in v)
+        return 0
+
+    return _walk(event)
+
+
+def dump_oversize_event_summary(
+    *,
+    out_dir: Path,
+    filename_prefix: str,
+    event_label: str,
+    dest_id_field: str,
+    dest_id_value: str | None,
+    cursor: str | None,
+    event: dict[str, Any],
+    error: Exception,
+    logger: Any,
+) -> None:
+    """Write a diagnostic summary for a single event that cannot be inserted (413).
+
+    Pure side effect: writes a JSON file under ``out_dir`` and logs. Never touches
+    stream state, the seen-ids DB, or the insert flow, and never raises (a failed
+    write is logged and swallowed so it cannot abort the streaming loop).
+    """
+    event_id = event.get("id")
+    safe_id = str(event_id) if isinstance(event_id, str) and event_id else "unknown"
+    root_span_id = event.get("root_span_id")
+    span_id = event.get("span_id")
+    approx_size = approx_event_size_bytes(event)
+    attachment_refs = count_attachment_refs(event)
+    path = out_dir / f"{filename_prefix}{safe_id}.json"
+    summary = {
+        "error": str(error),
+        "cursor": cursor,
+        dest_id_field: dest_id_value,
+        "event_id": event.get("id"),
+        "root_span_id": root_span_id,
+        "span_id": span_id,
+        "created": event.get("created"),
+        "approx_size_bytes": approx_size,
+        "attachment_refs": attachment_refs,
+        "top_level_keys": sorted(list(event.keys())),
+    }
+    try:
+        with open(path, "w") as f:
+            _json.dump(summary, f, indent=2)
+        logger.error(
+            f"Oversize {event_label} isolated (413). This specific event cannot be inserted.",
+            summary_path=str(path),
+            event_id=safe_id,
+            root_span_id=root_span_id,
+            span_id=span_id,
+            approx_size_bytes=approx_size,
+            attachment_refs=attachment_refs,
+            cursor=cursor,
+        )
+    except Exception:
+        logger.error(
+            f"Oversize {event_label} isolated; failed to write summary",
+            event_id=safe_id,
+            root_span_id=root_span_id,
+            span_id=span_id,
+            cursor=cursor,
+        )
 
 
 @dataclass

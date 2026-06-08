@@ -33,12 +33,11 @@ from braintrust_migrate.streaming_utils import (
     SeenIdsDB,
     build_btql_sorted_page_query,
     coerce_int_config,
+    dump_oversize_event_summary,
+    is_http_413,
 )
 
 logger = structlog.get_logger(__name__)
-
-# HTTP status codes
-HTTP_STATUS_REQUEST_ENTITY_TOO_LARGE = 413
 
 @dataclass(slots=True)
 class _LogsStreamingState:
@@ -361,85 +360,6 @@ class LogsMigrator(ResourceMigrator[dict[str, Any]]):
                 ids.append(event_id)
         return ids
 
-    @staticmethod
-    def _is_http_413(exc: Exception) -> bool:
-        return (
-            isinstance(exc, httpx.HTTPStatusError)
-            and exc.response is not None
-            and int(exc.response.status_code) == HTTP_STATUS_REQUEST_ENTITY_TOO_LARGE
-        )
-
-    @staticmethod
-    def _approx_event_size_bytes(event: dict[str, Any]) -> int | None:
-        try:
-            return len(_json.dumps(event, separators=(",", ":"), ensure_ascii=False))
-        except Exception:
-            return None
-
-    @staticmethod
-    def _count_attachment_refs(event: dict[str, Any]) -> int:
-        def _walk(v: Any) -> int:
-            if isinstance(v, dict):
-                if v.get("type") == "braintrust_attachment" and isinstance(
-                    v.get("key"), str
-                ):
-                    return 1
-                return sum(_walk(x) for x in v.values())
-            if isinstance(v, list):
-                return sum(_walk(x) for x in v)
-            return 0
-
-        return _walk(event)
-
-    def _dump_oversize_event_summary(
-        self,
-        *,
-        cursor: str | None,
-        dest_project_id: str,
-        event: dict[str, Any],
-        error: Exception,
-    ) -> None:
-        event_id = event.get("id")
-        safe_id = str(event_id) if isinstance(event_id, str) and event_id else "unknown"
-        root_span_id = event.get("root_span_id")
-        span_id = event.get("span_id")
-        approx_size = self._approx_event_size_bytes(event)
-        attachment_refs = self._count_attachment_refs(event)
-        path = self.checkpoint_dir / f"oversize_project_logs_event_{safe_id}.json"
-        summary = {
-            "error": str(error),
-            "cursor": cursor,
-            "dest_project_id": dest_project_id,
-            "event_id": event.get("id"),
-            "root_span_id": root_span_id,
-            "span_id": span_id,
-            "created": event.get("created"),
-            "approx_size_bytes": approx_size,
-            "attachment_refs": attachment_refs,
-            "top_level_keys": sorted(list(event.keys())),
-        }
-        try:
-            with open(path, "w") as f:
-                _json.dump(summary, f, indent=2)
-            self._logger.error(
-                "Oversize event isolated (413). This specific event cannot be inserted.",
-                summary_path=str(path),
-                event_id=safe_id,
-                root_span_id=root_span_id,
-                span_id=span_id,
-                approx_size_bytes=approx_size,
-                attachment_refs=attachment_refs,
-                cursor=cursor,
-            )
-        except Exception:
-            self._logger.error(
-                "Oversize event isolated; failed to write summary",
-                event_id=safe_id,
-                root_span_id=root_span_id,
-                span_id=span_id,
-                cursor=cursor,
-            )
-
     async def migrate_all(
         self, project_id: str | None = None, max_concurrent: int | None = None
     ) -> dict[str, Any]:
@@ -629,11 +549,16 @@ class LogsMigrator(ResourceMigrator[dict[str, Any]]):
                 self._save_stream_state()
 
             async def _on_single_413(event: dict[str, Any], err: Exception) -> None:
-                self._dump_oversize_event_summary(
+                dump_oversize_event_summary(
+                    out_dir=self.checkpoint_dir,
+                    filename_prefix="oversize_project_logs_event_",
+                    event_label="event",
+                    dest_id_field="dest_project_id",
+                    dest_id_value=dest_project_id,
                     cursor=self._stream_state.btql_min_pagination_key,
-                    dest_project_id=dest_project_id,
                     event=event,
                     error=err,
+                    logger=self._logger,
                 )
 
             def _on_fetch(info: dict[str, Any]) -> None:
@@ -848,7 +773,7 @@ class LogsMigrator(ResourceMigrator[dict[str, Any]]):
                                 "error": e,
                             }
                         )
-                        if len(batch) == 1 and self._is_http_413(e):
+                        if len(batch) == 1 and is_http_413(e):
                             await _on_single_413(batch[0], e)
                         raise
                     if seen_db is not None and pending_seen_ids:
