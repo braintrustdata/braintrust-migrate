@@ -18,6 +18,12 @@ The format is based on Keep a Changelog and this project follows Semantic Versio
 
 - N/A
 
+## [0.4.1] - 2026-06-08
+
+### Fixed
+
+- Resolve `org_id` for attachment operations from a project (`GET /v1/project`, captured opportunistically whenever the client lists or creates a project) instead of `GET /ping`, which 404s on the SaaS REST API. Fixes a 0.4.0 regression where oversize-field attachment spilling failed on SaaS with "Unable to determine org_id for attachment operations" (also repairs the `copy_attachments` and organization-scoped ACL paths, which shared the same dependency). Verified end-to-end against SaaS.
+
 ## [0.4.0] - 2026-06-08
 
 ### Added
