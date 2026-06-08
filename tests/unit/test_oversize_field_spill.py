@@ -20,8 +20,11 @@ def _make_dest_client():
 
     def dest_handler(request: httpx.Request) -> httpx.Response:
         url = str(request.url)
-        if url == f"{dst_base}/ping":
-            return httpx.Response(200, json={"org_id": dst_org_id})
+        if request.url.path == "/v1/project":
+            # get_org_id() reads org_id off a project listing.
+            return httpx.Response(
+                200, json={"objects": [{"id": "p1", "org_id": dst_org_id}]}
+            )
         if url == f"{dst_base}/attachment":
             calls["meta"] += 1
             assert request.method == "POST"
