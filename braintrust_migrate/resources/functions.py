@@ -1,6 +1,9 @@
 """Function migrator for Braintrust migration tool."""
 
-from braintrust_migrate.resources.base import ResourceMigrator
+from braintrust_migrate.resources.base import MigrationResult, ResourceMigrator
+
+# skip_reason recorded for bundle-backed code functions we cannot migrate.
+CODE_BUNDLE_SKIP_REASON = "code_bundle_not_migratable"
 
 
 class FunctionMigrator(ResourceMigrator[dict]):
@@ -13,6 +16,67 @@ class FunctionMigrator(ResourceMigrator[dict]):
     def resource_name(self) -> str:
         """Human-readable name for this resource type."""
         return "Functions"
+
+    @staticmethod
+    def _is_code_bundle_function(resource: dict) -> bool:
+        """Whether a function is code backed by a build artifact (bundle/sandbox).
+
+        Code functions come in two flavors. ``inline`` carries its full source
+        (``function_data.data.code``) and migrates fine. Anything else
+        (``bundle``/``sandbox``) only references a compiled artifact produced by
+        the push/eval build pipeline — that artifact isn't exposed by the API
+        and can't be recreated in the destination, so such functions would land
+        broken. We skip those.
+        """
+        function_data = resource.get("function_data")
+        if not isinstance(function_data, dict) or function_data.get("type") != "code":
+            return False
+        data = function_data.get("data")
+        return not (isinstance(data, dict) and data.get("type") == "inline")
+
+    async def migrate_batch(
+        self, resources: list[dict], max_concurrent: int | None = None
+    ) -> list[MigrationResult]:
+        """Skip bundle-backed code functions; migrate everything else normally."""
+        to_migrate: list[dict] = []
+        skip_results: list[MigrationResult] = []
+
+        for resource in resources:
+            if not self._is_code_bundle_function(resource):
+                to_migrate.append(resource)
+                continue
+
+            source_id = self.get_resource_id(resource)
+            name = resource.get("name")
+            slug = resource.get("slug")
+            self._logger.warning(
+                "⏭️  Skipping bundled code function (its code bundle cannot be "
+                "migrated; re-push it to the destination)",
+                source_id=source_id,
+                name=name,
+                slug=slug,
+                function_type=resource.get("function_type"),
+            )
+            metadata: dict = {"skip_reason": CODE_BUNDLE_SKIP_REASON}
+            if name:
+                metadata["name"] = name
+            if slug:
+                metadata["slug"] = slug
+            skip_results.append(
+                MigrationResult(
+                    success=True,
+                    source_id=source_id,
+                    skipped=True,
+                    metadata=metadata,
+                )
+            )
+
+        migrated_results = (
+            await super().migrate_batch(to_migrate, max_concurrent)
+            if to_migrate
+            else []
+        )
+        return skip_results + migrated_results
 
     async def get_dependencies(self, resource: dict) -> list[str]:
         """Get list of resource IDs that this function depends on.

@@ -914,6 +914,15 @@ def _display_results(results: dict) -> None:
                 f"  ... and {len(summary['errors']) - MAX_ERRORS_TO_DISPLAY} more errors"
             )
 
+    # Always point to the full per-item report so users can drill into exactly
+    # what was migrated / skipped / failed (and why) — counts above, detail here.
+    report_path = results.get("report_path")
+    if report_path:
+        console.print(
+            f"\n[dim]Full per-item report (migrated / skipped / failed): "
+            f"{report_path}[/dim]"
+        )
+
 
 @app.command()
 def validate(

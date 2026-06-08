@@ -504,7 +504,7 @@ The following resource types are supported:
 - **Datasets**
 - **Project Tags**
 - **Span Iframes**
-- **Functions**
+- **Functions** (⚠️ bundled code functions are **skipped** — see note below)
 - **Prompts**
 - **Project Scores**
 - **Experiments**
@@ -513,6 +513,24 @@ The following resource types are supported:
 - **ACLs** (post-project global phase; unsupported object types are skipped, and user ACLs are skipped only when user mapping is disabled or unresolved)
 
 > **Note:** Agents and users are not supported for migration.
+
+> **⚠️ Code functions with bundled code are skipped (re-push them manually).**
+> A code function created by *pushing* code — e.g. a code-based **scorer**, tool,
+> or task deployed via `braintrust push` or an eval — ships a compiled **bundle**
+> that is produced by the push/eval build pipeline and stored separately. The API
+> only exposes a *reference* to that bundle (a `bundle_id` and a short `preview`),
+> not the code itself, and there is no way to re-upload it into the destination
+> org — so these functions **cannot be recreated by the migration** and would
+> otherwise land broken (a dangling `bundle_id` that can't be invoked).
+>
+> The migration therefore **skips** them. Each skipped function is logged with its
+> name/slug and recorded in `migration_report.json` under
+> `detailed_breakdown.skipped` with `skip_reason="code_bundle_not_migratable"`, so
+> you have an exact list. **After migrating, re-push these functions to the
+> destination manually** (e.g. `braintrust push`).
+>
+> *Inline* code functions (whose source is stored directly on the function) and
+> all other function types migrate normally.
 
 ## Troubleshooting
 
