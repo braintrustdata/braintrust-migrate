@@ -10,7 +10,7 @@ from typing import Any, ClassVar
 
 import httpx
 
-from braintrust_migrate.attachments import AttachmentCopier
+from braintrust_migrate.attachments import AttachmentCopier, OversizeFieldSpiller
 from braintrust_migrate.btql import (
     btql_quote,
     fetch_btql_sorted_page_with_retries,
@@ -43,6 +43,9 @@ class ExperimentMigrator(ResourceMigrator[dict]):
     SDK_FLUSH_MAX_ROWS: ClassVar[int] = 5_000
     SDK_FLUSH_MAX_BYTES: ClassVar[int] = 25 * 1024 * 1024
     DEFAULT_EVENT_FETCH_GROUP_SIZE: ClassVar[int] = 25
+    # Spill individual rows above this size into JSON attachments so they fit
+    # under Braintrust's ~20MB per-span logging upload limit (logs3/overflow).
+    MAX_EVENT_BYTES: ClassVar[int] = 18 * 1024 * 1024
 
     def __init__(
         self,
@@ -92,6 +95,12 @@ class ExperimentMigrator(ResourceMigrator[dict]):
             minimum=1,
         )
         self._sdk_flush_max_bytes = int(self.SDK_FLUSH_MAX_BYTES)
+        # Always-on oversize-field spilling (see OversizeFieldSpiller). Only hits
+        # the network for rows that exceed the per-span upload limit.
+        self._spiller = OversizeFieldSpiller(
+            dest_client=self.dest_client,
+            max_event_bytes=int(self.MAX_EVENT_BYTES),
+        )
         self._event_fetch_group_size = coerce_int_config(
             cfg,
             "events_fetch_group_size",
@@ -213,6 +222,33 @@ class ExperimentMigrator(ResourceMigrator[dict]):
         """Get list of resource types that experiments might depend on."""
         return ["datasets", "experiments"]
 
+    def _remap_parameters_id(self, resource: dict, create_params: dict) -> None:
+        """Remap an experiment's saved-parameters link for the destination.
+
+        ``parameters_id`` is a foreign key to the ``prompts`` table (saved
+        parameters are stored as prompts, which migrate before experiments and
+        share ``id_mapping``). Forwarding the source id verbatim would hit a
+        foreign-key violation, so we remap it to the destination prompt id, or
+        drop it (and the paired ``parameters_version``) when the prompt wasn't
+        migrated -- mirroring how ``base_exp_id``/``dataset_id`` are handled.
+        """
+        source_parameters_id = resource.get("parameters_id")
+        if not source_parameters_id:
+            # No linkage; never send a stray version.
+            create_params.pop("parameters_version", None)
+            return
+
+        dest_parameters_id = self.state.id_mapping.get(source_parameters_id)
+        if dest_parameters_id:
+            create_params["parameters_id"] = dest_parameters_id
+        else:
+            self._logger.debug(
+                "Could not resolve saved-parameters dependency; dropping parameters_id",
+                source_parameters_id=source_parameters_id,
+            )
+            create_params.pop("parameters_id", None)
+            create_params.pop("parameters_version", None)
+
     async def migrate_batch(self, resources: list[dict]) -> list[MigrationResult]:
         """Migrate a batch of experiments with dependency-aware ordering.
 
@@ -330,6 +366,12 @@ class ExperimentMigrator(ResourceMigrator[dict]):
                             source_dataset_id=experiment["dataset_id"],
                         )
                         create_params.pop("dataset_id", None)
+
+                # parameters_id is a FK to the prompts table (saved parameters).
+                # Remap it like base_exp_id/dataset_id; drop it (and the paired
+                # version) if the referenced prompt wasn't migrated, otherwise the
+                # create hits a foreign-key violation in the destination.
+                self._remap_parameters_id(experiment, create_params)
 
                 # Create experiment using raw API
                 response = await self.dest_client.with_retry(
@@ -477,6 +519,10 @@ class ExperimentMigrator(ResourceMigrator[dict]):
                     source_dataset_id=resource["dataset_id"],
                 )
                 create_params.pop("dataset_id", None)
+
+        # parameters_id is a FK to the prompts table (saved parameters); remap or
+        # drop it like the other dependencies (see _remap_parameters_id).
+        self._remap_parameters_id(resource, create_params)
 
         # Create experiment using raw API
         response = await self.dest_client.with_retry(
@@ -795,6 +841,7 @@ class ExperimentMigrator(ResourceMigrator[dict]):
                         if self._attachment_copier is None
                         else self._attachment_copier.rewrite_event_in_place
                     ),
+                    spill_event_in_place=self._spiller.spill_event_in_place,
                     insert_events=lambda batch: self._insert_experiment_events_grouped(
                         batch=batch,
                         writers_by_source=writers_by_source,

@@ -16,7 +16,7 @@ from typing import Any, ClassVar, cast
 import httpx
 import structlog
 
-from braintrust_migrate.attachments import AttachmentCopier
+from braintrust_migrate.attachments import AttachmentCopier, OversizeFieldSpiller
 from braintrust_migrate.batching import (
     approx_events_insert_payload_bytes,
     approx_json_bytes,
@@ -52,6 +52,7 @@ class _LogsStreamingState:
     skipped_seen: int = 0
     failed_batches: int = 0
     attachments_copied: int = 0
+    spilled_fields: int = 0
     # When using BTQL-sorted fetch, we cannot use the opaque cursor. Instead we
     # page using a stable sort key (_pagination_key).
     btql_min_pagination_key: str | None = None
@@ -75,6 +76,7 @@ class _LogsStreamingState:
             skipped_seen=int(data.get("skipped_seen", 0)),
             failed_batches=int(data.get("failed_batches", 0)),
             attachments_copied=int(data.get("attachments_copied", 0)),
+            spilled_fields=int(data.get("spilled_fields", 0)),
             btql_min_pagination_key=data.get("btql_min_pagination_key"),
             btql_min_pagination_key_inclusive=bool(
                 data.get("btql_min_pagination_key_inclusive", False)
@@ -94,6 +96,7 @@ class _LogsStreamingState:
             "skipped_seen": self.skipped_seen,
             "failed_batches": self.failed_batches,
             "attachments_copied": self.attachments_copied,
+            "spilled_fields": self.spilled_fields,
             "btql_min_pagination_key": self.btql_min_pagination_key,
             "btql_min_pagination_key_inclusive": self.btql_min_pagination_key_inclusive,
             "btql_last_created": self.btql_last_created,
@@ -107,6 +110,9 @@ class LogsMigrator(ResourceMigrator[dict[str, Any]]):
 
     SDK_FLUSH_MAX_ROWS: ClassVar[int] = 5_000
     SDK_FLUSH_MAX_BYTES: ClassVar[int] = 25 * 1024 * 1024
+    # Spill individual rows above this size into JSON attachments so they fit
+    # under Braintrust's ~20MB per-span logging upload limit (logs3/overflow).
+    MAX_EVENT_BYTES: ClassVar[int] = 18 * 1024 * 1024
 
     _INSERT_FIELDS: ClassVar[set[str]] = {
         "input",
@@ -194,6 +200,15 @@ class LogsMigrator(ResourceMigrator[dict[str, Any]]):
                     getattr(mig_cfg, "attachment_max_bytes", 50 * 1024 * 1024)
                 ),
             )
+
+        # Always-on: rows larger than the per-span upload limit get their biggest
+        # fields spilled into JSON attachments. The spiller only touches the
+        # network for rows that actually exceed the cap, so it is free otherwise.
+        self._max_event_bytes = int(self.MAX_EVENT_BYTES)
+        self._spiller = OversizeFieldSpiller(
+            dest_client=self.dest_client,
+            max_event_bytes=self._max_event_bytes,
+        )
 
         # Byte-aware insert batching config (best-effort; falls back to count-only if missing).
         try:
@@ -345,10 +360,6 @@ class LogsMigrator(ResourceMigrator[dict[str, Any]]):
             if isinstance(event_id, str) and event_id:
                 ids.append(event_id)
         return ids
-
-    @staticmethod
-    def _sum_event_bytes(events: list[dict[str, Any]]) -> int:
-        return sum(approx_json_bytes(event) for event in events)
 
     @staticmethod
     def _is_http_413(exc: Exception) -> bool:
@@ -582,6 +593,7 @@ class LogsMigrator(ResourceMigrator[dict[str, Any]]):
                         else None,
                         "version": self._stream_state.version,
                         "resume_cursor": self._stream_state.cursor,
+                        "spilled_fields": self._stream_state.spilled_fields,
                     }
                 self._stream_state.btql_min_pagination_key = start_pk
                 self._stream_state.btql_min_pagination_key_inclusive = True
@@ -603,6 +615,7 @@ class LogsMigrator(ResourceMigrator[dict[str, Any]]):
             pending_inserted_bytes = 0
             pending_skipped_seen = 0
             pending_attachments_copied = 0
+            pending_spilled_fields = 0
             pending_last_pk: str | None = None
             pending_last_created: str | None = None
 
@@ -806,6 +819,7 @@ class LogsMigrator(ResourceMigrator[dict[str, Any]]):
                 nonlocal pending_inserted_bytes
                 nonlocal pending_skipped_seen
                 nonlocal pending_attachments_copied
+                nonlocal pending_spilled_fields
                 nonlocal pending_last_pk
                 nonlocal pending_last_created
 
@@ -814,6 +828,7 @@ class LogsMigrator(ResourceMigrator[dict[str, Any]]):
                     and pending_inserted_events == 0
                     and pending_skipped_seen == 0
                     and pending_attachments_copied == 0
+                    and pending_spilled_fields == 0
                     and pending_last_pk is None
                 ):
                     return
@@ -853,6 +868,7 @@ class LogsMigrator(ResourceMigrator[dict[str, Any]]):
                 self._stream_state.fetched_events += pending_fetched_events
                 self._stream_state.skipped_seen += pending_skipped_seen
                 self._stream_state.attachments_copied += pending_attachments_copied
+                self._stream_state.spilled_fields += pending_spilled_fields
                 self._stream_state.btql_last_created = pending_last_created
                 if pending_last_pk is not None:
                     _set_last_pk(pending_last_pk)
@@ -866,6 +882,7 @@ class LogsMigrator(ResourceMigrator[dict[str, Any]]):
                 pending_inserted_bytes = 0
                 pending_skipped_seen = 0
                 pending_attachments_copied = 0
+                pending_spilled_fields = 0
                 pending_last_pk = None
                 pending_last_created = None
 
@@ -947,22 +964,39 @@ class LogsMigrator(ResourceMigrator[dict[str, Any]]):
                         pending_skipped_seen += pending_duplicates
                     insert_events_list = deduped_events
 
-                if self._attachment_copier is not None:
-                    copied = 0
-                    for event in insert_events_list:
-                        copied += int(
-                            await self._attachment_copier.rewrite_event_in_place(event)
-                        )
-                    pending_attachments_copied += copied
-
                 if insert_events_list:
+                    # Single pass per event: copy source attachments (if enabled),
+                    # measure size once, spill oversized rows, then reuse that size
+                    # for byte accounting (avoids re-serializing each event).
+                    copied = 0
+                    spilled = 0
+                    event_sizes: list[int] = []
+                    for event in insert_events_list:
+                        if self._attachment_copier is not None:
+                            copied += int(
+                                await self._attachment_copier.rewrite_event_in_place(
+                                    event
+                                )
+                            )
+                        size = approx_json_bytes(event)
+                        if size > self._max_event_bytes:
+                            spilled_count, size = await self._spiller.spill_event_in_place(
+                                event, size
+                            )
+                            spilled += spilled_count
+                        event_sizes.append(size)
+
+                    pending_attachments_copied += copied
+                    pending_spilled_fields += spilled
                     pending_events.extend(insert_events_list)
                     pending_seen_ids.update(self._extract_ids(insert_events_list))
                     pending_inserted_events += len(insert_events_list)
+                    size_iter = iter(event_sizes)
                     pending_inserted_bytes += approx_events_insert_payload_bytes(
-                        insert_events_list
+                        insert_events_list,
+                        approx_event_bytes=lambda _e: next(size_iter),
                     )
-                    pending_row_bytes += self._sum_event_bytes(insert_events_list)
+                    pending_row_bytes += sum(event_sizes)
 
                 pending_last_pk = page_last_pk
                 last_created = page_events[-1].get("created")
@@ -996,6 +1030,7 @@ class LogsMigrator(ResourceMigrator[dict[str, Any]]):
                 "seen_db": str(self._seen_db_path) if self.use_seen_db else None,
                 "version": self._stream_state.version,
                 "resume_cursor": self._stream_state.cursor,
+                "spilled_fields": self._stream_state.spilled_fields,
             }
         finally:
             if seen_db is not None:
@@ -1015,4 +1050,5 @@ class LogsMigrator(ResourceMigrator[dict[str, Any]]):
             "seen_db": str(self._seen_db_path) if self.use_seen_db else None,
             "version": self._stream_state.version,
             "resume_cursor": self._stream_state.cursor,
+            "spilled_fields": self._stream_state.spilled_fields,
         }

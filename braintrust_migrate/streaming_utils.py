@@ -35,6 +35,7 @@ class EventsStreamState:
     skipped_deleted: int = 0
     skipped_seen: int = 0
     attachments_copied: int = 0
+    spilled_fields: int = 0
 
     @classmethod
     def from_path(cls, path: Path) -> EventsStreamState:
@@ -52,6 +53,7 @@ class EventsStreamState:
             skipped_deleted=int(data.get("skipped_deleted", 0)),
             skipped_seen=int(data.get("skipped_seen", 0)),
             attachments_copied=int(data.get("attachments_copied", 0)),
+            spilled_fields=int(data.get("spilled_fields", 0)),
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -65,6 +67,7 @@ class EventsStreamState:
             "skipped_deleted": self.skipped_deleted,
             "skipped_seen": self.skipped_seen,
             "attachments_copied": self.attachments_copied,
+            "spilled_fields": self.spilled_fields,
         }
 
 
@@ -201,6 +204,8 @@ async def stream_btql_sorted_events_buffered(
     event_to_insert: Callable[[dict[str, Any]], dict[str, Any]],
     seen_db: SeenIdsDB | None,
     rewrite_event_in_place: Callable[[dict[str, Any]], Awaitable[int]] | None,
+    spill_event_in_place: Callable[[dict[str, Any], int], Awaitable[tuple[int, int]]]
+    | None = None,
     insert_events: Callable[[list[dict[str, Any]]], Awaitable[None]],
     flush_max_rows: int,
     flush_max_bytes: int,
@@ -230,6 +235,7 @@ async def stream_btql_sorted_events_buffered(
     pending_skipped_deleted = 0
     pending_skipped_seen = 0
     pending_attachments_copied = 0
+    pending_spilled_fields = 0
     pending_last_pk: str | None = None
     current_page_num: int | None = None
 
@@ -244,6 +250,7 @@ async def stream_btql_sorted_events_buffered(
         nonlocal pending_skipped_deleted
         nonlocal pending_skipped_seen
         nonlocal pending_attachments_copied
+        nonlocal pending_spilled_fields
         nonlocal pending_last_pk
 
         if (
@@ -252,6 +259,7 @@ async def stream_btql_sorted_events_buffered(
             and pending_skipped_deleted == 0
             and pending_skipped_seen == 0
             and pending_attachments_copied == 0
+            and pending_spilled_fields == 0
             and pending_last_pk is None
         ):
             return
@@ -293,6 +301,7 @@ async def stream_btql_sorted_events_buffered(
         state.skipped_deleted += pending_skipped_deleted
         state.skipped_seen += pending_skipped_seen
         state.attachments_copied += pending_attachments_copied
+        state.spilled_fields += pending_spilled_fields
         state.btql_min_pagination_key = pending_last_pk
         save_state()
         active_last_pk = pending_last_pk
@@ -306,6 +315,7 @@ async def stream_btql_sorted_events_buffered(
         pending_skipped_deleted = 0
         pending_skipped_seen = 0
         pending_attachments_copied = 0
+        pending_spilled_fields = 0
         pending_last_pk = None
 
     page_num = 0
@@ -396,22 +406,33 @@ async def stream_btql_sorted_events_buffered(
             pending_skipped_seen += pending_duplicates
             insert_events_list = deduped_events
 
-        if rewrite_event_in_place is not None:
-            copied = 0
-            for event in insert_events_list:
-                copied += int(await rewrite_event_in_place(event))
-            pending_attachments_copied += copied
-
         if insert_events_list:
+            # Single pass per event: copy source attachments (if enabled), measure
+            # size once, spill oversized rows into attachments, then reuse that
+            # size for byte accounting (avoids re-serializing each event).
+            copied = 0
+            spilled = 0
+            event_sizes: list[int] = []
+            for event in insert_events_list:
+                if rewrite_event_in_place is not None:
+                    copied += int(await rewrite_event_in_place(event))
+                size = approx_json_bytes(event)
+                if spill_event_in_place is not None:
+                    spilled_count, size = await spill_event_in_place(event, size)
+                    spilled += spilled_count
+                event_sizes.append(size)
+
+            pending_attachments_copied += copied
+            pending_spilled_fields += spilled
             pending_events.extend(insert_events_list)
             pending_seen_ids.update(_extract_ids(insert_events_list))
             pending_inserted_events += len(insert_events_list)
+            size_iter = iter(event_sizes)
             pending_inserted_bytes += approx_events_insert_payload_bytes(
-                insert_events_list
+                insert_events_list,
+                approx_event_bytes=lambda _e: next(size_iter),
             )
-            pending_row_bytes += sum(
-                approx_json_bytes(event) for event in insert_events_list
-            )
+            pending_row_bytes += sum(event_sizes)
 
         pending_last_pk = page_last_pk
         if isinstance(page_last_pk, str) and page_last_pk:

@@ -349,6 +349,65 @@ class TestExperimentDependencies:
         create_call = mock_dest_client.with_retry.call_args_list[0]
         assert create_call[0][0] == "create_experiment"
 
+    async def test_migrate_resource_remaps_parameters_id(
+        self,
+        mock_source_client,
+        mock_dest_client,
+        temp_checkpoint_dir,
+    ):
+        """A resolved parameters_id (FK to prompts) is remapped to the dest id."""
+        mock_dest_client.raw_request = AsyncMock(
+            return_value={"id": "new-exp-1", "name": "Params Experiment"}
+        )
+        migrator = ExperimentMigrator(
+            mock_source_client, mock_dest_client, temp_checkpoint_dir
+        )
+        migrator.dest_project_id = "dest-project-456"
+        migrator.state.id_mapping["src-prompt-1"] = "dest-prompt-1"
+
+        experiment = {
+            "id": "exp-1",
+            "name": "Params Experiment",
+            "parameters_id": "src-prompt-1",
+            "parameters_version": "3",
+        }
+        result = await migrator.migrate_resource(experiment)
+        assert result == "new-exp-1"
+
+        payload = mock_dest_client.raw_request.call_args.kwargs["json"]
+        assert payload["parameters_id"] == "dest-prompt-1"
+        assert payload["parameters_version"] == "3"
+
+    async def test_migrate_resource_drops_unresolved_parameters_id(
+        self,
+        mock_source_client,
+        mock_dest_client,
+        temp_checkpoint_dir,
+    ):
+        """An unresolved parameters_id is dropped (with its version) to avoid a
+        foreign-key violation, rather than forwarded verbatim."""
+        mock_dest_client.raw_request = AsyncMock(
+            return_value={"id": "new-exp-2", "name": "Params Experiment"}
+        )
+        migrator = ExperimentMigrator(
+            mock_source_client, mock_dest_client, temp_checkpoint_dir
+        )
+        migrator.dest_project_id = "dest-project-456"
+        # id_mapping intentionally has no entry for the source prompt.
+
+        experiment = {
+            "id": "exp-2",
+            "name": "Params Experiment",
+            "parameters_id": "src-prompt-missing",
+            "parameters_version": "3",
+        }
+        result = await migrator.migrate_resource(experiment)
+        assert result == "new-exp-2"
+
+        payload = mock_dest_client.raw_request.call_args.kwargs["json"]
+        assert "parameters_id" not in payload
+        assert "parameters_version" not in payload
+
     async def test_get_dependency_types(
         self,
         mock_source_client,
