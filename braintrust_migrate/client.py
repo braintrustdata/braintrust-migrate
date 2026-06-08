@@ -161,7 +161,12 @@ class BraintrustClient:
             if org_name is not None:
                 params["org_name"] = org_name
 
-            resp = await self.raw_request("GET", "/v1/project", params=params)
+            resp = await self.with_retry(
+                "list_projects",
+                lambda params=params: self.raw_request(
+                    "GET", "/v1/project", params=params
+                ),
+            )
             if not isinstance(resp, dict):
                 raise BraintrustAPIError(f"Unexpected project list response: {type(resp)}")
             objs = resp.get("objects")
@@ -200,7 +205,10 @@ class BraintrustClient:
         if description:
             payload["description"] = description
 
-        resp = await self.raw_request("POST", "/v1/project", json=payload)
+        resp = await self.with_retry(
+            "create_project",
+            lambda: self.raw_request("POST", "/v1/project", json=payload),
+        )
         if not isinstance(resp, dict):
             raise BraintrustAPIError(f"Unexpected create project response: {type(resp)}")
         self._maybe_capture_org_id(resp)
