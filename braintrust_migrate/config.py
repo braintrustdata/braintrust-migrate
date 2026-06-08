@@ -168,6 +168,15 @@ class MigrationConfig(BaseModel):
         description="Use a SQLite seen-id store to prevent older versions overwriting newer ones during pagination",
     )
 
+    validate_migration: bool = Field(
+        default=False,
+        description=(
+            "After migrating, validate the destination against the source: object "
+            "counts (and which specific items are missing) for project-scoped "
+            "resources, plus event count-parity for datasets/experiments/logs."
+        ),
+    )
+
     created_after: str | None = Field(
         default=None,
         description=(
@@ -403,6 +412,13 @@ class Config(BaseModel):
         logs_use_seen_db = _get_bool(
             "MIGRATION_LOGS_USE_SEEN_DB", "MIGRATION_EVENTS_USE_SEEN_DB", "true"
         )
+        validate = os.getenv("MIGRATION_VALIDATE", "false").lower() in {
+            "1",
+            "true",
+            "yes",
+            "y",
+            "on",
+        }
 
         # Optional time filter (applies to logs and experiments)
         created_after = os.getenv("MIGRATION_CREATED_AFTER")
@@ -507,6 +523,7 @@ class Config(BaseModel):
                 logs_insert_batch_size=logs_insert_batch_size,
                 logs_use_version_snapshot=logs_use_version_snapshot,
                 logs_use_seen_db=logs_use_seen_db,
+                validate_migration=validate,
                 created_after=created_after,
                 created_before=created_before,
                 experiment_events_fetch_limit=experiment_events_fetch_limit,

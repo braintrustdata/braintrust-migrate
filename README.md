@@ -402,6 +402,20 @@ The tool uses **two-level checkpointing** for streaming resources (logs, experim
 
 On resume: skips 1-30 (done), resumes experiment 31 from saved `_pagination_key`, continues with 32-100.
 
+### Validation
+
+Pass `--validate` (or `MIGRATION_VALIDATE=true`) to validate the destination against the source as a final phase after migrating. It runs per project and checks:
+
+- **Object parity** for project-scoped resources (datasets, experiments, prompts, functions, project_scores, views, project_tags, span_iframes): compares source vs destination and reports the **specific items missing** in the destination.
+- **Event count-parity** for datasets, experiments, and logs: compares a cheap `count` of events on each side (per dataset/experiment, and per project for logs).
+
+Results are summarized per resource in the console (mismatches are listed, with a pointer to the full report) and recorded under each project's `validation` block in `migration_report.json`.
+
+Notes and limitations:
+- Validation **mirrors migration policy** — intentionally skipped items (e.g. bundle-backed code functions) are **not** reported as missing — and honors the same `--created-after`/`--created-before` window.
+- For high-volume event resources it compares **counts only**. Enumerating *which* events are missing requires diffing full id sets and does not scale; counts are reported per dataset/experiment/project so a discrepancy can still be localized to a specific object.
+- Org-scoped resources (roles, groups, ai_secrets) and ACLs are **out of scope** for validation.
+
 ## Parallelization
 
 The migration tool currently uses **two active levels of concurrency**. The env vars in [Parallelization Tuning](#parallelization-tuning) still matter, but the within-project resource-type DAG concurrency described below has not been implemented yet.
