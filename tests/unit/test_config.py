@@ -4,7 +4,13 @@ from pathlib import Path
 
 import pytest
 
-from braintrust_migrate.config import BraintrustOrgConfig, Config, MigrationConfig
+from braintrust_migrate.config import (
+    BraintrustOrgConfig,
+    Config,
+    MigrationConfig,
+    load_project_name_mapping_file,
+    parse_project_name_mapping_json,
+)
 
 # Test constants
 DEFAULT_BATCH_SIZE = 100
@@ -13,6 +19,9 @@ DEFAULT_MAX_CONCURRENT = 1
 DEFAULT_CHECKPOINT_INTERVAL = 50
 TEST_BATCH_SIZE = 50
 TEST_RETRY_ATTEMPTS = 5
+TEST_EVENTS_FETCH_GROUP_SIZE = 17
+TEST_EVENTS_FLUSH_MAX_ROWS = 4321
+TEST_LEGACY_LOGS_INSERT_BATCH_SIZE = 3456
 
 
 class TestBraintrustOrgConfig:
@@ -105,6 +114,47 @@ class TestConfig:
         project_dir = config.get_checkpoint_dir("my-project")
         assert project_dir == Path("/tmp/test-checkpoints/my-project")
 
+    def test_project_name_mapping_validates_and_trims(self):
+        """Test project name mappings are normalized on config objects."""
+        config = Config(
+            source=BraintrustOrgConfig(api_key="source-key"),
+            destination=BraintrustOrgConfig(api_key="dest-key"),
+            project_name_mapping={" Source A ": " Dest A "},
+        )
+
+        assert config.project_name_mapping == {"Source A": "Dest A"}
+
+    def test_project_name_mapping_rejects_empty_names(self):
+        """Test project name mappings require non-empty source and dest names."""
+        with pytest.raises(ValueError, match="non-empty source and destination"):
+            Config(
+                source=BraintrustOrgConfig(api_key="source-key"),
+                destination=BraintrustOrgConfig(api_key="dest-key"),
+                project_name_mapping={"Source A": " "},
+            )
+
+    def test_project_name_mapping_rejects_non_string_names(self):
+        """Test project name mappings must use string keys and values."""
+        with pytest.raises(ValueError, match="source project names"):
+            Config(
+                source=BraintrustOrgConfig(api_key="source-key"),
+                destination=BraintrustOrgConfig(api_key="dest-key"),
+                project_name_mapping={"Source A": 123},
+            )
+
+    def test_parse_project_name_mapping_json(self):
+        """Test inline JSON project map parsing."""
+        mapping = parse_project_name_mapping_json('{"Source A":"Dest A"}')
+
+        assert mapping == {"Source A": "Dest A"}
+
+    def test_load_project_name_mapping_file(self, tmp_path: Path):
+        """Test JSON project map file parsing."""
+        path = tmp_path / "project-map.json"
+        path.write_text('{"Source A":"Dest A"}')
+
+        assert load_project_name_mapping_file(path) == {"Source A": "Dest A"}
+
 
 class TestConfigFromEnv:
     """Test configuration loading from environment variables."""
@@ -128,11 +178,15 @@ class TestConfigFromEnv:
         monkeypatch.setenv("BT_SOURCE_URL", "https://source.example.com")
         monkeypatch.setenv("BT_DEST_URL", "https://dest.example.com")
         monkeypatch.setenv("MIGRATION_BATCH_SIZE", "50")
+        monkeypatch.setenv("MIGRATION_PROJECT_MAP", '{"Source A":"Dest A"}')
         monkeypatch.setenv("MIGRATION_ACL_MAP_USERS", "true")
         monkeypatch.setenv("MIGRATION_ACL_AUTO_INVITE_USERS", "true")
         monkeypatch.setenv("MIGRATION_GROUP_MAP_USERS", "true")
         monkeypatch.setenv("MIGRATION_GROUP_AUTO_INVITE_USERS", "true")
-        monkeypatch.setenv("MIGRATION_EVENTS_FETCH_GROUP_SIZE", "17")
+        monkeypatch.setenv(
+            "MIGRATION_EVENTS_FETCH_GROUP_SIZE",
+            str(TEST_EVENTS_FETCH_GROUP_SIZE),
+        )
         monkeypatch.setenv("LOG_LEVEL", "DEBUG")
 
         config = Config.from_env()
@@ -142,31 +196,70 @@ class TestConfigFromEnv:
         assert str(config.source.url) == "https://source.example.com/"
         assert str(config.destination.url) == "https://dest.example.com/"
         assert config.migration.batch_size == TEST_BATCH_SIZE
+        assert config.project_name_mapping == {"Source A": "Dest A"}
         assert config.migration.acl_map_users is True
         assert config.migration.acl_auto_invite_users is True
         assert config.migration.group_map_users is True
         assert config.migration.group_auto_invite_users is True
-        assert config.migration.events_fetch_group_size == 17
+        assert config.migration.events_fetch_group_size == TEST_EVENTS_FETCH_GROUP_SIZE
         assert config.logging.level == "DEBUG"
 
     def test_unified_events_flush_max_rows_from_env(self, monkeypatch):
         """Test shared streaming flush threshold env var."""
         monkeypatch.setenv("BT_SOURCE_API_KEY", "source-test-key")
         monkeypatch.setenv("BT_DEST_API_KEY", "dest-test-key")
-        monkeypatch.setenv("MIGRATION_EVENTS_FLUSH_MAX_ROWS", "4321")
+        monkeypatch.setenv(
+            "MIGRATION_EVENTS_FLUSH_MAX_ROWS",
+            str(TEST_EVENTS_FLUSH_MAX_ROWS),
+        )
 
         config = Config.from_env()
 
-        assert config.migration.events_flush_max_rows == 4321
-        assert config.migration.logs_insert_batch_size == 4321
+        assert config.migration.events_flush_max_rows == TEST_EVENTS_FLUSH_MAX_ROWS
+        assert config.migration.logs_insert_batch_size == TEST_EVENTS_FLUSH_MAX_ROWS
+
+    def test_project_map_file_from_env(self, monkeypatch, tmp_path: Path):
+        """Test loading project name mapping from env-provided file."""
+        path = tmp_path / "project-map.json"
+        path.write_text('{"Source A":"Dest A"}')
+        monkeypatch.setenv("BT_SOURCE_API_KEY", "source-test-key")
+        monkeypatch.setenv("BT_DEST_API_KEY", "dest-test-key")
+        monkeypatch.setenv("MIGRATION_PROJECT_MAP_FILE", str(path))
+
+        config = Config.from_env()
+
+        assert config.project_name_mapping == {"Source A": "Dest A"}
+
+    def test_project_map_env_vars_are_mutually_exclusive(
+        self, monkeypatch, tmp_path: Path
+    ):
+        """Test inline and file project maps cannot both be set."""
+        path = tmp_path / "project-map.json"
+        path.write_text('{"Source A":"Dest A"}')
+        monkeypatch.setenv("BT_SOURCE_API_KEY", "source-test-key")
+        monkeypatch.setenv("BT_DEST_API_KEY", "dest-test-key")
+        monkeypatch.setenv("MIGRATION_PROJECT_MAP", '{"Source A":"Dest A"}')
+        monkeypatch.setenv("MIGRATION_PROJECT_MAP_FILE", str(path))
+
+        with pytest.raises(ValueError, match="Set only one"):
+            Config.from_env()
 
     def test_legacy_logs_insert_batch_size_alias_still_works(self, monkeypatch):
         """Test legacy logs-only env var maps to shared flush threshold."""
         monkeypatch.setenv("BT_SOURCE_API_KEY", "source-test-key")
         monkeypatch.setenv("BT_DEST_API_KEY", "dest-test-key")
-        monkeypatch.setenv("MIGRATION_LOGS_INSERT_BATCH_SIZE", "3456")
+        monkeypatch.setenv(
+            "MIGRATION_LOGS_INSERT_BATCH_SIZE",
+            str(TEST_LEGACY_LOGS_INSERT_BATCH_SIZE),
+        )
 
         config = Config.from_env()
 
-        assert config.migration.events_flush_max_rows == 3456
-        assert config.migration.logs_insert_batch_size == 3456
+        assert (
+            config.migration.events_flush_max_rows
+            == TEST_LEGACY_LOGS_INSERT_BATCH_SIZE
+        )
+        assert (
+            config.migration.logs_insert_batch_size
+            == TEST_LEGACY_LOGS_INSERT_BATCH_SIZE
+        )
