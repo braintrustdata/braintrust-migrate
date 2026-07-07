@@ -1,10 +1,11 @@
 """Configuration models and environment variable parsing for Braintrust migration tool."""
 
+import json
 import os
 import re
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import cast
+from typing import Any, cast
 
 from dotenv import load_dotenv
 from pydantic import BaseModel, Field, HttpUrl, field_validator, model_validator
@@ -54,6 +55,69 @@ def canonicalize_created_after(value: str) -> str:
 def canonicalize_created_before(value: str) -> str:
     """Normalize a user-supplied datetime string for BTQL `created < ...` filters."""
     return _canonicalize_datetime(value, "created_before")
+
+
+def normalize_project_name_mapping(
+    value: object | None,
+    *,
+    field_name: str = "project_name_mapping",
+) -> dict[str, str]:
+    """Validate and normalize source project name -> destination project name maps."""
+    if value is None:
+        return {}
+
+    if isinstance(value, str):
+        return parse_project_name_mapping_json(value, field_name=field_name)
+
+    if not isinstance(value, dict):
+        raise ValueError(f"{field_name} must be a JSON object")
+
+    mapping: dict[str, str] = {}
+    for raw_source, raw_dest in value.items():
+        if not isinstance(raw_source, str) or not isinstance(raw_dest, str):
+            raise ValueError(
+                f"{field_name} must map source project names to destination project names"
+            )
+
+        source = raw_source.strip()
+        dest = raw_dest.strip()
+        if not source or not dest:
+            raise ValueError(
+                f"{field_name} entries must have non-empty source and destination project names"
+            )
+        if source in mapping:
+            raise ValueError(f"{field_name} contains duplicate source project {source!r}")
+
+        mapping[source] = dest
+
+    return mapping
+
+
+def parse_project_name_mapping_json(
+    value: str,
+    *,
+    field_name: str = "project map",
+) -> dict[str, str]:
+    """Parse a JSON project-name mapping and validate its shape."""
+    try:
+        parsed: Any = json.loads(value)
+    except json.JSONDecodeError as e:
+        raise ValueError(f"{field_name} must be valid JSON") from e
+
+    return normalize_project_name_mapping(parsed, field_name=field_name)
+
+
+def load_project_name_mapping_file(path: Path) -> dict[str, str]:
+    """Load a project-name mapping from a JSON file."""
+    if not path.exists():
+        raise FileNotFoundError(f"Project map file not found: {path}")
+    with open(path, encoding="utf-8") as f:
+        try:
+            parsed: Any = json.load(f)
+        except json.JSONDecodeError as e:
+            raise ValueError(f"Project map file must contain valid JSON: {path}") from e
+
+    return normalize_project_name_mapping(parsed, field_name="project map file")
 
 
 class BraintrustOrgConfig(BaseModel):
@@ -315,12 +379,24 @@ class Config(BaseModel):
         default=None,
         description="List of project names to migrate (if None, migrate all projects)",
     )
+    project_name_mapping: dict[str, str] = Field(
+        default_factory=dict,
+        description=(
+            "Optional mapping from source project names to destination project names. "
+            "Unmapped projects use the source project name in the destination."
+        ),
+    )
 
     class Config:
         """Pydantic config."""
 
         validate_assignment = True
         use_enum_values = True
+
+    @field_validator("project_name_mapping", mode="before")
+    def validate_project_name_mapping(cls, v: object | None) -> dict[str, str]:
+        """Validate source project name -> destination project name mapping."""
+        return normalize_project_name_mapping(v)
 
     @classmethod
     def from_env(cls) -> "Config":
@@ -483,6 +559,24 @@ class Config(BaseModel):
         # State directory
         state_dir = Path(os.getenv("MIGRATION_STATE_DIR", "./checkpoints"))
 
+        project_map_env = os.getenv("MIGRATION_PROJECT_MAP")
+        project_map_file_env = os.getenv("MIGRATION_PROJECT_MAP_FILE")
+        if project_map_env and project_map_file_env:
+            raise ValueError(
+                "Set only one of MIGRATION_PROJECT_MAP or MIGRATION_PROJECT_MAP_FILE"
+            )
+        if project_map_env:
+            project_name_mapping = parse_project_name_mapping_json(
+                project_map_env,
+                field_name="MIGRATION_PROJECT_MAP",
+            )
+        elif project_map_file_env:
+            project_name_mapping = load_project_name_mapping_file(
+                Path(project_map_file_env)
+            )
+        else:
+            project_name_mapping = {}
+
         return cls(
             source=BraintrustOrgConfig(
                 api_key=source_api_key,
@@ -526,6 +620,7 @@ class Config(BaseModel):
                 format=log_format,
             ),
             state_dir=state_dir,
+            project_name_mapping=project_name_mapping,
         )
 
     @classmethod

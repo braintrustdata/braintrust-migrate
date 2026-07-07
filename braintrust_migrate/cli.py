@@ -25,6 +25,8 @@ from braintrust_migrate.config import (
     Config,
     canonicalize_created_after,
     canonicalize_created_before,
+    load_project_name_mapping_file,
+    parse_project_name_mapping_json,
 )
 from braintrust_migrate.orchestration import MigrationOrchestrator
 
@@ -41,6 +43,24 @@ app = typer.Typer(
 )
 
 console = Console()
+
+
+def _load_project_name_mapping_override(
+    project_map: str | None,
+    project_map_file: Path | None,
+) -> dict[str, str] | None:
+    """Load CLI/env project-name mapping overrides, if provided."""
+    if project_map is not None and project_map_file is not None:
+        raise ValueError("Set only one of --project-map or --project-map-file")
+    if project_map is not None:
+        return parse_project_name_mapping_json(project_map, field_name="--project-map")
+    if project_map_file is not None:
+        return load_project_name_mapping_file(project_map_file)
+    return None
+
+
+def _resources_include(resources: list[str], resource_name: str) -> bool:
+    return "all" in resources or resource_name in resources
 
 
 def setup_logging(log_level: str = "INFO", log_format: str = "json") -> None:
@@ -89,8 +109,27 @@ def migrate(
         typer.Option(
             "--projects",
             "-p",
-            help="Comma-separated list of project names to migrate (if not specified, all projects will be migrated)",
+            help="Comma-separated list of source project names to migrate (if not specified, all projects will be migrated)",
             envvar="MIGRATION_PROJECTS",
+        ),
+    ] = None,
+    project_map: Annotated[
+        str | None,
+        typer.Option(
+            "--project-map",
+            help=(
+                "JSON object mapping source project names to destination project names "
+                '(e.g. \'{"Source Project":"Destination Project"}\')'
+            ),
+            envvar="MIGRATION_PROJECT_MAP",
+        ),
+    ] = None,
+    project_map_file: Annotated[
+        Path | None,
+        typer.Option(
+            "--project-map-file",
+            help="Path to a JSON file mapping source project names to destination project names",
+            envvar="MIGRATION_PROJECT_MAP_FILE",
         ),
     ] = None,
     state_dir: Annotated[
@@ -245,6 +284,8 @@ def migrate(
         _migrate_main(
             resources,
             projects,
+            project_map,
+            project_map_file,
             state_dir,
             resume_run_dir,
             log_level,
@@ -266,6 +307,8 @@ def migrate(
 async def _migrate_main(
     resources: str,
     projects: str | None,
+    project_map: str | None,
+    project_map_file: Path | None,
     state_dir: Path | None,
     resume_run_dir: Path | None,
     log_level: str,
@@ -301,6 +344,13 @@ async def _migrate_main(
                 config = Config.from_env()
         else:
             config = Config.from_env()
+
+        project_name_mapping_override = _load_project_name_mapping_override(
+            project_map,
+            project_map_file,
+        )
+        if project_name_mapping_override is not None:
+            config.project_name_mapping = project_name_mapping_override
 
         # Checkpoint normalization: allow a *single* checkpoint path (root/run/project)
         # to be provided via CLI or env. CLI takes precedence, but env-driven `--state-dir`
@@ -359,6 +409,7 @@ async def _migrate_main(
             dest_url=str(config.destination.url),
             resources=config.resources,
             projects=getattr(config, "project_names", None),
+            project_name_mapping=config.project_name_mapping,
             state_dir=str(config.state_dir),
             dry_run=dry_run,
             logs_fetch_limit=config.migration.logs_fetch_limit,
@@ -1097,11 +1148,23 @@ async def _run_dry_run(config: Config) -> None:
                     source_client,
                     dest_client,
                     config.project_names,
+                    config.project_name_mapping,
                 )
                 progress.update(
                     validation_task,
                     description=f"✅ Discovered {len(projects)} projects",
                 )
+
+                if _resources_include(config.resources, "logs"):
+                    log_probe_results = await _test_logs_dry_run_probe(
+                        source_client,
+                        projects,
+                        config,
+                        progress,
+                        validation_task,
+                    )
+                else:
+                    log_probe_results = {}
 
                 # Test resource discovery for each migrator type
                 test_results = await _test_resource_discovery(
@@ -1116,7 +1179,12 @@ async def _run_dry_run(config: Config) -> None:
             progress.update(validation_task, completed=1, total=1)
 
             # Display dry run results
-            _display_dry_run_results(projects, test_results)
+            _display_dry_run_results(
+                config,
+                projects,
+                test_results,
+                log_probe_results,
+            )
 
             console.print("\n[green]✅ Dry run completed successfully![/green]")
             console.print(
@@ -1133,6 +1201,7 @@ async def _discover_projects_read_only(
     source_client,
     dest_client,
     project_names: list[str] | None = None,
+    project_name_mapping: dict[str, str] | None = None,
 ) -> list[dict[str, str]]:
     """Discover projects without mutating destination organization.
 
@@ -1166,17 +1235,78 @@ async def _discover_projects_read_only(
         if selected_names and name not in selected_names:
             continue
 
-        dest_id_raw = dest_id_by_name.get(name)
+        dest_name = (project_name_mapping or {}).get(name, name)
+        dest_id_raw = dest_id_by_name.get(dest_name)
         dest_id = dest_id_raw if isinstance(dest_id_raw, str) else ""
         mappings.append(
             {
                 "source_id": source_id,
                 "dest_id": dest_id,
                 "name": name,
+                "dest_name": dest_name,
+                "dest_status": "exists" if dest_id else "would create",
             }
         )
 
     return mappings
+
+
+async def _test_logs_dry_run_probe(
+    source_client,
+    projects: list[dict],
+    config: Config,
+    progress,
+    validation_task,
+) -> dict[str, dict[str, Any]]:
+    """Probe whether the selected logs time window has at least one matching span."""
+    from braintrust_migrate.btql import (
+        btql_quote,
+        fetch_btql_sorted_page_with_retries,
+    )
+    from braintrust_migrate.streaming_utils import build_btql_sorted_page_query
+
+    results: dict[str, dict[str, Any]] = {}
+    for project in projects:
+        project_name = project["name"]
+        progress.update(
+            validation_task,
+            description=f"🔍 Probing logs window for {project_name}...",
+        )
+        from_expr = f"project_logs('{btql_quote(project['source_id'])}') spans"
+
+        def _query_text_for_limit(n: int, *, _from_expr: str = from_expr) -> str:
+            return build_btql_sorted_page_query(
+                from_expr=_from_expr,
+                limit=n,
+                last_pagination_key=None,
+                created_after=config.migration.created_after,
+                created_before=config.migration.created_before,
+                select="*",
+            )
+
+        try:
+            page = await fetch_btql_sorted_page_with_retries(
+                client=source_client,
+                query_for_limit=_query_text_for_limit,
+                configured_limit=1,
+                operation="btql_project_logs_dry_run_probe",
+                log_fields={"source_project_id": project["source_id"]},
+                floor_limit=1,
+                default_500_retry_limit=1,
+            )
+            rows = page.get("events")
+            match_found = isinstance(rows, list) and len(rows) > 0
+            results[project_name] = {
+                "status": "success",
+                "matching_spans_visible": match_found,
+            }
+        except Exception as e:
+            results[project_name] = {
+                "status": "error",
+                "error": str(e),
+            }
+
+    return results
 
 
 async def _test_resource_discovery(
@@ -1268,28 +1398,77 @@ async def _test_resource_discovery(
 
 
 def _display_dry_run_results(
-    projects: list[dict], test_results: dict[str, dict]
+    config: Config,
+    projects: list[dict],
+    test_results: dict[str, dict],
+    log_probe_results: dict[str, dict[str, Any]],
 ) -> None:
     """Display dry run results in a formatted table.
 
     Args:
+        config: Migration configuration.
         projects: List of discovered projects
         test_results: Results from resource discovery tests
+        log_probe_results: Read-only logs time-window probe results.
     """
+    plan_table = Table(title="🧭 Migration Plan")
+    plan_table.add_column("Setting", style="cyan")
+    plan_table.add_column("Value", style="yellow")
+    plan_table.add_row("Resources", ", ".join(config.resources))
+    plan_table.add_row("Source Projects", ", ".join(config.project_names or ["all"]))
+    plan_table.add_row("Created After", config.migration.created_after or "none")
+    plan_table.add_row("Created Before", config.migration.created_before or "none")
+    if config.project_name_mapping:
+        map_summary = ", ".join(
+            f"{source} -> {dest}"
+            for source, dest in sorted(config.project_name_mapping.items())
+        )
+    else:
+        map_summary = "same-name fallback"
+    plan_table.add_row("Project Map", map_summary)
+
+    console.print("\n")
+    console.print(plan_table)
+
     # Projects table
     if projects:
-        projects_table = Table(title="📁 Discovered Projects")
-        projects_table.add_column("Project Name", style="cyan")
+        projects_table = Table(title="📁 Project Migration Plan")
+        projects_table.add_column("Source Project", style="cyan")
+        projects_table.add_column("Destination Project", style="yellow")
         projects_table.add_column("Source ID", style="blue")
         projects_table.add_column("Dest ID", style="green")
+        projects_table.add_column("Destination Status", style="magenta")
 
         for project in projects:
             projects_table.add_row(
-                project["name"], project["source_id"], project["dest_id"]
+                project["name"],
+                project.get("dest_name", project["name"]),
+                project["source_id"],
+                project["dest_id"] or "none",
+                project.get("dest_status", "exists" if project["dest_id"] else "would create"),
             )
 
         console.print("\n")
         console.print(projects_table)
+
+    if log_probe_results:
+        logs_table = Table(title="🧾 Logs Time-Window Probe")
+        logs_table.add_column("Project", style="cyan")
+        logs_table.add_column("Status", style="magenta")
+        logs_table.add_column("Result", style="yellow")
+
+        for project_name, result in log_probe_results.items():
+            if result["status"] == "success":
+                visible = bool(result.get("matching_spans_visible"))
+                status = "✅ Success"
+                detail = "matching spans visible" if visible else "no matching spans"
+            else:
+                status = "❌ Error"
+                detail = result.get("error", "Failed")
+            logs_table.add_row(project_name, status, detail)
+
+        console.print("\n")
+        console.print(logs_table)
 
     # Resource discovery results
     if test_results:

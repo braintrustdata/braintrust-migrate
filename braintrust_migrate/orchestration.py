@@ -259,7 +259,8 @@ class MigrationOrchestrator:
                         "Added project mapping",
                         source_project_id=project["source_id"],
                         dest_project_id=project["dest_id"],
-                        project_name=project["name"],
+                        source_project_name=project["name"],
+                        dest_project_name=project.get("dest_name"),
                     )
 
                 # STEP 1: Migrate organization-scoped resources once
@@ -358,6 +359,7 @@ class MigrationOrchestrator:
                         project_results = {
                             "project_id": project.get("dest_id"),
                             "project_name": project.get("name"),
+                            "dest_project_name": project.get("dest_name"),
                             "resources": {},
                             "total_resources": 0,
                             "migrated_resources": 0,
@@ -535,12 +537,19 @@ class MigrationOrchestrator:
         # Ensure projects exist in destination and get destination IDs
         project_mappings = []
         for project in projects:
-            dest_project_id = await self._ensure_project_exists(project, dest_client)
+            source_name = cast(str, project.get("name"))
+            dest_name = self.config.project_name_mapping.get(source_name, source_name)
+            dest_project_id = await self._ensure_project_exists(
+                project,
+                dest_client,
+                dest_project_name=dest_name,
+            )
             project_mappings.append(
                 {
                     "source_id": cast(str, project.get("id")),
                     "dest_id": dest_project_id,
-                    "name": cast(str, project.get("name")),
+                    "name": source_name,
+                    "dest_name": dest_name,
                     "description": project.get("description"),
                 }
             )
@@ -551,12 +560,15 @@ class MigrationOrchestrator:
         self,
         source_project: dict[str, Any],
         dest_client: BraintrustClient,
+        *,
+        dest_project_name: str,
     ) -> str:
         """Ensure a project exists in the destination organization.
 
         Args:
             source_project: Source project to replicate.
             dest_client: Destination client.
+            dest_project_name: Destination project name to look up or create.
 
         Returns:
             Destination project ID.
@@ -572,20 +584,21 @@ class MigrationOrchestrator:
 
             existing_project: dict[str, Any] | None = None
             for dest_project in dest_projects:
-                if dest_project.get("name") == source_project.get("name"):
+                if dest_project.get("name") == dest_project_name:
                     existing_project = dest_project
                     break
 
             if existing_project:
                 self._logger.debug(
                     "Project already exists in destination",
-                    project_name=source_project.get("name"),
+                    source_project_name=source_project.get("name"),
+                    dest_project_name=dest_project_name,
                     dest_id=existing_project.get("id"),
                 )
                 return cast(str, existing_project.get("id"))
 
             # Create project in destination
-            create_params = {"name": source_project.get("name")}
+            create_params = {"name": dest_project_name}
             description = cast(str | None, source_project.get("description"))
             if description:
                 create_params["description"] = description
@@ -605,7 +618,8 @@ class MigrationOrchestrator:
 
             self._logger.info(
                 "Created project in destination",
-                project_name=source_project.get("name"),
+                source_project_name=source_project.get("name"),
+                dest_project_name=dest_project_name,
                 source_id=source_project.get("id"),
                 dest_id=new_project_id,
             )
@@ -615,7 +629,8 @@ class MigrationOrchestrator:
         except Exception as e:
             self._logger.error(
                 "Failed to ensure project exists",
-                project_name=source_project.get("name"),
+                source_project_name=source_project.get("name"),
+                dest_project_name=dest_project_name,
                 error=str(e),
             )
             raise
@@ -647,6 +662,7 @@ class MigrationOrchestrator:
             Migration results for the project.
         """
         project_name = project["name"]
+        dest_project_name = project.get("dest_name", project_name)
         source_project_id = project["source_id"]
         dest_project_id = project["dest_id"]
 
@@ -654,6 +670,7 @@ class MigrationOrchestrator:
             f"Starting migration for project: {project_name}",
             source_project_id=source_project_id,
             dest_project_id=dest_project_id,
+            dest_project_name=dest_project_name,
         )
 
         # Create project-specific checkpoint directory
@@ -663,6 +680,7 @@ class MigrationOrchestrator:
         project_results = {
             "project_id": dest_project_id,  # Use destination project ID in results
             "project_name": project_name,
+            "dest_project_name": dest_project_name,
             "resources": {},
             "total_resources": 0,
             "migrated_resources": 0,
@@ -1019,6 +1037,7 @@ class MigrationOrchestrator:
         for project_name, project_data in results.get("projects", {}).items():
             project_summary = {
                 "project_name": project_name,
+                "dest_project_name": project_data.get("dest_project_name", project_name),
                 "project_id": project_data.get("project_id"),
                 "total_resources": project_data.get("total_resources", 0),
                 "migrated_resources": project_data.get("migrated_resources", 0),
@@ -1145,6 +1164,9 @@ class MigrationOrchestrator:
             f.write("## Project Breakdown\n")
             for project_name, project_data in detailed_report["projects"].items():
                 f.write(f"\n### {project_name}\n")
+                dest_project_name = project_data.get("dest_project_name", project_name)
+                if dest_project_name != project_name:
+                    f.write(f"Destination Project: {dest_project_name}\n")
                 f.write(f"Project ID: {project_data['project_id']}\n")
                 f.write(f"Resources: {project_data['total_resources']} total, ")
                 f.write(f"{project_data['migrated_resources']} migrated, ")

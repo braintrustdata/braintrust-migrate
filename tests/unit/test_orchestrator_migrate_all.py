@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from contextlib import asynccontextmanager
 from pathlib import Path
 from unittest.mock import AsyncMock, Mock
@@ -9,6 +10,9 @@ import pytest
 
 from braintrust_migrate.config import Config, MigrationConfig
 from braintrust_migrate.orchestration import MigrationOrchestrator
+
+EXPECTED_PROJECT_COUNT = 3
+EXPECTED_MAX_PROJECT_CONCURRENCY = 2
 
 
 def _make_config(tmp_path: Path, *, max_concurrent: int = 2) -> Config:
@@ -19,6 +23,145 @@ def _make_config(tmp_path: Path, *, max_concurrent: int = 2) -> Config:
         state_dir=tmp_path,
         resources=["all"],
     )
+
+
+async def _with_retry(_op_name, coro_func):
+    result = coro_func()
+    if hasattr(result, "__await__"):
+        return await result
+    return result
+
+
+@pytest.mark.asyncio
+async def test_discover_projects_preserves_same_name_behavior(tmp_path: Path) -> None:
+    """Unmapped projects should still resolve destination projects by source name."""
+    orchestrator = MigrationOrchestrator(_make_config(tmp_path))
+    source = Mock()
+    dest = Mock()
+    source.list_projects = AsyncMock(
+        return_value=[{"id": "src-1", "name": "Project A"}]
+    )
+    dest.list_projects = AsyncMock(return_value=[{"id": "dest-1", "name": "Project A"}])
+    dest.create_project = AsyncMock()
+    source.with_retry = _with_retry
+    dest.with_retry = _with_retry
+
+    projects = await orchestrator._discover_projects(source, dest)
+
+    assert projects == [
+        {
+            "source_id": "src-1",
+            "dest_id": "dest-1",
+            "name": "Project A",
+            "dest_name": "Project A",
+            "description": None,
+        }
+    ]
+    dest.create_project.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_discover_projects_uses_existing_mapped_destination(
+    tmp_path: Path,
+) -> None:
+    """Mapped projects should resolve an existing differently named destination."""
+    config = _make_config(tmp_path)
+    config.project_name_mapping = {"Project A": "Project Z"}
+    orchestrator = MigrationOrchestrator(config)
+    source = Mock()
+    dest = Mock()
+    source.list_projects = AsyncMock(
+        return_value=[{"id": "src-1", "name": "Project A"}]
+    )
+    dest.list_projects = AsyncMock(return_value=[{"id": "dest-1", "name": "Project Z"}])
+    dest.create_project = AsyncMock()
+    source.with_retry = _with_retry
+    dest.with_retry = _with_retry
+
+    projects = await orchestrator._discover_projects(source, dest)
+
+    assert projects == [
+        {
+            "source_id": "src-1",
+            "dest_id": "dest-1",
+            "name": "Project A",
+            "dest_name": "Project Z",
+            "description": None,
+        }
+    ]
+    dest.create_project.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_discover_projects_creates_missing_mapped_destination(
+    tmp_path: Path,
+) -> None:
+    """Mapped projects should create the mapped destination name when absent."""
+    config = _make_config(tmp_path)
+    config.project_name_mapping = {"Project A": "Project Z"}
+    orchestrator = MigrationOrchestrator(config)
+    source = Mock()
+    dest = Mock()
+    source.list_projects = AsyncMock(
+        return_value=[{"id": "src-1", "name": "Project A", "description": "desc"}]
+    )
+    dest.list_projects = AsyncMock(return_value=[])
+    dest.create_project = AsyncMock(return_value={"id": "dest-new"})
+    source.with_retry = _with_retry
+    dest.with_retry = _with_retry
+
+    projects = await orchestrator._discover_projects(source, dest)
+
+    assert projects == [
+        {
+            "source_id": "src-1",
+            "dest_id": "dest-new",
+            "name": "Project A",
+            "dest_name": "Project Z",
+            "description": "desc",
+        }
+    ]
+    dest.create_project.assert_awaited_once_with(name="Project Z", description="desc")
+
+
+def test_migration_report_includes_destination_project_name(tmp_path: Path) -> None:
+    """Reports should expose mapped destination project names."""
+    orchestrator = MigrationOrchestrator(_make_config(tmp_path))
+    checkpoint_dir = tmp_path / "run"
+    checkpoint_dir.mkdir()
+    results = {
+        "start_time": "2026-01-01T00:00:00",
+        "end_time": "2026-01-01T00:00:01",
+        "duration_seconds": 1.0,
+        "success": True,
+        "summary": {
+            "total_projects": 1,
+            "total_resources": 0,
+            "migrated_resources": 0,
+            "skipped_resources": 0,
+            "failed_resources": 0,
+        },
+        "organization_resources": {},
+        "projects": {
+            "Project A": {
+                "project_id": "dest-1",
+                "project_name": "Project A",
+                "dest_project_name": "Project Z",
+                "resources": {},
+                "total_resources": 0,
+                "migrated_resources": 0,
+                "skipped_resources": 0,
+                "failed_resources": 0,
+                "errors": [],
+            }
+        },
+    }
+
+    report_path = orchestrator._generate_migration_report(results, checkpoint_dir)
+    report = json.loads(report_path.read_text())
+
+    assert report["projects"]["Project A"]["project_name"] == "Project A"
+    assert report["projects"]["Project A"]["dest_project_name"] == "Project Z"
 
 
 @pytest.mark.asyncio
@@ -132,9 +275,9 @@ async def test_migrate_all_runs_projects_concurrently_and_emits_hooks(
     )
 
     assert discovered == [p["name"] for p in projects]
-    assert len(started) == 3
-    assert len(completed) == 3
-    assert max_seen == 2
-    assert results["summary"]["total_projects"] == 3
-    assert results["summary"]["migrated_resources"] == 3
+    assert len(started) == EXPECTED_PROJECT_COUNT
+    assert len(completed) == EXPECTED_PROJECT_COUNT
+    assert max_seen == EXPECTED_MAX_PROJECT_CONCURRENCY
+    assert results["summary"]["total_projects"] == EXPECTED_PROJECT_COUNT
+    assert results["summary"]["migrated_resources"] == EXPECTED_PROJECT_COUNT
     assert results["report_path"] == str(report_path)

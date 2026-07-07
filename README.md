@@ -122,7 +122,9 @@ All options can be set via environment variables or CLI flags. CLI flags take pr
 | Environment Variable | CLI Flag | Default | Description |
 |---------------------|----------|---------|-------------|
 | `MIGRATION_RESOURCES` | `--resources`, `-r` | `all` | Comma-separated list of resources to migrate. Options: `all`, `ai_secrets`, `roles`, `groups`, `datasets`, `project_tags`, `span_iframes`, `functions`, `prompts`, `project_scores`, `experiments`, `logs`, `views` |
-| `MIGRATION_PROJECTS` | `--projects`, `-p` | *(all projects)* | Comma-separated list of project names to migrate |
+| `MIGRATION_PROJECTS` | `--projects`, `-p` | *(all projects)* | Comma-separated list of source project names to migrate |
+| `MIGRATION_PROJECT_MAP` | `--project-map` | *(same-name fallback)* | JSON object mapping source project names to destination project names, e.g. `{"Source Project":"Destination Project"}` |
+| `MIGRATION_PROJECT_MAP_FILE` | `--project-map-file` | *(none)* | Path to a JSON file mapping source project names to destination project names. Mutually exclusive with `--project-map` / `MIGRATION_PROJECT_MAP` |
 | `MIGRATION_CREATED_AFTER` | `--created-after` | *(none)* | Only applies to resources that support created-time filtering. Currently this affects project logs event streaming and experiment listing. Migrates items with `created >=` this value (**inclusive**). Format: `YYYY-MM-DD` or ISO-8601 |
 | `MIGRATION_CREATED_BEFORE` | `--created-before` | *(none)* | Only applies to resources that support created-time filtering. Currently this affects project logs event streaming and experiment listing. Migrates items with `created <` this value (**exclusive**). Format: `YYYY-MM-DD` or ISO-8601 |
 
@@ -258,6 +260,14 @@ braintrust-migrate migrate --resources ai_secrets,datasets,prompts
 
 # Migrate specific projects only
 braintrust-migrate migrate --projects "Project A","Project B"
+
+# Migrate a source project into a differently named destination project
+braintrust-migrate migrate \
+  --resources logs \
+  --projects "<SOURCE_PROJECT_NAME>" \
+  --project-map '{"<SOURCE_PROJECT_NAME>":"<DEST_PROJECT_NAME>"}' \
+  --created-after "<START_TIME_ISO_8601>" \
+  --created-before "<END_TIME_ISO_8601>"
 ```
 
 **Resume Migration:**
@@ -293,6 +303,15 @@ braintrust-migrate migrate \
 **Dry Run (Validation Only):**
 ```bash
 braintrust-migrate migrate --dry-run
+
+# Preview project mapping, destination existence, selected resources, and logs window
+braintrust-migrate migrate \
+  --dry-run \
+  --resources logs \
+  --projects "<SOURCE_PROJECT_NAME>" \
+  --project-map '{"<SOURCE_PROJECT_NAME>":"<DEST_PROJECT_NAME>"}' \
+  --created-after "<START_TIME_ISO_8601>" \
+  --created-before "<END_TIME_ISO_8601>"
 ```
 
 **Time-based Filtering:**
