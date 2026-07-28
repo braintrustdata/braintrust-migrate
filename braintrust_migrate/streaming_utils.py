@@ -232,7 +232,7 @@ def coerce_int_config(
 # expose these as ClassVars for back-compat and tests.
 STREAMING_FLUSH_MAX_ROWS = 5_000
 STREAMING_FLUSH_MAX_BYTES = 25 * 1024 * 1024
-STREAMING_MAX_EVENT_BYTES = 18 * 1024 * 1024
+STREAMING_MAX_EVENT_BYTES = 3 * 1024 * 1024
 STREAMING_EVENT_FETCH_GROUP_SIZE = 25
 
 
@@ -253,9 +253,8 @@ class StreamingConfig:
     def resolve(cls, source_client: Any, dest_client: Any) -> StreamingConfig:
         """Resolve config from the dest client's migration_config (or source's).
 
-        ``events_flush_max_rows`` / ``events_fetch_group_size`` are the only
-        env-overridable knobs; the byte caps are fixed. Falls back to the module
-        defaults and is tolerant of lightweight test doubles / missing config.
+        Falls back to the module defaults and is tolerant of lightweight test
+        doubles / missing config.
         """
         cfg = getattr(dest_client, "migration_config", None) or getattr(
             source_client, "migration_config", None
@@ -265,7 +264,12 @@ class StreamingConfig:
                 cfg, "events_flush_max_rows", STREAMING_FLUSH_MAX_ROWS, minimum=1
             ),
             sdk_flush_max_bytes=STREAMING_FLUSH_MAX_BYTES,
-            max_event_bytes=STREAMING_MAX_EVENT_BYTES,
+            max_event_bytes=coerce_int_config(
+                cfg,
+                "events_max_event_bytes",
+                STREAMING_MAX_EVENT_BYTES,
+                minimum=1,
+            ),
             event_fetch_group_size=coerce_int_config(
                 cfg,
                 "events_fetch_group_size",

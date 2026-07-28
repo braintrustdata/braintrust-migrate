@@ -218,6 +218,16 @@ class TestConfigFromEnv:
         assert config.migration.events_flush_max_rows == TEST_EVENTS_FLUSH_MAX_ROWS
         assert config.migration.logs_insert_batch_size == TEST_EVENTS_FLUSH_MAX_ROWS
 
+    def test_events_max_event_bytes_from_env(self, monkeypatch):
+        """Test the shared oversized-event spill threshold env var."""
+        monkeypatch.setenv("BT_SOURCE_API_KEY", "source-test-key")
+        monkeypatch.setenv("BT_DEST_API_KEY", "dest-test-key")
+        monkeypatch.setenv("MIGRATION_EVENTS_MAX_EVENT_BYTES", "2097152")
+
+        config = Config.from_env()
+
+        assert config.migration.events_max_event_bytes == 2 * 1024 * 1024
+
     def test_project_map_file_from_env(self, monkeypatch, tmp_path: Path):
         """Test loading project name mapping from env-provided file."""
         path = tmp_path / "project-map.json"

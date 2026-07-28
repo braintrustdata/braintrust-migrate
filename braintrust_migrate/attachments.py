@@ -21,11 +21,9 @@ logger = structlog.get_logger(__name__)
 
 AttachmentRef = dict[str, Any]
 
-# Braintrust enforces a ~20MB per-span limit on individual logging upload
-# requests (this also bounds the logs3 overflow path). We spill below it with
-# headroom so the small inline attachment reference plus the rest of the row
-# stays comfortably under the cap.
-DEFAULT_MAX_EVENT_BYTES = 18 * 1024 * 1024
+# Keep individual events below intermediary gateway request limits, including
+# envelope overhead around the serialized event.
+DEFAULT_MAX_EVENT_BYTES = 3 * 1024 * 1024
 
 # Fields eligible to be spilled into a JSON attachment when a row is too large,
 # ordered loosely by how likely they are to hold the bulk of the payload. We
@@ -269,13 +267,13 @@ async def upload_bytes_as_attachment(
 class OversizeFieldSpiller:
     """Spill oversized event fields into JSON attachments on the destination.
 
-    Braintrust enforces a ~20MB per-span limit on individual logging upload
-    requests (this also bounds the logs3 overflow path). Some migrated spans
-    exceed it because a single field — typically ``input``/``output``/
-    ``metadata`` — holds a very large JSON blob. This rewrites such fields into
-    ``braintrust_attachment`` references uploaded to the destination object
-    store, shrinking the inline row below the cap while keeping the data
-    accessible via the attachment viewer in the UI.
+    Logging requests can pass through gateways with limits below Braintrust's
+    per-span limit. Some migrated spans exceed those request limits because a
+    single field — typically ``input``/``output``/``metadata`` — holds a very
+    large JSON blob. This rewrites such fields into ``braintrust_attachment``
+    references uploaded to the destination object store, shrinking the inline
+    row below the cap while keeping the data accessible via the attachment
+    viewer in the UI.
     """
 
     dest_client: BraintrustClient

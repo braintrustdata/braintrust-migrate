@@ -9,12 +9,14 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import httpx
 
 from braintrust_migrate.streaming_utils import (
     EventsStreamState,
+    StreamingConfig,
     approx_event_size_bytes,
     build_stream_progress,
     count_attachment_refs,
@@ -22,6 +24,17 @@ from braintrust_migrate.streaming_utils import (
     is_http_413,
     make_stream_progress_hooks,
 )
+
+
+def test_streaming_config_uses_configured_max_event_bytes():
+    source = SimpleNamespace(migration_config=None)
+    destination = SimpleNamespace(
+        migration_config=SimpleNamespace(events_max_event_bytes=2 * 1024 * 1024)
+    )
+
+    config = StreamingConfig.resolve(source, destination)
+
+    assert config.max_event_bytes == 2 * 1024 * 1024
 
 
 def _http_status_error(status: int) -> httpx.HTTPStatusError:
@@ -45,7 +58,12 @@ def test_approx_event_size_bytes():
 
 
 def test_count_attachment_refs_walks_nested_structures():
-    ref = {"type": "braintrust_attachment", "key": "k", "filename": "f", "content_type": "application/json"}
+    ref = {
+        "type": "braintrust_attachment",
+        "key": "k",
+        "filename": "f",
+        "content_type": "application/json",
+    }
     event = {
         "input": {"a": ref, "b": [ref, {"c": ref}]},  # 3 refs
         "metadata": {"type": "braintrust_attachment"},  # missing key -> not counted

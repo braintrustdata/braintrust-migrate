@@ -1,7 +1,7 @@
 """End-to-end-ish test of the logs migrator spilling an oversized event.
 
 Drives the real LogsMigrator.migrate_all loop over a page of 5 events, one of
-which is larger than the 20MB per-span logging limit. Source BTQL and the
+which is larger than the streaming event threshold. Source BTQL and the
 destination attachment-upload handshake are mocked; the SDK logs writer is
 stubbed to capture exactly the rows that would be sent to /logs3. We then assert
 the oversized row was spilled to an attachment and every row is under the cap.
@@ -19,9 +19,7 @@ import pytest
 import braintrust_migrate.resources.logs as logs_module
 from braintrust_migrate.resources.logs import LogsMigrator
 
-# The SaaS cap (LOGS_MAX_SPAN_BYTES) that produced the original 400 on
-# /logs3/overflow. Confirmed in braintrust api-ts (LOGS_MAX_SPAN_MB=20).
-LOGS_MAX_SPAN_BYTES = 20 * 1024 * 1024
+MAX_EVENT_BYTES = 3 * 1024 * 1024
 
 
 class _SourceStub:
@@ -108,8 +106,8 @@ class _FakeSDKProjectLogsWriter:
 
 @pytest.mark.asyncio
 async def test_oversized_event_among_normal_events_is_spilled(tmp_path: Path) -> None:
-    # One ~21MB event (over the 20MB cap) mixed with four small ones.
-    big_input = {"transcript": "x" * (21 * 1024 * 1024)}
+    # One ~4MB event (over the default spill threshold) mixed with four small ones.
+    big_input = {"transcript": "x" * (4 * 1024 * 1024)}
     events: list[dict[str, Any]] = [
         {
             "id": f"e{i}",
@@ -123,8 +121,7 @@ async def test_oversized_event_among_normal_events_is_spilled(tmp_path: Path) ->
     events[2]["input"] = big_input
     # Sanity: the oversized event really would exceed the span cap as-is.
     assert (
-        len(json.dumps(events[2], ensure_ascii=False).encode("utf-8"))
-        > LOGS_MAX_SPAN_BYTES
+        len(json.dumps(events[2], ensure_ascii=False).encode("utf-8")) > MAX_EVENT_BYTES
     )
 
     source = _SourceStub(btql_pages=[events])
@@ -168,10 +165,10 @@ async def test_oversized_event_among_normal_events_is_spilled(tmp_path: Path) ->
     assert spilled_input["filename"] == "input.json"
     assert spilled_input["content_type"] == "application/json"
 
-    # ...and every row actually handed to /logs3 is under the real 20MB cap.
+    # ...and every row handed to /logs3 is under the configured threshold.
     for row in dest.inserted_rows:
         row_bytes = len(json.dumps(row, ensure_ascii=False).encode("utf-8"))
-        assert row_bytes < LOGS_MAX_SPAN_BYTES
+        assert row_bytes < MAX_EVENT_BYTES
 
     # The four normal events are untouched (no needless spilling/uploads).
     for i in (0, 1, 3, 4):
