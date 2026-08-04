@@ -398,6 +398,7 @@ def build_btql_sorted_page_query(
     created_after: str | None = None,
     created_before: str | None = None,
     select: str = "*",
+    extra_conditions: list[str] | None = None,
 ) -> str:
     """Build a native BTQL query for stable sorted paging on `_pagination_key`.
 
@@ -412,6 +413,7 @@ def build_btql_sorted_page_query(
         created_after: Only include rows with created >= this value (inclusive)
         created_before: Only include rows with created < this value (exclusive)
         select: Fields to select (default "*")
+        extra_conditions: Additional pre-quoted BTQL filter conditions to AND in
 
     Returns:
         Native BTQL query string
@@ -421,6 +423,9 @@ def build_btql_sorted_page_query(
         conditions.append(f"created >= '{btql_quote(created_after)}'")
     if isinstance(created_before, str) and created_before:
         conditions.append(f"created < '{btql_quote(created_before)}'")
+    for condition in extra_conditions or []:
+        if isinstance(condition, str) and condition:
+            conditions.append(condition)
     if isinstance(last_pagination_key, str) and last_pagination_key:
         op = ">=" if last_pagination_key_inclusive else ">"
         conditions.append(f"_pagination_key {op} '{btql_quote(last_pagination_key)}'")

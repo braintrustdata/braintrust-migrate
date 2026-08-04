@@ -127,6 +127,37 @@ All options can be set via environment variables or CLI flags. CLI flags take pr
 | `MIGRATION_PROJECT_MAP_FILE` | `--project-map-file` | *(none)* | Path to a JSON file mapping source project names to destination project names. Mutually exclusive with `--project-map` / `MIGRATION_PROJECT_MAP` |
 | `MIGRATION_CREATED_AFTER` | `--created-after` | *(none)* | Only applies to resources that support created-time filtering. Currently this affects project logs event streaming and experiment listing. Migrates items with `created >=` this value (**inclusive**). Format: `YYYY-MM-DD` or ISO-8601 |
 | `MIGRATION_CREATED_BEFORE` | `--created-before` | *(none)* | Only applies to resources that support created-time filtering. Currently this affects project logs event streaming and experiment listing. Migrates items with `created <` this value (**exclusive**). Format: `YYYY-MM-DD` or ISO-8601 |
+| `MIGRATION_LOGS_INCLUDE_ROOT_SPAN_NAME` | `--logs-include-root-span-name` | *(none)* | Project logs only. Migrate **only** traces whose root span has this name (root span plus all descendants). Mutually exclusive with the exclude form |
+| `MIGRATION_LOGS_EXCLUDE_ROOT_SPAN_NAME` | `--logs-exclude-root-span-name` | *(none)* | Project logs only. Migrate every trace **except** those whose root span has this name. Exact complement of the include form |
+
+#### Splitting one source project across two destinations
+
+`--logs-include-root-span-name` and `--logs-exclude-root-span-name` are complements, so a paired run routes every span to exactly one destination:
+
+```bash
+# Run 1: everything except the "my-root-span-name" traces -> Dest A (all resources)
+braintrust-migrate migrate \
+  --projects "Src Project" \
+  --logs-exclude-root-span-name "my-root-span-name" \
+  --state-dir ./checkpoints/split-a
+
+# Run 2: only the "my-root-span-name" traces -> Dest B (logs only)
+braintrust-migrate migrate \
+  --projects "Src Project" \
+  --project-map '{"Src Project":"Dest B"}' \
+  --resources logs \
+  --logs-include-root-span-name "my-root-span-name" \
+  --state-dir ./checkpoints/split-b
+```
+
+How it works, and what it costs:
+
+- **Trace-level, not span-level.** Child spans do not carry their root's name, so a one-time BTQL prepass scans for spans matching the name and collects their `root_span_id`s. The streaming loop then routes each span by its `root_span_id`, keeping whole traces intact on both sides.
+- **The prepass is a full scan** of the source project's logs (selecting only two id fields) and is **not** constrained by `--created-after` / `--created-before` — a trace can straddle a time boundary, and a partial id set would misroute spans. It also runs during `--dry-run`, which reports matched span, root, and trace counts per project.
+- **The matched trace ids are held in memory** — roughly 150 bytes per trace. Fine into the low millions; beyond that the prepass should be moved to a disk-backed store.
+- **Both runs page through all spans**, since routing is applied client-side. Expect two full passes over the source project.
+- **If the name also appears mid-trace** (not just as a root), those full traces are routed too and the run logs a warning with the root-vs-non-root counts.
+- **Use a separate `--state-dir` per run.** The per-project checkpoint dir is keyed by *source* project name, so paired runs would otherwise collide — and the checkpoint refuses to resume if the filter value changed.
 
 #### Logging
 
@@ -171,6 +202,7 @@ These settings control BTQL-based streaming for high-volume resources.
 | `MIGRATION_EVENTS_USE_SEEN_DB` | — | `true` | Use SQLite store for deduplication |
 | `MIGRATION_LOGS_FETCH_LIMIT` | `--logs-fetch-limit` | *(inherits)* | Override fetch limit for logs only |
 | `MIGRATION_LOGS_INSERT_BATCH_SIZE` | `--logs-insert-batch-size` | `5000` | Deprecated alias for `MIGRATION_EVENTS_FLUSH_MAX_ROWS` |
+| `MIGRATION_LOGS_ROOT_SPAN_PREPASS_FETCH_LIMIT` | — | `1000` | BTQL page size for the root-span-name prepass. Rows carry only two id fields, so this can exceed the logs fetch limit |
 
 Resource-specific overrides follow the pattern `MIGRATION_{RESOURCE}_FETCH_LIMIT` and `MIGRATION_{RESOURCE}_USE_SEEN_DB` where `{RESOURCE}` is `LOGS`, `EXPERIMENT_EVENTS`, or `DATASET_EVENTS`. Logs additionally support `MIGRATION_LOGS_USE_VERSION_SNAPSHOT`. The older `MIGRATION_LOGS_INSERT_BATCH_SIZE` name is still accepted as a compatibility alias for the shared flush threshold.
 
