@@ -13,6 +13,7 @@ The format is based on Keep a Changelog and this project follows Semantic Versio
 ### Changed
 
 - Skip bundle-backed code functions during migration. A code function's compiled bundle is produced by the push/eval build pipeline and is not exposed by the API, so it can't be recreated in the destination — migrating it produces a broken function. These are now skipped (recorded with `skip_reason="code_bundle_not_migratable"` and logged with name/slug so they can be re-pushed manually). Inline code functions (which carry their source) and all other function types continue to migrate normally.
+- Split aggregate SDK logging submissions by prepared payload size so batches of individually small spans also remain below the configured request threshold.
 
 ### Fixed
 
