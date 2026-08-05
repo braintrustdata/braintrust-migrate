@@ -1556,7 +1556,7 @@ def _display_dry_run_results(
             filter_table.add_column("Project", style="cyan")
             filter_table.add_column("Mode", style="magenta")
             filter_table.add_column("Matched spans", justify="right", style="blue")
-            filter_table.add_column("Of which roots", justify="right", style="blue")
+            filter_table.add_column("Top-level", justify="right", style="blue")
             filter_table.add_column("Traces routed", justify="right", style="green")
 
             for project_name, result in log_probe_results.items():
@@ -1589,8 +1589,10 @@ def _display_dry_run_results(
             console.print("\n")
             console.print(filter_table)
             console.print(
-                "[dim]If 'Of which roots' is lower than 'Matched spans', the name also "
-                "appears mid-trace; those full traces are routed too.[/dim]"
+                "[dim]'Top-level' counts matches with no parent span. If it is lower "
+                "than 'Matched spans', the name also appears nested mid-trace, and "
+                "those full traces are routed too. One trace can hold several "
+                "top-level matches, so 'Top-level' may exceed 'Traces routed'.[/dim]"
             )
 
     # Resource discovery results

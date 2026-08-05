@@ -95,7 +95,9 @@ async def collect_root_span_ids_for_span_name(
 
     Returns:
         (root_span_ids, stats) where stats counts `matched_spans`, `root_spans`
-        (matches that are themselves trace roots), and `distinct_traces`.
+        (matches that are top-level, i.e. have no `span_parents`), and
+        `distinct_traces`. Note that one trace can contain several matching
+        top-level spans, so `root_spans` is often greater than `distinct_traces`.
     """
     # Imported here to avoid a circular import at module load time.
     from braintrust_migrate.streaming_utils import build_btql_sorted_page_query
@@ -116,7 +118,7 @@ async def collect_root_span_ids_for_span_name(
                 from_expr=from_expr,
                 limit=n,
                 last_pagination_key=_last_pk,
-                select="span_id, root_span_id, _pagination_key",
+                select="span_id, root_span_id, span_parents, _pagination_key",
                 extra_conditions=[name_condition],
             )
 
@@ -137,7 +139,12 @@ async def collect_root_span_ids_for_span_name(
             matched_spans += 1
             span_id = row.get("span_id")
             root_span_id = row.get("root_span_id")
-            if isinstance(span_id, str) and span_id and span_id == root_span_id:
+            # A span is top-level when it has no parent. Do NOT infer this from
+            # `span_id == root_span_id`: under OTel-style ingestion `root_span_id`
+            # holds the 16-byte trace id while `span_id` is an 8-byte span id, so
+            # they never match and every span would look non-root.
+            span_parents = row.get("span_parents")
+            if not (isinstance(span_parents, list) and span_parents):
                 root_spans += 1
             # Fall back to span_id so a root span with no explicit root_span_id
             # still routes its own trace.

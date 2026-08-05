@@ -422,19 +422,19 @@ class LogsMigrator(ResourceMigrator[dict[str, Any]]):
             on_page=_on_prepass_page,
         )
 
-        non_root_matches = stats["matched_spans"] - stats["root_spans"]
-        if non_root_matches:
-            # The filter is documented as trace-level: a non-root match still pulls
-            # its whole trace across, which keeps traces intact but is worth calling
-            # out because it widens the selection beyond root-named traces.
+        nested_matches = stats["matched_spans"] - stats["root_spans"]
+        if nested_matches:
+            # A nested match still pulls its whole trace across, which keeps traces
+            # intact but widens the selection beyond top-level-named traces. Worth
+            # surfacing so an unexpectedly broad split is caught before it lands.
             self._logger.warning(
-                "Some spans matching the root span name are not trace roots; "
+                "Some spans matching the name are nested rather than top-level; "
                 "their full traces will be routed by this filter",
                 source_project_id=source_project_id,
                 span_name=span_name,
                 matched_spans=stats["matched_spans"],
-                root_spans=stats["root_spans"],
-                non_root_matches=non_root_matches,
+                top_level_spans=stats["root_spans"],
+                nested_matches=nested_matches,
             )
 
         self._logger.info(

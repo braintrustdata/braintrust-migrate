@@ -27,11 +27,13 @@ def _span(
     root_span_id: str,
     name: str,
     pagination_key: str,
+    span_parents: list[str] | None = None,
 ) -> dict[str, Any]:
     return {
         "id": event_id,
         "span_id": span_id,
         "root_span_id": root_span_id,
+        "span_parents": span_parents,
         "span_attributes": {"name": name},
         "_pagination_key": pagination_key,
         "_xact_id": "1",
@@ -44,11 +46,47 @@ def _span(
 # root's name, so only the prepass can associate them.
 ALL_SPANS: list[dict[str, Any]] = [
     _span("e1", "s1", "s1", ROOT_NAME, "pk1"),
-    _span("e2", "s2", "s1", "llm.call", "pk2"),
-    _span("e3", "s3", "s1", "tool.lookup", "pk3"),
+    _span("e2", "s2", "s1", "llm.call", "pk2", span_parents=["s1"]),
+    _span("e3", "s3", "s1", "tool.lookup", "pk3", span_parents=["s1"]),
     _span("e4", "s4", "s4", "other-root", "pk4"),
-    _span("e5", "s5", "s4", "llm.call", "pk5"),
+    _span("e5", "s5", "s4", "llm.call", "pk5", span_parents=["s4"]),
     _span("e6", "s6", "s6", ROOT_NAME, "pk6"),
+]
+
+# OpenTelemetry-style ingestion: `root_span_id` is a 16-byte trace id and
+# `span_id` is an 8-byte span id, so they never match even for top-level spans.
+# Top-level-ness is carried solely by an empty `span_parents`. A single trace
+# can hold several top-level spans of the same name (one per chat turn).
+OTEL_TRACE = "b3b9b3f191d3d56ccc92b4023a321c02"
+OTEL_OTHER_TRACE = "a932535782befd370e423c2d7ef93af5"
+OTEL_SPANS: list[dict[str, Any]] = [
+    _span("o1", "0d2ddc17e6aadaff", OTEL_TRACE, ROOT_NAME, "qk1"),
+    _span(
+        "o2",
+        "f2d2575b5b3db975",
+        OTEL_TRACE,
+        "llm.stream",
+        "qk2",
+        span_parents=["0d2ddc17e6aadaff"],
+    ),
+    _span("o3", "9814bb66fbb565ff", OTEL_TRACE, ROOT_NAME, "qk3"),
+    _span(
+        "o4",
+        "b84e2143935e5bf3",
+        OTEL_TRACE,
+        "llm.stream",
+        "qk4",
+        span_parents=["9814bb66fbb565ff"],
+    ),
+    _span("o5", "94b27b8d9f5d224f", OTEL_OTHER_TRACE, "recommendation", "qk5"),
+    _span(
+        "o6",
+        "c87905908e5749fb",
+        OTEL_OTHER_TRACE,
+        "llm.stream",
+        "qk6",
+        span_parents=["94b27b8d9f5d224f"],
+    ),
 ]
 
 MATCHING_IDS = {"e1", "e2", "e3", "e6"}
@@ -116,6 +154,7 @@ class _StubClient:
                 {
                     "span_id": span["span_id"],
                     "root_span_id": span["root_span_id"],
+                    "span_parents": span.get("span_parents"),
                     "_pagination_key": span["_pagination_key"],
                 }
                 for page in self.pages
@@ -285,6 +324,79 @@ async def test_checkpoint_rejects_dropped_filter(tmp_path: Path) -> None:
         await _run_migration(
             tmp_path, pages=[list(ALL_SPANS)], config=MigrationConfig()
         )
+
+
+@pytest.mark.asyncio
+async def test_otel_shaped_ids_route_whole_traces(tmp_path: Path) -> None:
+    """Under OTel ingestion, span_id never equals root_span_id.
+
+    Routing must still group by root_span_id (the trace id), pulling both
+    top-level matches in the trace and their nested children.
+    """
+    inserted, _, _ = await _run_migration(
+        tmp_path / "inc",
+        pages=[list(OTEL_SPANS)],
+        config=MigrationConfig(logs_include_root_span_name=ROOT_NAME),
+    )
+    assert set(inserted) == {"o1", "o2", "o3", "o4"}
+
+    excluded, _, _ = await _run_migration(
+        tmp_path / "exc",
+        pages=[list(OTEL_SPANS)],
+        config=MigrationConfig(logs_exclude_root_span_name=ROOT_NAME),
+    )
+    assert set(excluded) == {"o5", "o6"}
+
+
+@pytest.mark.asyncio
+async def test_top_level_detection_uses_span_parents_not_id_equality(
+    tmp_path: Path,
+) -> None:
+    """Regression: counting roots via span_id == root_span_id reported 0 on
+    OTel data, which read as "the name is never top-level" when it always was."""
+    from braintrust_migrate.btql import collect_root_span_ids_for_span_name
+
+    client = _StubClient(
+        pages=[list(OTEL_SPANS)],
+        migration_config=MigrationConfig(),
+    )
+    _, stats = await collect_root_span_ids_for_span_name(
+        client=client,  # type: ignore[arg-type]
+        from_expr="project_logs('p') spans",
+        span_name=ROOT_NAME,
+        log_fields={},
+    )
+
+    # Both matches are top-level despite span_id != root_span_id, and both live
+    # in the same trace, so one trace is routed by two matches.
+    assert stats == {"matched_spans": 2, "root_spans": 2, "distinct_traces": 1}
+
+    # A nested match must NOT be counted as top-level, which is what makes the
+    # warning about over-broad selection meaningful.
+    nested = [
+        *OTEL_SPANS,
+        _span(
+            "o7",
+            "aaaa1111bbbb2222",
+            OTEL_OTHER_TRACE,
+            ROOT_NAME,
+            "qk7",
+            span_parents=["94b27b8d9f5d224f"],
+        ),
+    ]
+    _, nested_stats = await collect_root_span_ids_for_span_name(
+        client=_StubClient(  # type: ignore[arg-type]
+            pages=[nested], migration_config=MigrationConfig()
+        ),
+        from_expr="project_logs('p') spans",
+        span_name=ROOT_NAME,
+        log_fields={},
+    )
+    assert nested_stats == {
+        "matched_spans": 3,
+        "root_spans": 2,
+        "distinct_traces": 2,
+    }
 
 
 def test_trace_id_falls_back_when_root_span_id_missing() -> None:
