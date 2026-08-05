@@ -214,15 +214,6 @@ class MigrationConfig(BaseModel):
             "one flush is committed."
         ),
     )
-    events_max_event_bytes: int = Field(
-        default=3 * 1024 * 1024,
-        ge=1,
-        le=500 * 1024 * 1024,
-        description=(
-            "Maximum serialized size of a streaming event before large fields "
-            "are spilled to Braintrust-managed attachments."
-        ),
-    )
     logs_insert_batch_size: int = Field(
         default=5_000,
         ge=1,
@@ -458,7 +449,6 @@ class Config(BaseModel):
         #   MIGRATION_EVENTS_USE_SEEN_DB=true
         #   MIGRATION_EVENTS_FETCH_GROUP_SIZE=25
         #   MIGRATION_EVENTS_FLUSH_MAX_ROWS=5000
-        #   MIGRATION_EVENTS_MAX_EVENT_BYTES=3145728
         #
         # Resource-specific overrides (optional):
         #   MIGRATION_LOGS_FETCH_LIMIT, MIGRATION_EXPERIMENT_EVENTS_FETCH_LIMIT, etc.
@@ -476,9 +466,6 @@ class Config(BaseModel):
         events_flush_max_rows = int(
             os.getenv("MIGRATION_EVENTS_FLUSH_MAX_ROWS")
             or os.getenv("MIGRATION_LOGS_INSERT_BATCH_SIZE", "5000")
-        )
-        events_max_event_bytes = int(
-            os.getenv("MIGRATION_EVENTS_MAX_EVENT_BYTES", str(3 * 1024 * 1024))
         )
 
         # Logs
@@ -611,7 +598,6 @@ class Config(BaseModel):
                 insert_request_headroom_ratio=insert_request_headroom_ratio,
                 logs_fetch_limit=logs_fetch_limit,
                 events_flush_max_rows=events_flush_max_rows,
-                events_max_event_bytes=events_max_event_bytes,
                 logs_insert_batch_size=logs_insert_batch_size,
                 logs_use_version_snapshot=logs_use_version_snapshot,
                 logs_use_seen_db=logs_use_seen_db,

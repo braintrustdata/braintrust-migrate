@@ -6,7 +6,9 @@ import asyncio
 from collections.abc import Mapping, Sequence
 from typing import Any
 
+from braintrust_migrate.batching import iter_ordered_batches_by_count_and_bytes
 from braintrust_migrate.client import BraintrustClient
+from braintrust_migrate.streaming_utils import StreamingConfig
 
 PROJECT_LOGS_LOG_ID = "g"
 
@@ -49,21 +51,41 @@ class SDKRowWriter:
             **self._object_id_fields,
         }
 
+    def _max_request_bytes(self) -> int:
+        stream_config = StreamingConfig.resolve(self._dest_client, self._dest_client)
+        migration_config = getattr(self._dest_client, "migration_config", None)
+        insert_max_request_bytes = int(
+            getattr(migration_config, "insert_max_request_bytes", 6 * 1024 * 1024)
+        )
+        insert_request_headroom_ratio = float(
+            getattr(migration_config, "insert_request_headroom_ratio", 0.75)
+        )
+        return min(
+            stream_config.max_event_bytes,
+            int(insert_max_request_bytes * insert_request_headroom_ratio),
+        )
+
     def write_rows_sync(self, rows: Sequence[dict[str, Any]]) -> None:
         self._ensure_logger()
         assert self._background_logger is not None
         assert self._lazy_value_cls is not None
 
-        events = [
-            self._lazy_value_cls(
-                lambda prepared=self._prepare_row(row): prepared,
-                use_mutex=False,
-            )
-            for row in rows
-        ]
-        if events:
+        prepared_rows = [self._prepare_row(row) for row in rows]
+        for batch in iter_ordered_batches_by_count_and_bytes(
+            prepared_rows,
+            max_items=max(1, len(prepared_rows)),
+            max_bytes=self._max_request_bytes(),
+            exact_wrapper_bytes=True,
+        ):
+            events = [
+                self._lazy_value_cls(
+                    lambda prepared=prepared: prepared,
+                    use_mutex=False,
+                )
+                for prepared in batch
+            ]
             self._background_logger.log(*events)
-        self._background_logger.flush()
+            self._background_logger.flush()
 
     async def write_rows(self, rows: Sequence[dict[str, Any]]) -> None:
         await asyncio.to_thread(self.write_rows_sync, rows)

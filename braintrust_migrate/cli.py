@@ -414,7 +414,6 @@ async def _migrate_main(
             dry_run=dry_run,
             logs_fetch_limit=config.migration.logs_fetch_limit,
             events_flush_max_rows=config.migration.events_flush_max_rows,
-            events_max_event_bytes=config.migration.events_max_event_bytes,
             logs_insert_batch_size=config.migration.logs_insert_batch_size,
             created_after=config.migration.created_after,
             created_before=config.migration.created_before,
