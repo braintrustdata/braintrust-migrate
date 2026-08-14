@@ -728,6 +728,13 @@ async def _run_migration_with_progress(
             description=f"📁 Running project {index} of {total}: {project['name']}",
         )
         console.print(f"\n[bold blue]📁 {project['name']}[/bold blue] ({index}/{total})")
+        if project.get("dest_existed"):
+            dest_name = project.get("dest_name", project["name"])
+            console.print(
+                f"[yellow]    ⚠️  Merging into existing destination project "
+                f"'{dest_name}' (nothing is deleted). Pass --project-map to "
+                f"target a new project instead.[/yellow]"
+            )
 
     def _progress_factory_factory(project: dict[str, Any]):
         project_name = project["name"]
@@ -1450,6 +1457,17 @@ def _display_dry_run_results(
 
         console.print("\n")
         console.print(projects_table)
+
+        if any(
+            project.get("dest_status", "exists" if project["dest_id"] else "would create")
+            == "exists"
+            for project in projects
+        ):
+            console.print(
+                "[yellow]Note:[/yellow] [dim]'exists' means resources will be "
+                "merged into that destination project (nothing is deleted). "
+                "Pass --project-map to create a separate project instead.[/dim]"
+            )
 
     if log_probe_results:
         logs_table = Table(title="🧾 Logs Time-Window Probe")

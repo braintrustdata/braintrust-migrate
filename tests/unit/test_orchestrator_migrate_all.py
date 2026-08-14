@@ -55,6 +55,7 @@ async def test_discover_projects_preserves_same_name_behavior(tmp_path: Path) ->
             "name": "Project A",
             "dest_name": "Project A",
             "description": None,
+            "dest_existed": True,
         }
     ]
     dest.create_project.assert_not_called()
@@ -87,6 +88,7 @@ async def test_discover_projects_uses_existing_mapped_destination(
             "name": "Project A",
             "dest_name": "Project Z",
             "description": None,
+            "dest_existed": True,
         }
     ]
     dest.create_project.assert_not_called()
@@ -119,6 +121,7 @@ async def test_discover_projects_creates_missing_mapped_destination(
             "name": "Project A",
             "dest_name": "Project Z",
             "description": "desc",
+            "dest_existed": False,
         }
     ]
     dest.create_project.assert_awaited_once_with(name="Project Z", description="desc")
