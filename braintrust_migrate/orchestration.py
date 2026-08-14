@@ -539,7 +539,7 @@ class MigrationOrchestrator:
         for project in projects:
             source_name = cast(str, project.get("name"))
             dest_name = self.config.project_name_mapping.get(source_name, source_name)
-            dest_project_id = await self._ensure_project_exists(
+            dest_project_id, dest_existed = await self._ensure_project_exists(
                 project,
                 dest_client,
                 dest_project_name=dest_name,
@@ -551,6 +551,7 @@ class MigrationOrchestrator:
                     "name": source_name,
                     "dest_name": dest_name,
                     "description": project.get("description"),
+                    "dest_existed": dest_existed,
                 }
             )
 
@@ -562,7 +563,7 @@ class MigrationOrchestrator:
         dest_client: BraintrustClient,
         *,
         dest_project_name: str,
-    ) -> str:
+    ) -> tuple[str, bool]:
         """Ensure a project exists in the destination organization.
 
         Args:
@@ -571,7 +572,10 @@ class MigrationOrchestrator:
             dest_project_name: Destination project name to look up or create.
 
         Returns:
-            Destination project ID.
+            Tuple of (destination project ID, whether a same-named destination
+            project already existed and is being reused). When it already
+            existed, resources are merged into it rather than creating a new
+            project.
         """
         try:
             # Check if project already exists
@@ -589,13 +593,15 @@ class MigrationOrchestrator:
                     break
 
             if existing_project:
-                self._logger.debug(
-                    "Project already exists in destination",
+                self._logger.warning(
+                    "Reusing existing destination project - resources will be "
+                    "merged into it (nothing is deleted or replaced). Pass "
+                    "--project-map to migrate into a new, separate project.",
                     source_project_name=source_project.get("name"),
                     dest_project_name=dest_project_name,
                     dest_id=existing_project.get("id"),
                 )
-                return cast(str, existing_project.get("id"))
+                return cast(str, existing_project.get("id")), True
 
             # Create project in destination
             create_params = {"name": dest_project_name}
@@ -624,7 +630,7 @@ class MigrationOrchestrator:
                 dest_id=new_project_id,
             )
 
-            return new_project_id
+            return new_project_id, False
 
         except Exception as e:
             self._logger.error(

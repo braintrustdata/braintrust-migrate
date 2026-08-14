@@ -270,6 +270,14 @@ braintrust-migrate migrate \
   --created-before "<END_TIME_ISO_8601>"
 ```
 
+> **Destination projects are resolved by name.** If the destination organization already
+> contains a project with the target name, the migration writes **into** that existing
+> project (additively — nothing is deleted or replaced); it does not create a duplicate.
+> This is what makes re-runs idempotent. The run warns when this happens (both live and in
+> `--dry-run`, where the project shows status `exists`). To migrate into a new, separate
+> project instead, map the name with `--project-map`, e.g.
+> `--project-map '{"My Project":"My Project (migrated)"}'`.
+
 **Resume Migration:**
 ```bash
 # Resume from last checkpoint (automatic)
