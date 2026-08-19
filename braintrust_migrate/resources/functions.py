@@ -49,7 +49,7 @@ class FunctionMigrator(ResourceMigrator[dict]):
             source_id = self.get_resource_id(resource)
             name = resource.get("name")
             slug = resource.get("slug")
-            self._logger.warning(
+            self._logger.info(
                 "⏭️  Skipping bundled code function (its code bundle cannot be "
                 "migrated; re-push it to the destination)",
                 source_id=source_id,

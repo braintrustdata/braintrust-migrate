@@ -22,6 +22,77 @@ T = TypeVar("T")  # Type variable for resource data
 DEFAULT_LIST_PAGE_SIZE: int = 1000
 
 
+async def list_resources(
+    client: BraintrustClient,
+    resource_type: str,
+    project_id: str | None = None,
+    *,
+    additional_params: dict | None = None,
+    client_side_filter_field: str | None = None,
+    log: Any = logger,
+) -> list[dict[str, Any]]:
+    """List all resources of a type from a client via the raw paginated API.
+
+    Standalone so both ``ResourceMigrator`` and post-migration validation can
+    share one lister (``GET /v1/<type>`` with `starting_after` pagination).
+    """
+    try:
+        params: dict[str, Any] = {}
+        if project_id and not client_side_filter_field:
+            params["project_id"] = project_id
+        if additional_params:
+            params.update(additional_params)
+
+        api_path = resource_type.rstrip("s")
+        all_resources: list[dict[str, Any]] = []
+        starting_after = None
+        page_num = 0
+
+        while True:
+            page_num += 1
+            page_params = {**params, "limit": DEFAULT_LIST_PAGE_SIZE}
+            if starting_after is not None:
+                page_params["starting_after"] = starting_after
+
+            response = await client.with_retry(
+                f"list_{resource_type}",
+                lambda p=page_params: client.raw_request(
+                    "GET", f"/v1/{api_path}", params=p
+                ),
+            )
+
+            page_resources = response.get("objects", [])
+            if page_resources:
+                all_resources.extend(page_resources)
+                log.info(
+                    f"Fetched {resource_type} page",
+                    page_num=page_num,
+                    page_size=len(page_resources),
+                    total_fetched=len(all_resources),
+                    project_id=project_id,
+                )
+                starting_after = page_resources[-1].get("id")
+                if len(page_resources) < page_params["limit"]:
+                    break
+            else:
+                break
+
+        if project_id and client_side_filter_field:
+            all_resources = [
+                r
+                for r in all_resources
+                if r.get(client_side_filter_field) == project_id
+            ]
+
+        return all_resources
+
+    except Exception as e:
+        log.error(
+            f"Failed to list {resource_type}", error=str(e), project_id=project_id
+        )
+        raise
+
+
 @dataclass(slots=True)
 class MigrationResult:
     """Result of a resource migration operation."""
@@ -339,83 +410,14 @@ class ResourceMigrator(ABC, Generic[T]):
         Returns:
             List of resources as dicts from raw API
         """
-        try:
-            # Build base parameters
-            params = {}
-            if project_id and not client_side_filter_field:
-                # Use server-side filtering if no client-side field specified
-                params["project_id"] = project_id
-            if additional_params:
-                params.update(additional_params)
-
-            # Convert resource_type to API path (e.g., 'datasets' -> 'dataset')
-            api_path = resource_type.rstrip("s")
-
-            # Paginate through all results
-            all_resources = []
-            starting_after = None
-            page_num = 0
-
-            while True:
-                page_num += 1
-                page_params = {**params}
-
-                # Set a large limit to minimize number of pages
-                page_params["limit"] = DEFAULT_LIST_PAGE_SIZE
-
-                if starting_after is not None:
-                    page_params["starting_after"] = starting_after
-
-                # Make the API call using raw_request
-                # Use a default parameter to capture page_params at definition time
-                response = await client.with_retry(
-                    f"list_{resource_type}",
-                    lambda p=page_params: client.raw_request(
-                        "GET",
-                        f"/v1/{api_path}",
-                        params=p,
-                    ),
-                )
-
-                # Extract objects from response
-                page_resources = response.get("objects", [])
-
-                if page_resources:
-                    all_resources.extend(page_resources)
-                    self._logger.info(
-                        f"Fetched {resource_type} page",
-                        page_num=page_num,
-                        page_size=len(page_resources),
-                        total_fetched=len(all_resources),
-                        project_id=project_id,
-                    )
-
-                    # Get the last item's ID for pagination
-                    last_item = page_resources[-1]
-                    starting_after = last_item.get("id")
-
-                    # If we got fewer items than the limit, we're done
-                    if len(page_resources) < page_params["limit"]:
-                        break
-                else:
-                    # No more results
-                    break
-
-            # Apply client-side filtering if needed (for dicts)
-            if project_id and client_side_filter_field:
-                all_resources = [
-                    resource
-                    for resource in all_resources
-                    if resource.get(client_side_filter_field) == project_id
-                ]
-
-            return all_resources
-
-        except Exception as e:
-            self._logger.error(
-                f"Failed to list {resource_type}", error=str(e), project_id=project_id
-            )
-            raise
+        return await list_resources(
+            client,
+            resource_type,
+            project_id,
+            additional_params=additional_params,
+            client_side_filter_field=client_side_filter_field,
+            log=self._logger,
+        )
 
     async def get_dependencies(self, resource: T) -> list[str]:
         """Get list of resource IDs that this resource depends on.
