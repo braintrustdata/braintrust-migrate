@@ -252,6 +252,34 @@ class MigrationConfig(BaseModel):
         ),
     )
 
+    logs_include_root_span_name: str | None = Field(
+        default=None,
+        description=(
+            "Optional trace-level routing filter. When set, project logs migration "
+            "only migrates traces whose root span is named this value (the root span "
+            "and all of its descendants). Mutually exclusive with "
+            "logs_exclude_root_span_name."
+        ),
+    )
+    logs_exclude_root_span_name: str | None = Field(
+        default=None,
+        description=(
+            "Optional trace-level routing filter. When set, project logs migration "
+            "migrates everything except traces whose root span is named this value. "
+            "The exact complement of logs_include_root_span_name, so the two can be "
+            "used in paired runs to split one source project across two destinations."
+        ),
+    )
+    logs_root_span_prepass_fetch_limit: int = Field(
+        default=1000,
+        ge=1,
+        le=10_000,
+        description=(
+            "Fetch page size for the BTQL prepass that collects matching root span ids. "
+            "Rows are tiny (two id fields), so this can be larger than logs_fetch_limit."
+        ),
+    )
+
     # Experiment event migration tuning (experiments can be logs-scale)
     experiment_events_fetch_limit: int = Field(
         default=1000,
@@ -324,6 +352,17 @@ class MigrationConfig(BaseModel):
         if v is None:
             return None
         return canonicalize_created_before(v)
+
+    @model_validator(mode="after")
+    def validate_root_span_name_filters(self) -> "MigrationConfig":
+        """Ensure the trace routing filters are used one at a time."""
+        if self.logs_include_root_span_name and self.logs_exclude_root_span_name:
+            raise ValueError(
+                "Set only one of logs_include_root_span_name or "
+                "logs_exclude_root_span_name (they are complements; use two runs "
+                "to split a source project across two destinations)"
+            )
+        return self
 
     @model_validator(mode="after")
     def validate_acl_user_mapping_flags(self) -> "MigrationConfig":
@@ -480,6 +519,19 @@ class Config(BaseModel):
             "MIGRATION_LOGS_USE_SEEN_DB", "MIGRATION_EVENTS_USE_SEEN_DB", "true"
         )
 
+        # Optional trace-level routing filter (logs only)
+        logs_include_root_span_name = os.getenv(
+            "MIGRATION_LOGS_INCLUDE_ROOT_SPAN_NAME"
+        )
+        logs_exclude_root_span_name = os.getenv(
+            "MIGRATION_LOGS_EXCLUDE_ROOT_SPAN_NAME"
+        )
+        logs_root_span_prepass_fetch_limit = _get_int(
+            "MIGRATION_LOGS_ROOT_SPAN_PREPASS_FETCH_LIMIT",
+            "MIGRATION_EVENTS_FETCH_LIMIT",
+            "1000",
+        )
+
         # Optional time filter (applies to logs and experiments)
         created_after = os.getenv("MIGRATION_CREATED_AFTER")
         created_before = os.getenv("MIGRATION_CREATED_BEFORE")
@@ -601,6 +653,9 @@ class Config(BaseModel):
                 logs_insert_batch_size=logs_insert_batch_size,
                 logs_use_version_snapshot=logs_use_version_snapshot,
                 logs_use_seen_db=logs_use_seen_db,
+                logs_include_root_span_name=logs_include_root_span_name,
+                logs_exclude_root_span_name=logs_exclude_root_span_name,
+                logs_root_span_prepass_fetch_limit=logs_root_span_prepass_fetch_limit,
                 created_after=created_after,
                 created_before=created_before,
                 experiment_events_fetch_limit=experiment_events_fetch_limit,

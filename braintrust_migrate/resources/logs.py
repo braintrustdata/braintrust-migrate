@@ -23,6 +23,7 @@ from braintrust_migrate.batching import (
 )
 from braintrust_migrate.btql import (
     btql_quote,
+    collect_root_span_ids_for_span_name,
     fetch_btql_sorted_page_with_retries,
     find_first_pagination_key_for_created_after,
 )
@@ -62,6 +63,9 @@ class _LogsStreamingState:
     btql_last_created: str | None = None
     created_after: str | None = None
     created_before: str | None = None
+    include_root_span_name: str | None = None
+    exclude_root_span_name: str | None = None
+    skipped_filtered: int = 0
 
     @classmethod
     def from_path(cls, path: Path) -> _LogsStreamingState:
@@ -86,6 +90,9 @@ class _LogsStreamingState:
             btql_last_created=data.get("btql_last_created"),
             created_after=data.get("created_after"),
             created_before=data.get("created_before"),
+            include_root_span_name=data.get("include_root_span_name"),
+            exclude_root_span_name=data.get("exclude_root_span_name"),
+            skipped_filtered=int(data.get("skipped_filtered", 0)),
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -104,6 +111,9 @@ class _LogsStreamingState:
             "btql_last_created": self.btql_last_created,
             "created_after": self.created_after,
             "created_before": self.created_before,
+            "include_root_span_name": self.include_root_span_name,
+            "exclude_root_span_name": self.exclude_root_span_name,
+            "skipped_filtered": self.skipped_filtered,
         }
 
 
@@ -346,6 +356,97 @@ class LogsMigrator(ResourceMigrator[dict[str, Any]]):
                 ids.append(event_id)
         return ids
 
+    @staticmethod
+    def _trace_id_for_event(event: dict[str, Any]) -> str | None:
+        """Identify which trace a span belongs to, tolerating missing root ids."""
+        root_span_id = event.get("root_span_id")
+        if isinstance(root_span_id, str) and root_span_id:
+            return root_span_id
+        span_id = event.get("span_id")
+        if isinstance(span_id, str) and span_id:
+            return span_id
+        event_id = event.get("id")
+        return event_id if isinstance(event_id, str) and event_id else None
+
+    async def _collect_matched_trace_ids(
+        self,
+        *,
+        source_project_id: str,
+        dest_project_id: str,
+        span_name: str,
+        include_mode: bool,
+    ) -> set[str]:
+        """Run the prepass that resolves a root span name to a set of trace ids.
+
+        Held in memory: one id per matching trace. Callers are expected to keep
+        this well under a few million traces per project.
+        """
+        prepass_limit = int(
+            getattr(
+                getattr(self.source_client, "migration_config", None),
+                "logs_root_span_prepass_fetch_limit",
+                1000,
+            )
+        )
+        self._logger.info(
+            "Starting root span name prepass",
+            source_project_id=source_project_id,
+            dest_project_id=dest_project_id,
+            span_name=span_name,
+            mode="include" if include_mode else "exclude",
+            prepass_fetch_limit=prepass_limit,
+        )
+
+        progress_hook = self._progress_hook
+
+        def _on_prepass_page(info: dict[str, Any]) -> None:
+            if progress_hook is None:
+                return
+            progress_hook(
+                {
+                    "resource": "logs",
+                    "phase": "prepass",
+                    "source_project_id": source_project_id,
+                    "dest_project_id": dest_project_id,
+                    "span_name": span_name,
+                    **info,
+                }
+            )
+
+        matched_trace_ids, stats = await collect_root_span_ids_for_span_name(
+            client=self.source_client,
+            from_expr=f"project_logs('{btql_quote(source_project_id)}') spans",
+            span_name=span_name,
+            page_limit=prepass_limit,
+            log_fields={"source_project_id": source_project_id},
+            on_page=_on_prepass_page,
+        )
+
+        nested_matches = stats["matched_spans"] - stats["root_spans"]
+        if nested_matches:
+            # A nested match still pulls its whole trace across, which keeps traces
+            # intact but widens the selection beyond top-level-named traces. Worth
+            # surfacing so an unexpectedly broad split is caught before it lands.
+            self._logger.warning(
+                "Some spans matching the name are nested rather than top-level; "
+                "their full traces will be routed by this filter",
+                source_project_id=source_project_id,
+                span_name=span_name,
+                matched_spans=stats["matched_spans"],
+                top_level_spans=stats["root_spans"],
+                nested_matches=nested_matches,
+            )
+
+        self._logger.info(
+            "Completed root span name prepass",
+            source_project_id=source_project_id,
+            dest_project_id=dest_project_id,
+            span_name=span_name,
+            mode="include" if include_mode else "exclude",
+            **stats,
+        )
+        return matched_trace_ids
+
     async def migrate_all(
         self, project_id: str | None = None, max_concurrent: int | None = None
     ) -> dict[str, Any]:
@@ -456,6 +557,57 @@ class LogsMigrator(ResourceMigrator[dict[str, Any]]):
                         f"run={created_before_cfg!r}. Re-run with the checkpoint value or start a fresh checkpoint."
                     )
 
+            # Validate and persist the trace-level routing filter, then run its prepass.
+            include_name_cfg = getattr(mig_cfg, "logs_include_root_span_name", None)
+            exclude_name_cfg = getattr(mig_cfg, "logs_exclude_root_span_name", None)
+            for label, cfg_value, state_attr in (
+                ("include_root_span_name", include_name_cfg, "include_root_span_name"),
+                ("exclude_root_span_name", exclude_name_cfg, "exclude_root_span_name"),
+            ):
+                state_value = getattr(self._stream_state, state_attr)
+                if state_value is None and cfg_value is None:
+                    continue
+                if state_value is None:
+                    setattr(self._stream_state, state_attr, cfg_value)
+                    self._save_stream_state()
+                elif cfg_value is None:
+                    raise ValueError(
+                        f"Checkpoint includes a {label} filter but this run does not. "
+                        f"Re-run with the same --logs-{label.replace('_', '-')} value "
+                        "or start a fresh checkpoint."
+                    )
+                elif state_value != cfg_value:
+                    raise ValueError(
+                        f"{label} mismatch vs checkpoint: checkpoint={state_value!r} "
+                        f"run={cfg_value!r}. Re-run with the checkpoint value or start "
+                        "a fresh checkpoint."
+                    )
+
+            routing_name = (
+                self._stream_state.include_root_span_name
+                or self._stream_state.exclude_root_span_name
+            )
+            include_mode = self._stream_state.include_root_span_name is not None
+            matched_trace_ids: set[str] | None = None
+            if routing_name:
+                matched_trace_ids = await self._collect_matched_trace_ids(
+                    source_project_id=source_project_id,
+                    dest_project_id=dest_project_id,
+                    span_name=routing_name,
+                    include_mode=include_mode,
+                )
+                # Include mode with no matching traces has nothing to migrate at all.
+                # Exclude mode still migrates everything, so it must not short-circuit.
+                if include_mode and not matched_trace_ids:
+                    self._logger.warning(
+                        "No traces matched the root span name filter; nothing to migrate",
+                        source_project_id=source_project_id,
+                        dest_project_id=dest_project_id,
+                        include_root_span_name=routing_name,
+                    )
+                    self._save_stream_state()
+                    return self.get_partial_results()
+
             # If this is the first BTQL page and created_after is set, preflight the first
             # matching pagination key so we can start near the boundary.
             if (
@@ -520,6 +672,7 @@ class LogsMigrator(ResourceMigrator[dict[str, Any]]):
             pending_inserted_events = 0
             pending_inserted_bytes = 0
             pending_skipped_seen = 0
+            pending_skipped_filtered = 0
             pending_attachments_copied = 0
             pending_spilled_fields = 0
             pending_last_pk: str | None = None
@@ -729,6 +882,7 @@ class LogsMigrator(ResourceMigrator[dict[str, Any]]):
                 nonlocal pending_inserted_events
                 nonlocal pending_inserted_bytes
                 nonlocal pending_skipped_seen
+                nonlocal pending_skipped_filtered
                 nonlocal pending_attachments_copied
                 nonlocal pending_spilled_fields
                 nonlocal pending_last_pk
@@ -738,6 +892,7 @@ class LogsMigrator(ResourceMigrator[dict[str, Any]]):
                     pending_fetched_events == 0
                     and pending_inserted_events == 0
                     and pending_skipped_seen == 0
+                    and pending_skipped_filtered == 0
                     and pending_attachments_copied == 0
                     and pending_spilled_fields == 0
                     and pending_last_pk is None
@@ -778,6 +933,7 @@ class LogsMigrator(ResourceMigrator[dict[str, Any]]):
 
                 self._stream_state.fetched_events += pending_fetched_events
                 self._stream_state.skipped_seen += pending_skipped_seen
+                self._stream_state.skipped_filtered += pending_skipped_filtered
                 self._stream_state.attachments_copied += pending_attachments_copied
                 self._stream_state.spilled_fields += pending_spilled_fields
                 self._stream_state.btql_last_created = pending_last_created
@@ -792,6 +948,7 @@ class LogsMigrator(ResourceMigrator[dict[str, Any]]):
                 pending_inserted_events = 0
                 pending_inserted_bytes = 0
                 pending_skipped_seen = 0
+                pending_skipped_filtered = 0
                 pending_attachments_copied = 0
                 pending_spilled_fields = 0
                 pending_last_pk = None
@@ -844,9 +1001,22 @@ class LogsMigrator(ResourceMigrator[dict[str, Any]]):
 
                 pending_fetched_events += len(page_events)
 
+                # Trace-level routing. `page_events` stays intact below so the
+                # pagination key and last-created bookkeeping still advance across
+                # pages that are entirely filtered out.
+                routed_events = page_events
+                if matched_trace_ids is not None:
+                    routed_events = [
+                        event
+                        for event in page_events
+                        if (self._trace_id_for_event(event) in matched_trace_ids)
+                        == include_mode
+                    ]
+                    pending_skipped_filtered += len(page_events) - len(routed_events)
+
                 insert_events_list = [
                     self._event_to_insert(event, source_project_id)
-                    for event in page_events
+                    for event in routed_events
                 ]
 
                 if seen_db is not None:
@@ -942,6 +1112,7 @@ class LogsMigrator(ResourceMigrator[dict[str, Any]]):
                 "version": self._stream_state.version,
                 "resume_cursor": self._stream_state.cursor,
                 "spilled_fields": self._stream_state.spilled_fields,
+                "filtered_out": self._stream_state.skipped_filtered,
             }
         finally:
             if seen_db is not None:
@@ -962,4 +1133,5 @@ class LogsMigrator(ResourceMigrator[dict[str, Any]]):
             "version": self._stream_state.version,
             "resume_cursor": self._stream_state.cursor,
             "spilled_fields": self._stream_state.spilled_fields,
+            "filtered_out": self._stream_state.skipped_filtered,
         }

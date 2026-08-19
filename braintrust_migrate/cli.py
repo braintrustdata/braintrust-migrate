@@ -226,6 +226,30 @@ def migrate(
             envvar="MIGRATION_CREATED_BEFORE",
         ),
     ] = None,
+    logs_include_root_span_name: Annotated[
+        str | None,
+        typer.Option(
+            "--logs-include-root-span-name",
+            help=(
+                "Only migrate logs traces whose root span has this name (the root span "
+                "and all of its descendants move together). Mutually exclusive with "
+                "--logs-exclude-root-span-name."
+            ),
+            envvar="MIGRATION_LOGS_INCLUDE_ROOT_SPAN_NAME",
+        ),
+    ] = None,
+    logs_exclude_root_span_name: Annotated[
+        str | None,
+        typer.Option(
+            "--logs-exclude-root-span-name",
+            help=(
+                "Migrate every logs trace except those whose root span has this name. "
+                "The exact complement of --logs-include-root-span-name, so paired runs "
+                "split one source project across two destination projects."
+            ),
+            envvar="MIGRATION_LOGS_EXCLUDE_ROOT_SPAN_NAME",
+        ),
+    ] = None,
     acl_map_users: Annotated[
         bool | None,
         typer.Option(
@@ -296,6 +320,8 @@ def migrate(
             logs_insert_batch_size,
             created_after,
             created_before,
+            logs_include_root_span_name,
+            logs_exclude_root_span_name,
             acl_map_users,
             acl_auto_invite_users,
             group_map_users,
@@ -319,6 +345,8 @@ async def _migrate_main(
     logs_insert_batch_size: int | None,
     created_after: str | None,
     created_before: str | None,
+    logs_include_root_span_name: str | None,
+    logs_exclude_root_span_name: str | None,
     acl_map_users: bool | None,
     acl_auto_invite_users: bool | None,
     group_map_users: bool | None,
@@ -394,6 +422,18 @@ async def _migrate_main(
             config.migration.created_after = canonicalize_created_after(created_after)
         if created_before is not None:
             config.migration.created_before = canonicalize_created_before(created_before)
+        if logs_include_root_span_name is not None:
+            config.migration.logs_include_root_span_name = logs_include_root_span_name
+        if logs_exclude_root_span_name is not None:
+            config.migration.logs_exclude_root_span_name = logs_exclude_root_span_name
+        if (
+            config.migration.logs_include_root_span_name
+            and config.migration.logs_exclude_root_span_name
+        ):
+            raise ValueError(
+                "Set only one of --logs-include-root-span-name or "
+                "--logs-exclude-root-span-name"
+            )
         if acl_map_users is not None:
             config.migration.acl_map_users = acl_map_users
         if acl_auto_invite_users is not None:
@@ -1268,6 +1308,7 @@ async def _test_logs_dry_run_probe(
     """Probe whether the selected logs time window has at least one matching span."""
     from braintrust_migrate.btql import (
         btql_quote,
+        collect_root_span_ids_for_span_name,
         fetch_btql_sorted_page_with_retries,
     )
     from braintrust_migrate.streaming_utils import build_btql_sorted_page_query
@@ -1312,6 +1353,42 @@ async def _test_logs_dry_run_probe(
                 "status": "error",
                 "error": str(e),
             }
+            continue
+
+        routing_name = (
+            config.migration.logs_include_root_span_name
+            or config.migration.logs_exclude_root_span_name
+        )
+        if not routing_name:
+            continue
+
+        progress.update(
+            validation_task,
+            description=f"🔍 Resolving root span filter for {project_name}...",
+        )
+        try:
+            _, stats = await collect_root_span_ids_for_span_name(
+                client=source_client,
+                from_expr=from_expr,
+                span_name=routing_name,
+                page_limit=config.migration.logs_root_span_prepass_fetch_limit,
+                log_fields={"source_project_id": project["source_id"]},
+            )
+            results[project_name].update(
+                {
+                    "root_span_filter_name": routing_name,
+                    "root_span_filter_mode": (
+                        "include"
+                        if config.migration.logs_include_root_span_name
+                        else "exclude"
+                    ),
+                    "matched_spans": stats["matched_spans"],
+                    "matched_root_spans": stats["root_spans"],
+                    "matched_traces": stats["distinct_traces"],
+                }
+            )
+        except Exception as e:
+            results[project_name]["root_span_filter_error"] = str(e)
 
     return results
 
@@ -1487,6 +1564,54 @@ def _display_dry_run_results(
 
         console.print("\n")
         console.print(logs_table)
+
+        has_filter = any(
+            "root_span_filter_name" in result or "root_span_filter_error" in result
+            for result in log_probe_results.values()
+        )
+        if has_filter:
+            filter_table = Table(title="🧬 Logs Root Span Filter")
+            filter_table.add_column("Project", style="cyan")
+            filter_table.add_column("Mode", style="magenta")
+            filter_table.add_column("Matched spans", justify="right", style="blue")
+            filter_table.add_column("Top-level", justify="right", style="blue")
+            filter_table.add_column("Traces routed", justify="right", style="green")
+
+            for project_name, result in log_probe_results.items():
+                if "root_span_filter_error" in result:
+                    filter_table.add_row(
+                        project_name,
+                        "❌ error",
+                        result["root_span_filter_error"],
+                        "-",
+                        "-",
+                    )
+                    continue
+                if "root_span_filter_name" not in result:
+                    continue
+                mode = result["root_span_filter_mode"]
+                matched_spans = int(result["matched_spans"])
+                matched_roots = int(result["matched_root_spans"])
+                traces = int(result["matched_traces"])
+                roots_cell = str(matched_roots)
+                if matched_roots != matched_spans:
+                    roots_cell = f"[yellow]{matched_roots}[/yellow]"
+                filter_table.add_row(
+                    project_name,
+                    f"{mode} '{result['root_span_filter_name']}'",
+                    str(matched_spans),
+                    roots_cell,
+                    str(traces) if mode == "include" else f"all traces except {traces}",
+                )
+
+            console.print("\n")
+            console.print(filter_table)
+            console.print(
+                "[dim]'Top-level' counts matches with no parent span. If it is lower "
+                "than 'Matched spans', the name also appears nested mid-trace, and "
+                "those full traces are routed too. One trace can hold several "
+                "top-level matches, so 'Top-level' may exceed 'Traces routed'.[/dim]"
+            )
 
     # Resource discovery results
     if test_results:

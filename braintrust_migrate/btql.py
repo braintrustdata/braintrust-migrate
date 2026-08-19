@@ -69,6 +69,115 @@ async def find_first_pagination_key_for_created_after(
     return lp if isinstance(lp, str) and lp else None
 
 
+async def collect_root_span_ids_for_span_name(
+    *,
+    client: BraintrustClient,
+    from_expr: str,
+    span_name: str,
+    page_limit: int = 1000,
+    operation: str = "btql_root_span_id_prepass",
+    log_fields: dict[str, Any],
+    on_page: Callable[[dict[str, Any]], None] | None = None,
+    timeout_seconds: float = 120.0,
+) -> tuple[set[str], dict[str, int]]:
+    """Collect the `root_span_id` of every span named `span_name`.
+
+    This is the prepass behind trace-level routing filters. Child spans do not
+    carry their root's name, so there is no single predicate that selects "every
+    span whose trace root is named X". Instead we scan for the named spans once
+    (selecting only two small fields) and build the set of matching trace ids;
+    the streaming loop then routes each span by its `root_span_id`.
+
+    The scan is deliberately *not* constrained by any created_after/created_before
+    window. A trace can straddle the window boundary, and a partial id set would
+    misroute spans whose root falls outside it. Extra ids are harmless — they
+    simply never match a streamed span.
+
+    Returns:
+        (root_span_ids, stats) where stats counts `matched_spans`, `root_spans`
+        (matches that are top-level, i.e. have no `span_parents`), and
+        `distinct_traces`. Note that one trace can contain several matching
+        top-level spans, so `root_spans` is often greater than `distinct_traces`.
+    """
+    # Imported here to avoid a circular import at module load time.
+    from braintrust_migrate.streaming_utils import build_btql_sorted_page_query
+
+    root_span_ids: set[str] = set()
+    matched_spans = 0
+    root_spans = 0
+    last_pk: str | None = None
+    page_num = 0
+
+    name_condition = f"span_attributes.name = '{btql_quote(span_name)}'"
+
+    while True:
+        page_num += 1
+
+        def _query_text_for_limit(n: int, *, _last_pk: str | None = last_pk) -> str:
+            return build_btql_sorted_page_query(
+                from_expr=from_expr,
+                limit=n,
+                last_pagination_key=_last_pk,
+                select="span_id, root_span_id, span_parents, _pagination_key",
+                extra_conditions=[name_condition],
+            )
+
+        page = await fetch_btql_sorted_page_with_retries(
+            client=client,
+            query_for_limit=_query_text_for_limit,
+            configured_limit=int(page_limit),
+            operation=operation,
+            log_fields={**log_fields, "span_name": span_name},
+            timeout_seconds=timeout_seconds,
+        )
+
+        rows = cast(list[dict[str, Any]], page.get("events") or [])
+        if not rows:
+            break
+
+        for row in rows:
+            matched_spans += 1
+            span_id = row.get("span_id")
+            root_span_id = row.get("root_span_id")
+            # A span is top-level when it has no parent. Do NOT infer this from
+            # `span_id == root_span_id`: under OTel-style ingestion `root_span_id`
+            # holds the 16-byte trace id while `span_id` is an 8-byte span id, so
+            # they never match and every span would look non-root.
+            span_parents = row.get("span_parents")
+            if not (isinstance(span_parents, list) and span_parents):
+                root_spans += 1
+            # Fall back to span_id so a root span with no explicit root_span_id
+            # still routes its own trace.
+            trace_id = (
+                root_span_id
+                if isinstance(root_span_id, str) and root_span_id
+                else span_id
+            )
+            if isinstance(trace_id, str) and trace_id:
+                root_span_ids.add(trace_id)
+
+        if on_page is not None:
+            on_page(
+                {
+                    "page_num": page_num,
+                    "page_rows": len(rows),
+                    "matched_spans": matched_spans,
+                    "distinct_traces": len(root_span_ids),
+                }
+            )
+
+        next_pk = cast(str | None, page.get("btql_last_pagination_key"))
+        if not next_pk or next_pk == last_pk:
+            break
+        last_pk = next_pk
+
+    return root_span_ids, {
+        "matched_spans": matched_spans,
+        "root_spans": root_spans,
+        "distinct_traces": len(root_span_ids),
+    }
+
+
 async def fetch_btql_sorted_page_with_retries(
     *,
     client: BraintrustClient,

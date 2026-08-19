@@ -8,7 +8,7 @@ The format is based on Keep a Changelog and this project follows Semantic Versio
 
 ### Added
 
-- N/A
+- Trace-level routing filters for project logs: `--logs-include-root-span-name` / `MIGRATION_LOGS_INCLUDE_ROOT_SPAN_NAME` and `--logs-exclude-root-span-name` / `MIGRATION_LOGS_EXCLUDE_ROOT_SPAN_NAME`. The two are exact complements, so a paired run splits one source project across two destination projects with every span landing in exactly one of them. Because child spans do not carry their root's name, a one-time BTQL prepass collects the `root_span_id` of every span matching the name, and the streaming loop routes each span by its `root_span_id` — so whole traces (root plus all descendants) move together. The prepass is a full scan of the source project selecting only two id fields, is deliberately not constrained by `--created-after` / `--created-before` (a trace can straddle the boundary), and holds matched trace ids in memory (~150 bytes per trace). `--dry-run` runs the prepass too and reports matched span, root, and trace counts per project. The filter value is recorded in the logs checkpoint and a resume with a different value is rejected. Page size is tunable via `MIGRATION_LOGS_ROOT_SPAN_PREPASS_FETCH_LIMIT` (default `1000`).
 
 ### Changed
 

@@ -178,5 +178,9 @@ checkpoints/
 *.checkpoint
 migration_state.json
 
+# Per-customer, one-off migration runbooks and configs (never committed).
+# One subdirectory per customer, e.g. customer-migrations/<customer>/
+customer-migrations/
+
 # Requirements lock file
 requirements.lock 
