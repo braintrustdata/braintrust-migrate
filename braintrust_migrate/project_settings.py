@@ -165,8 +165,11 @@ async def migrate_project_settings(
         results["migrated"] = len(plan.applied)
         results["skipped"] = len(skip_reasons)
         if skip_reasons:
+            # source_id/name are what the migration report expects of every
+            # skipped item; a setting has no id of its own, so use its key.
             results["skipped_details"] = [
-                {"setting": k, "skip_reason": r} for k, r in skip_reasons.items()
+                {"setting": k, "source_id": k, "name": None, "skip_reason": r}
+                for k, r in skip_reasons.items()
             ]
             counts: dict[str, int] = {}
             for reason in skip_reasons.values():

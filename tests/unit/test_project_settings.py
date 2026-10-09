@@ -150,8 +150,60 @@ class TestMigrateProjectSettings:
         assert results["migrated"] == 1
         assert results["skipped"] == 1
         assert results["skipped_details"] == [
-            {"setting": "comparison_key", "skip_reason": "dest_already_set"}
+            {
+                "setting": "comparison_key",
+                "source_id": "comparison_key",
+                "name": None,
+                "skip_reason": "dest_already_set",
+            }
         ]
+
+    async def test_skipped_settings_render_in_migration_report(self, tmp_path):
+        """Regression: skipped settings crashed report generation (KeyError)."""
+        results = await migrate_project_settings(
+            source_settings={"comparison_key": "input.question"},
+            dest_client=_dest_client({"comparison_key": "input"}),
+            dest_project_id="dest-proj",
+            id_mapping=ID_MAPPING,
+            project_name="p",
+        )
+        orchestrator = MigrationOrchestrator(
+            Config(
+                source={"api_key": "src", "url": "https://api.braintrust.dev"},
+                destination={"api_key": "dst", "url": "https://api.braintrust.dev"},
+                state_dir=tmp_path,
+            )
+        )
+        run_results = {
+            "start_time": "2026-01-01T00:00:00",
+            "end_time": "2026-01-01T00:00:01",
+            "duration_seconds": 1.0,
+            "success": True,
+            "summary": {
+                "total_projects": 1,
+                "total_resources": 1,
+                "migrated_resources": 0,
+                "skipped_resources": 1,
+                "failed_resources": 0,
+            },
+            "organization_resources": {},
+            "projects": {
+                "p": {
+                    "project_id": "dest-proj",
+                    "resources": {"project_settings": results},
+                    "total_resources": 1,
+                    "migrated_resources": 0,
+                    "skipped_resources": 1,
+                    "failed_resources": 0,
+                    "errors": [],
+                }
+            },
+        }
+
+        orchestrator._generate_migration_report(run_results, tmp_path)
+
+        summary_text = (tmp_path / "migration_summary.txt").read_text()
+        assert "project_settings: comparison_key" in summary_text
 
     async def test_no_patch_when_nothing_to_apply(self):
         client = _dest_client({"comparison_key": "input"})
