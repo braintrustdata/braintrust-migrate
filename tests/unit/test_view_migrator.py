@@ -166,3 +166,143 @@ class TestViewMigrator:
         deps = await migrator.get_dependencies(experiment_view)
 
         assert deps == ["exp-789"]
+
+
+@pytest.fixture
+def monitor_view():
+    """Create a monitor view (dashboard) with builder and SQL charts."""
+    return {
+        "id": "view-monitor-123",
+        "name": "Copilot Dashboard",
+        "object_id": "source-project-456",
+        "object_type": "project",
+        "view_type": "monitor",
+        "options": {
+            "viewType": "monitor",
+            "options": {
+                "spanType": "range",
+                "rangeValue": "30d",
+                "projectId": "source-project-456",
+                "type": "project",
+                "groupBy": "",
+            },
+        },
+        "view_data": {
+            "search": {},
+            "custom_charts": {
+                "charts": {
+                    "builder-chart": {
+                        "title": "Latency",
+                        "definition": {"type": "monitorTimeseries", "measures": []},
+                    },
+                    "sql-chart": {
+                        "title": "Spans",
+                        "chartSql": "SELECT count(*) AS spans FROM project_logs",
+                        "dataSource": {
+                            "entity": "project_logs",
+                            "id": "source-project-456",
+                        },
+                        "viz": {"type": "timeseries", "timeseriesVizType": "bars"},
+                    },
+                    "other-project-chart": {
+                        "title": "Elsewhere",
+                        "chartSql": "SELECT count(*) AS spans FROM project_logs",
+                        "dataSource": {
+                            "entity": "project_logs",
+                            "id": "unrelated-project-000",
+                        },
+                        "viz": {"type": "timeseries", "timeseriesVizType": "bars"},
+                    },
+                },
+                "layout": {"type": "linear", "order": ["builder-chart", "sql-chart"]},
+                "version": "0.0.0",
+            },
+        },
+    }
+
+
+def _capture_create_payload(mock_dest_client):
+    """Make with_retry run the request so the POST body can be inspected."""
+    mock_dest_client.raw_request = AsyncMock(return_value={"id": "new-view-789"})
+
+    async def run(_name, fn):
+        return await fn()
+
+    mock_dest_client.with_retry = AsyncMock(side_effect=run)
+
+
+@pytest.mark.asyncio
+class TestMonitorViewProjectRemap:
+    """Monitor views must point at the destination project after migration."""
+
+    async def test_remaps_embedded_project_ids(
+        self,
+        mock_source_client,
+        mock_dest_client,
+        temp_checkpoint_dir,
+        monitor_view,
+    ):
+        _capture_create_payload(mock_dest_client)
+        migrator = ViewMigrator(
+            mock_source_client, mock_dest_client, temp_checkpoint_dir
+        )
+        migrator.dest_project_id = "dest-project-999"
+
+        result = await migrator.migrate_resource(monitor_view)
+
+        assert result == "new-view-789"
+        payload = mock_dest_client.raw_request.call_args.kwargs["json"]
+        charts = payload["view_data"]["custom_charts"]["charts"]
+        assert payload["object_id"] == "dest-project-999"
+        assert payload["options"]["options"]["projectId"] == "dest-project-999"
+        assert charts["sql-chart"]["dataSource"]["id"] == "dest-project-999"
+        assert charts["other-project-chart"]["dataSource"]["id"] == (
+            "unrelated-project-000"
+        )
+        assert (
+            charts["builder-chart"]
+            == (monitor_view["view_data"]["custom_charts"]["charts"]["builder-chart"])
+        )
+
+    async def test_does_not_mutate_source_view(
+        self,
+        mock_source_client,
+        mock_dest_client,
+        temp_checkpoint_dir,
+        monitor_view,
+    ):
+        _capture_create_payload(mock_dest_client)
+        migrator = ViewMigrator(
+            mock_source_client, mock_dest_client, temp_checkpoint_dir
+        )
+        migrator.dest_project_id = "dest-project-999"
+
+        await migrator.migrate_resource(monitor_view)
+
+        assert monitor_view["options"]["options"]["projectId"] == "source-project-456"
+        assert (
+            monitor_view["view_data"]["custom_charts"]["charts"]["sql-chart"][
+                "dataSource"
+            ]["id"]
+            == "source-project-456"
+        )
+
+    async def test_non_monitor_views_are_left_alone(
+        self,
+        mock_source_client,
+        mock_dest_client,
+        temp_checkpoint_dir,
+        monitor_view,
+    ):
+        _capture_create_payload(mock_dest_client)
+        migrator = ViewMigrator(
+            mock_source_client, mock_dest_client, temp_checkpoint_dir
+        )
+        migrator.dest_project_id = "dest-project-999"
+        logs_view = {**monitor_view, "view_type": "logs"}
+
+        await migrator.migrate_resource(logs_view)
+
+        payload = mock_dest_client.raw_request.call_args.kwargs["json"]
+        assert payload["object_id"] == "dest-project-999"
+        assert payload["options"]["options"]["projectId"] == "source-project-456"
