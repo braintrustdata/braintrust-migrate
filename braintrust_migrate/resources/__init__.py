@@ -2,6 +2,7 @@
 
 from .acls import ACLMigrator
 from .ai_secrets import AISecretMigrator
+from .columns import ColumnMigrator
 from .datasets import DatasetMigrator
 from .experiments import ExperimentMigrator
 from .functions import FunctionMigrator
@@ -17,6 +18,7 @@ from .views import ViewMigrator
 __all__ = [
     "ACLMigrator",
     "AISecretMigrator",
+    "ColumnMigrator",
     "DatasetMigrator",
     "ExperimentMigrator",
     "FunctionMigrator",

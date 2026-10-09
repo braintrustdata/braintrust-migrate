@@ -8,7 +8,7 @@ The format is based on Keep a Changelog and this project follows Semantic Versio
 
 ### Added
 
-- N/A
+- Custom project Logs column migration through `--resources columns`, included in `all`. Checks name/expression conflicts before column writes per project, skips matching definitions, and verifies the destination. Added a customer guide in `docs/custom-columns.md`.
 
 ### Changed
 

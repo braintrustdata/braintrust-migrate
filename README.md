@@ -121,7 +121,7 @@ All options can be set via environment variables or CLI flags. CLI flags take pr
 
 | Environment Variable | CLI Flag | Default | Description |
 |---------------------|----------|---------|-------------|
-| `MIGRATION_RESOURCES` | `--resources`, `-r` | `all` | Comma-separated list of resources to migrate. Options: `all`, `ai_secrets`, `roles`, `groups`, `datasets`, `project_tags`, `span_iframes`, `functions`, `prompts`, `project_scores`, `experiments`, `logs`, `views` |
+| `MIGRATION_RESOURCES` | `--resources`, `-r` | `all` | Comma-separated list of resources to migrate. Options: `all`, `ai_secrets`, `roles`, `groups`, `datasets`, `project_tags`, `span_iframes`, `functions`, `prompts`, `project_scores`, `experiments`, `logs`, `columns`, `views` |
 | `MIGRATION_PROJECTS` | `--projects`, `-p` | *(all projects)* | Comma-separated list of source project names to migrate |
 | `MIGRATION_PROJECT_MAP` | `--project-map` | *(same-name fallback)* | JSON object mapping source project names to destination project names, e.g. `{"Source Project":"Destination Project"}` |
 | `MIGRATION_PROJECT_MAP_FILE` | `--project-map-file` | *(none)* | Path to a JSON file mapping source project names to destination project names. Mutually exclusive with `--project-map` / `MIGRATION_PROJECT_MAP` |
@@ -223,6 +223,10 @@ LOG_FORMAT=text
 # MIGRATION_CREATED_AFTER=2026-01-01
 # MIGRATION_CREATED_BEFORE=2026-02-01
 ```
+
+### Custom Logs Columns
+
+Use `--resources columns` to migrate custom Logs column names and SQL expressions, or `--resources columns,views` to also migrate saved views. Columns are included in the default `all` migration. See the [custom column migration guide](docs/custom-columns.md) for setup, project mapping, conflict handling, and verification. This feature requires a checkout or release that includes column support; it is not included in v0.4.1.
 
 ### Getting API Keys
 

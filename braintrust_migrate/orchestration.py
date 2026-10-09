@@ -14,6 +14,7 @@ from braintrust_migrate.config import Config
 from braintrust_migrate.resources import (
     ACLMigrator,
     AISecretMigrator,
+    ColumnMigrator,
     DatasetMigrator,
     ExperimentMigrator,
     FunctionMigrator,
@@ -54,7 +55,8 @@ RESOURCE_TYPE_DEPENDENCIES: dict[str, set[str]] = {
     "experiments": {"datasets"},
     "prompts": {"functions"},
     "project_scores": {"functions"},
-    "views": {"datasets", "experiments"},
+    "columns": set(),
+    "views": {"datasets", "experiments", "columns"},
 }
 
 
@@ -171,6 +173,7 @@ class MigrationOrchestrator:
         ),  # Project scores can depend on functions for online scoring
         ("experiments", ExperimentMigrator),
         ("logs", LogsMigrator),
+        ("columns", ColumnMigrator),
         ("views", ViewMigrator),
     ]
 

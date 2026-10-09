@@ -100,7 +100,7 @@ def migrate(
         typer.Option(
             "--resources",
             "-r",
-            help="Comma-separated list of resources to migrate (all,ai_secrets,roles,groups,datasets,project_tags,span_iframes,functions,prompts,project_scores,experiments,logs,views,acls)",
+            help="Comma-separated list of resources to migrate (all,ai_secrets,roles,groups,datasets,project_tags,span_iframes,functions,prompts,project_scores,experiments,logs,columns,views,acls)",
             envvar="MIGRATION_RESOURCES",
         ),
     ] = "all",
@@ -840,6 +840,7 @@ async def _run_migration_with_progress(
                 "functions": "⚙️  functions",
                 "project_tags": "🏷️  project_tags",
                 "project_scores": "📊 project_scores",
+                "columns": "📊 columns",
                 "views": "👁️  views",
                 "span_iframes": "🖼️  span_iframes",
             }
@@ -1338,6 +1339,7 @@ async def _test_resource_discovery(
         Dictionary of resource discovery results
     """
     from braintrust_migrate.resources import (
+        ColumnMigrator,
         DatasetMigrator,
         ExperimentMigrator,
         FunctionMigrator,
@@ -1348,6 +1350,7 @@ async def _test_resource_discovery(
 
     # Test with a subset of migrators to avoid overwhelming output
     test_migrators = [
+        ("columns", ColumnMigrator),
         ("datasets", DatasetMigrator),
         ("prompts", PromptMigrator),
         ("functions", FunctionMigrator),

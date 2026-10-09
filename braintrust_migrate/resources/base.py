@@ -918,6 +918,9 @@ class ResourceMigrator(ABC, Generic[T]):
         tasks = [asyncio.create_task(_run_with_limit(r)) for r in resources]
         return await asyncio.gather(*tasks)
 
+    async def prepare_resources(self, resources: list[T]) -> None:
+        """Validate resources before any writes; subclasses may reconcile state."""
+
     async def migrate_all(
         self, project_id: str | None = None, max_concurrent: int | None = None
     ) -> dict[str, Any]:
@@ -934,6 +937,7 @@ class ResourceMigrator(ABC, Generic[T]):
 
         # List all source resources
         resources = await self.list_source_resources(project_id)
+        await self.prepare_resources(resources)
         total_count = len(resources)
 
         self._logger.info(f"Found {total_count} {self.resource_name} to migrate")
