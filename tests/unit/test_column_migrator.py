@@ -153,3 +153,50 @@ async def test_partial_failure_preserves_successful_mapping(migrator):
         await migrator.migrate_all("source", max_concurrent=1)
     assert migrator.state.id_mapping["source-column"] == "dest-column"
     assert "other-column" in migrator.state.failed_ids
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("create_fails", [True, False])
+async def test_orchestrator_reports_partial_column_failure(
+    migrator, tmp_path, create_fails
+):
+    from braintrust_migrate.config import Config
+    from braintrust_migrate.orchestration import MigrationOrchestrator
+
+    migrator.source_client.raw_request.return_value = {
+        "objects": [
+            column(),
+            column(name="Other", id="other-column"),
+        ]
+    }
+    dest = column("destination", id="dest-column")
+    migrator.dest_client.raw_request.side_effect = [
+        {"objects": []},
+        dest,
+        RuntimeError("create failed")
+        if create_fails
+        else column("destination", name="Other", id="other-dest"),
+        {"objects": [dest]},
+    ]
+    config = Config(
+        source={"api_key": "test-source"},
+        destination={"api_key": "test-destination"},
+        resources=["columns"],
+        state_dir=tmp_path,
+        migration={"max_concurrent_resources": 1},
+    )
+    report = await MigrationOrchestrator(config)._migrate_project(
+        {"name": "Test", "source_id": "source", "dest_id": "destination"},
+        migrator.source_client,
+        migrator.dest_client,
+        tmp_path,
+        {},
+    )
+    result = report["resources"]["columns"]
+    assert result["total"] == result["migrated"] + result["failed"]
+    assert result["migrated"] == 1
+    assert result["failed"] == 1
+    assert result["skipped"] == 0
+    assert report["migrated_resources"] == 1
+    assert report["failed_resources"] == 1
+    assert result["errors"][0]["source_id"] == "other-column"

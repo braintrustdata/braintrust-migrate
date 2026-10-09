@@ -1,5 +1,6 @@
 """Custom Logs column migrator for Braintrust migration tool."""
 
+from copy import deepcopy
 from typing import Any
 
 from braintrust_migrate.resources.base import ResourceMigrator
@@ -10,6 +11,12 @@ class ColumnMigrator(ResourceMigrator[dict]):
 
     Saved view configuration is migrated separately by ViewMigrator.
     """
+
+    _partial_results: dict[str, Any] | None = None
+
+    def get_partial_results(self) -> dict[str, Any] | None:
+        """Preserve completed work for the orchestrator if verification fails."""
+        return deepcopy(self._partial_results)
 
     @property
     def resource_name(self) -> str:
@@ -129,7 +136,9 @@ class ColumnMigrator(ResourceMigrator[dict]):
         self, project_id: str | None = None, max_concurrent: int | None = None
     ) -> dict[str, Any]:
         """Migrate columns and verify the definitions by reading the destination."""
+        self._partial_results = None
         summary = await super().migrate_all(project_id, max_concurrent)
+        self._partial_results = summary
         if not self.dest_project_id:
             raise ValueError("A destination project ID is required for columns")
         destination = {
@@ -143,8 +152,34 @@ class ColumnMigrator(ResourceMigrator[dict]):
             existing = destination.get(column["name"])
             if not existing or existing["expr"] != column["expr"]:
                 mismatches.append(column["name"])
+                source_id = column["id"]
+                for count_key, details_key in (
+                    ("migrated", "migrated_details"),
+                    ("skipped", "skipped_details"),
+                ):
+                    details = summary.get(details_key, [])
+                    remaining = [d for d in details if d["source_id"] != source_id]
+                    summary[count_key] -= len(details) - len(remaining)
+                    summary[details_key] = remaining
+                if not any(e.get("source_id") == source_id for e in summary["errors"]):
+                    summary["failed"] += 1
+                    summary["errors"].append(
+                        {
+                            "source_id": source_id,
+                            "name": column["name"],
+                            "error": "Destination verification failed",
+                        }
+                    )
                 self.state.id_mapping.pop(column["id"], None)
                 self.record_failure(column["id"], "Destination verification failed")
+        breakdown: dict[str, int] = {}
+        for detail in summary.get("skipped_details", []):
+            reason = detail["skip_reason"]
+            breakdown[reason] = breakdown.get(reason, 0) + 1
+        summary["skip_breakdown"] = breakdown
+        summary["skip_summary"] = ", ".join(
+            f"{count} {reason.replace('_', ' ')}" for reason, count in breakdown.items()
+        )
         self._save_state()
         if mismatches:
             raise ValueError(f"Custom column verification failed: {mismatches!r}")
