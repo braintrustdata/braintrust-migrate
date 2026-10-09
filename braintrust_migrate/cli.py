@@ -100,7 +100,7 @@ def migrate(
         typer.Option(
             "--resources",
             "-r",
-            help="Comma-separated list of resources to migrate (all,ai_secrets,roles,groups,datasets,project_tags,span_iframes,functions,prompts,project_scores,experiments,logs,views,project_settings,acls)",
+            help="Comma-separated list of resources to migrate (all,ai_secrets,roles,groups,datasets,project_tags,span_iframes,functions,prompts,project_scores,experiments,logs,columns,views,project_settings,acls)",
             envvar="MIGRATION_RESOURCES",
         ),
     ] = "all",
