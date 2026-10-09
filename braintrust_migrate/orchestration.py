@@ -11,6 +11,7 @@ import structlog
 
 from braintrust_migrate.client import BraintrustClient, create_client_pair
 from braintrust_migrate.config import Config
+from braintrust_migrate.environments import check_unmigrated_environments
 from braintrust_migrate.resources import (
     ACLMigrator,
     AISecretMigrator,
@@ -233,6 +234,7 @@ class MigrationOrchestrator:
                 "failed_resources": 0,
                 "errors": [],
             },
+            "warnings": [],
         }
 
         try:
@@ -248,6 +250,12 @@ class MigrationOrchestrator:
                     on_projects_discovered(projects)
 
                 self._logger.info(f"Discovered {len(projects)} projects to migrate")
+
+                project_resources = self._get_project_resources_to_migrate()
+                if "prompts" in project_resources or "functions" in project_resources:
+                    env_warning = await check_unmigrated_environments(source_client)
+                    if env_warning is not None:
+                        total_results["warnings"].append(env_warning)
 
                 # Create global ID mapping registry to share between ALL projects
                 global_id_mappings = {}
@@ -973,6 +981,7 @@ class MigrationOrchestrator:
                 "skipped_resources": results["summary"]["skipped_resources"],
                 "failed_resources": results["summary"]["failed_resources"],
             },
+            "warnings": results.get("warnings", []),
             "organization_resources": {},
             "projects": {},
             "detailed_breakdown": {
@@ -1147,6 +1156,13 @@ class MigrationOrchestrator:
             f.write(f"✅ Migrated: {summary['migrated_resources']}\n")
             f.write(f"⏭️  Skipped: {summary['skipped_resources']}\n")
             f.write(f"❌ Failed: {summary['failed_resources']}\n\n")
+
+            warnings = detailed_report.get("warnings", [])
+            if warnings:
+                f.write("## ⚠️  Warnings\n")
+                for warning in warnings:
+                    f.write(f"- {warning['message']}\n")
+                f.write("\n")
 
             # Organization resources breakdown
             org_data = detailed_report.get("organization_resources", {})
