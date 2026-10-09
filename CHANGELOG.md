@@ -8,7 +8,7 @@ The format is based on Keep a Changelog and this project follows Semantic Versio
 
 ### Added
 
-- N/A
+- Warn when the source org has environments. Environments and their prompt/function version assignments are not migrated (and only the latest version of each prompt/function is copied), so apps that load prompts with `environment=...` would fail against the destination with no sign of it in the migration report. When prompts or functions are in scope, the tool now checks the source org's environments and, if any exist, lists them in a warning in the run log, the console results, `migration_summary.txt`, and `migration_report.json`. The check is advisory: it never fails the migration, and a failed check is logged and skipped.
 
 ### Changed
 

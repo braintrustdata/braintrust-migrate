@@ -972,6 +972,12 @@ def _display_results(results: dict) -> None:
                 f"  ... and {len(summary['errors']) - MAX_ERRORS_TO_DISPLAY} more errors"
             )
 
+    warnings = results.get("warnings", [])
+    if warnings:
+        console.print("\n[yellow]Warnings:[/yellow]")
+        for warning in warnings:
+            console.print(f"  [yellow]⚠[/yellow]  {warning['message']}")
+
     # Always point to the full per-item report so users can drill into exactly
     # what was migrated / skipped / failed (and why) — counts above, detail here.
     report_path = results.get("report_path")
