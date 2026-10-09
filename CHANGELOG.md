@@ -16,7 +16,7 @@ The format is based on Keep a Changelog and this project follows Semantic Versio
 
 ### Fixed
 
-- N/A
+- Migrated monitor views (dashboards) now point at the destination project. Monitor views embed the project id in `options.options.projectId` and, for SQL charts, in each chart's `dataSource.id`; the migrator only rewrote the top-level `object_id`, so these kept the source project's id. The dashboards list only shows views whose `projectId` matches the current project, so migrated dashboards existed but never appeared. Both fields are now remapped when they match the source project id; other view types are unchanged. Dashboards migrated with an earlier version can be fixed in place with `PATCH /v1/view/{id}` setting `options.options.projectId` to the destination project id.
 
 ## [0.4.1] - 2026-06-08
 
