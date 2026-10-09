@@ -30,6 +30,10 @@ FULL_SOURCE_SETTINGS = {
     ],
     "remote_eval_sources": [{"url": "https://evals.example.com", "name": "dev"}],
     "disable_realtime_queries": True,
+    "blind_reviews": True,
+    "require_all_human_review_scores": False,
+    "coding_agent_insights_dashboard": True,
+    "monitor_charts_use_metrics_start": False,
     "default_preprocessor": {"type": "function", "id": SRC_FN, "version": "123"},
 }
 

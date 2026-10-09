@@ -25,6 +25,10 @@ PASSTHROUGH_SETTINGS = (
     "spanFieldOrder",
     "remote_eval_sources",
     "disable_realtime_queries",
+    "blind_reviews",
+    "require_all_human_review_scores",
+    "coding_agent_insights_dashboard",
+    "monitor_charts_use_metrics_start",
 )
 
 

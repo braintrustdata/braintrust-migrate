@@ -561,7 +561,8 @@ The following resource types are supported:
 > all other function types migrate normally.
 
 > **Project settings** (trace view field order, default preprocessor, baseline
-> experiment, comparison key, remote eval sources, realtime-query toggle) are
+> experiment, comparison key, remote eval sources, realtime-query toggle, human
+> review options, agent insights dashboard, monitor chart time bucketing) are
 > applied to the destination project after its resources migrate, so references
 > to the preprocessor function and baseline experiment can be mapped to their
 > destination ids. Settings already set on an existing destination project are
