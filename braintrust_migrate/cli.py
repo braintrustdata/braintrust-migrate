@@ -100,7 +100,7 @@ def migrate(
         typer.Option(
             "--resources",
             "-r",
-            help="Comma-separated list of resources to migrate (all,ai_secrets,roles,groups,datasets,project_tags,span_iframes,functions,prompts,project_scores,experiments,logs,columns,views,acls)",
+            help="Comma-separated list of resources to migrate (all,ai_secrets,roles,groups,datasets,project_tags,span_iframes,functions,prompts,project_scores,experiments,logs,views,project_settings,acls)",
             envvar="MIGRATION_RESOURCES",
         ),
     ] = "all",
@@ -842,6 +842,7 @@ async def _run_migration_with_progress(
                 "project_scores": "📊 project_scores",
                 "columns": "📊 columns",
                 "views": "👁️  views",
+                "project_settings": "⚙️  project_settings",
                 "span_iframes": "🖼️  span_iframes",
             }
             label = label_map.get(resource_name, f"   {resource_name}")
@@ -972,6 +973,12 @@ def _display_results(results: dict) -> None:
             console.print(
                 f"  ... and {len(summary['errors']) - MAX_ERRORS_TO_DISPLAY} more errors"
             )
+
+    warnings = results.get("warnings", [])
+    if warnings:
+        console.print("\n[yellow]Warnings:[/yellow]")
+        for warning in warnings:
+            console.print(f"  [yellow]⚠[/yellow]  {warning['message']}")
 
     # Always point to the full per-item report so users can drill into exactly
     # what was migrated / skipped / failed (and why) — counts above, detail here.

@@ -1,5 +1,8 @@
 """View migrator for Braintrust migration tool."""
 
+import copy
+from typing import Any
+
 from braintrust_migrate.resources.base import ResourceMigrator
 
 
@@ -137,6 +140,46 @@ class ViewMigrator(ResourceMigrator[dict]):
             )
             return source_object_id
 
+    def _remap_monitor_project_ids(
+        self, view_data: dict[str, Any], source_project_id: str, dest_project_id: str
+    ) -> None:
+        """Point a monitor view (dashboard) at the destination project.
+
+        Besides the top-level object_id, monitor views embed the project id in
+        ``options.options.projectId`` (the dashboard list only shows views whose
+        projectId matches the current project) and in each SQL chart's
+        ``dataSource.id``. Only values equal to the source project id are
+        rewritten.
+
+        Args:
+            view_data: Serialized view payload, modified in place.
+            source_project_id: Project id the view belonged to in the source org.
+            dest_project_id: Project id in the destination org.
+        """
+        options = view_data.get("options")
+        if isinstance(options, dict):
+            inner_options = options.get("options")
+            if (
+                isinstance(inner_options, dict)
+                and inner_options.get("projectId") == source_project_id
+            ):
+                inner_options["projectId"] = dest_project_id
+
+        custom_charts = (view_data.get("view_data") or {}).get("custom_charts")
+        charts = (
+            custom_charts.get("charts") if isinstance(custom_charts, dict) else None
+        )
+        if isinstance(charts, dict):
+            for chart in charts.values():
+                data_source = (
+                    chart.get("dataSource") if isinstance(chart, dict) else None
+                )
+                if (
+                    isinstance(data_source, dict)
+                    and data_source.get("id") == source_project_id
+                ):
+                    data_source["id"] = dest_project_id
+
     async def migrate_resource(self, resource: dict) -> str:
         """Migrate a single view to the destination using raw API.
 
@@ -150,10 +193,21 @@ class ViewMigrator(ResourceMigrator[dict]):
             # Resolve the destination object_id
             dest_object_id = self._resolve_object_id(resource)
 
-            view_data = self.serialize_resource_for_insert(resource)
+            view_data = copy.deepcopy(self.serialize_resource_for_insert(resource))
 
             # Override the object_id with the resolved destination object_id
             view_data["object_id"] = dest_object_id
+
+            source_object_id = resource.get("object_id")
+            if (
+                resource.get("view_type") == "monitor"
+                and resource.get("object_type") == "project"
+                and source_object_id
+                and dest_object_id != source_object_id
+            ):
+                self._remap_monitor_project_ids(
+                    view_data, source_object_id, dest_object_id
+                )
 
             # Create the view in the destination using raw API
             response = await self.dest_client.with_retry(

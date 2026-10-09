@@ -121,7 +121,7 @@ All options can be set via environment variables or CLI flags. CLI flags take pr
 
 | Environment Variable | CLI Flag | Default | Description |
 |---------------------|----------|---------|-------------|
-| `MIGRATION_RESOURCES` | `--resources`, `-r` | `all` | Comma-separated list of resources to migrate. Options: `all`, `ai_secrets`, `roles`, `groups`, `datasets`, `project_tags`, `span_iframes`, `functions`, `prompts`, `project_scores`, `experiments`, `logs`, `columns`, `views` |
+| `MIGRATION_RESOURCES` | `--resources`, `-r` | `all` | Comma-separated list of resources to migrate. Options: `all`, `ai_secrets`, `roles`, `groups`, `datasets`, `project_tags`, `span_iframes`, `functions`, `prompts`, `project_scores`, `experiments`, `logs`, `columns`, `views`, `project_settings` |
 | `MIGRATION_PROJECTS` | `--projects`, `-p` | *(all projects)* | Comma-separated list of source project names to migrate |
 | `MIGRATION_PROJECT_MAP` | `--project-map` | *(same-name fallback)* | JSON object mapping source project names to destination project names, e.g. `{"Source Project":"Destination Project"}` |
 | `MIGRATION_PROJECT_MAP_FILE` | `--project-map-file` | *(none)* | Path to a JSON file mapping source project names to destination project names. Mutually exclusive with `--project-map` / `MIGRATION_PROJECT_MAP` |
@@ -541,6 +541,7 @@ The following resource types are supported:
 - **Experiments**
 - **Logs**
 - **Views**
+- **Project Settings** (applied after the project's resources; see note below)
 - **ACLs** (post-project global phase; unsupported object types are skipped, and user ACLs are skipped only when user mapping is disabled or unresolved)
 
 > **Note:** Agents and users are not supported for migration.
@@ -562,6 +563,16 @@ The following resource types are supported:
 >
 > *Inline* code functions (whose source is stored directly on the function) and
 > all other function types migrate normally.
+
+> **Project settings** (trace view field order, default preprocessor, baseline
+> experiment, comparison key, remote eval sources, realtime-query toggle, human
+> review options, agent insights dashboard, monitor chart time bucketing) are
+> applied to the destination project after its resources migrate, so references
+> to the preprocessor function and baseline experiment can be mapped to their
+> destination ids. Settings already set on an existing destination project are
+> **kept, not overwritten**. A setting is skipped (and logged) when the resource
+> it references wasn't migrated, or when it isn't a setting the tool knows how
+> to map.
 
 ## Troubleshooting
 

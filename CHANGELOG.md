@@ -9,6 +9,7 @@ The format is based on Keep a Changelog and this project follows Semantic Versio
 ### Added
 
 - Custom project Logs column migration through `--resources columns`, included in `all`. Checks name/expression conflicts before column writes per project, skips matching definitions, and verifies the destination. Added a customer guide in `docs/custom-columns.md`.
+- Warn when the source org has environments. Environments and their prompt/function version assignments are not migrated (and only the latest version of each prompt/function is copied), so apps that load prompts with `environment=...` would fail against the destination with no sign of it in the migration report. When prompts or functions are in scope, the tool now checks the source org's environments and, if any exist, lists them in a warning in the run log, the console results, `migration_summary.txt`, and `migration_report.json`. The check is advisory: it never fails the migration, and a failed check is logged and skipped.
 
 ### Changed
 
@@ -16,7 +17,8 @@ The format is based on Keep a Changelog and this project follows Semantic Versio
 
 ### Fixed
 
-- N/A
+- Migrated monitor views (dashboards) now point at the destination project. Monitor views embed the project id in `options.options.projectId` and, for SQL charts, in each chart's `dataSource.id`; the migrator only rewrote the top-level `object_id`, so these kept the source project's id. The dashboards list only shows views whose `projectId` matches the current project, so migrated dashboards existed but never appeared. Both fields are now remapped when they match the source project id; other view types are unchanged. Dashboards migrated with an earlier version can be fixed in place with `PATCH /v1/view/{id}` setting `options.options.projectId` to the destination project id.
+- Migrate project settings. Projects were created with only a name and description, so `settings` (trace view `spanFieldOrder`, `default_preprocessor`, `comparison_key`, `baseline_experiment_id`, `remote_eval_sources`, `disable_realtime_queries`, `blind_reviews`, `require_all_human_review_scores`, `coding_agent_insights_dashboard`, `monitor_charts_use_metrics_start`) never reached the destination; a missing default preprocessor, for example, changes how the Logs thread view renders. Settings are now applied with one `PATCH /v1/project/{id}` after the project's resources migrate, mapping the preprocessor function and baseline experiment to their destination ids. Settings already set on the destination project are kept, and settings whose referenced resource wasn't migrated (or that the tool doesn't recognise) are skipped and reported. Selectable as the `project_settings` resource; included in `all`.
 
 ## [0.4.1] - 2026-06-08
 
