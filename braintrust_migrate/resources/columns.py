@@ -89,6 +89,41 @@ class ColumnMigrator(ResourceMigrator[dict]):
             and destination[column["name"]]["expr"] != column["expr"]
         ]
         if conflicts:
+            errors = [
+                {
+                    "source_id": column["id"],
+                    "name": column["name"],
+                    "error": "Custom column expression conflict",
+                }
+                for column in resources
+                if column["name"] in conflicts
+            ]
+            skipped_details = [
+                {
+                    "source_id": column["id"],
+                    "name": column["name"],
+                    "skip_reason": "blocked_by_column_conflict",
+                }
+                for column in resources
+                if column["name"] not in conflicts
+            ]
+            skipped = len(skipped_details)
+            self._partial_results = {
+                "resource_type": self.resource_name,
+                "total": len(resources),
+                "migrated": 0,
+                "failed": len(errors),
+                "skipped": skipped,
+                "errors": errors,
+                "migrated_details": [],
+                "skipped_details": skipped_details,
+                "skip_breakdown": {"blocked_by_column_conflict": skipped}
+                if skipped
+                else {},
+                "skip_summary": f"{skipped} blocked by column conflict"
+                if skipped
+                else "",
+            }
             raise ValueError(f"Custom column expression conflicts: {conflicts!r}")
 
         # Reconcile checkpoints against the actual destination on every run.

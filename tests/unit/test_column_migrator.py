@@ -200,3 +200,46 @@ async def test_orchestrator_reports_partial_column_failure(
     assert report["migrated_resources"] == 1
     assert report["failed_resources"] == 1
     assert result["errors"][0]["source_id"] == "other-column"
+
+
+@pytest.mark.asyncio
+async def test_orchestrator_reports_preflight_conflict(migrator, tmp_path):
+    from braintrust_migrate.config import Config
+    from braintrust_migrate.orchestration import MigrationOrchestrator
+
+    migrator.source_client.raw_request.return_value = {
+        "objects": [
+            column(),
+            column(name="Missing", id="missing-column"),
+        ]
+    }
+    migrator.dest_client.raw_request.return_value = {
+        "objects": [
+            column("destination", expr="metadata.different"),
+        ]
+    }
+    config = Config(
+        source={"api_key": "test-source"},
+        destination={"api_key": "test-destination"},
+        resources=["columns"],
+        state_dir=tmp_path,
+    )
+    report = await MigrationOrchestrator(config)._migrate_project(
+        {"name": "Test", "source_id": "source", "dest_id": "destination"},
+        migrator.source_client,
+        migrator.dest_client,
+        tmp_path,
+        {},
+    )
+    result = report["resources"]["columns"]
+    assert result["total"] == result["failed"] + result["skipped"]
+    assert result["migrated"] == 0
+    assert result["failed"] == 1
+    assert result["skipped"] == 1
+    assert report["failed_resources"] == 1
+    assert report["migrated_resources"] == 0
+    assert result["errors"][0]["source_id"] == "source-column"
+    assert result["skip_breakdown"] == {"blocked_by_column_conflict": 1}
+    assert result["skipped_details"][0]["source_id"] == "missing-column"
+    assert migrator.dest_client.raw_request.call_count == 1
+    assert migrator.dest_client.raw_request.call_args.args == ("GET", "/v1/column")
