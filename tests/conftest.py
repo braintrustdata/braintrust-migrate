@@ -1,11 +1,30 @@
 """Shared pytest fixtures for the migration tool tests."""
 
 import inspect
+import json
 from unittest.mock import AsyncMock, Mock
 
 import pytest
 
 from braintrust_migrate.config import BraintrustOrgConfig, MigrationConfig
+from braintrust_migrate.openapi_utils import OpenAPISchemaManager
+
+
+@pytest.fixture(autouse=True, scope="session")
+def pinned_openapi_spec():
+    """Load the committed openapi_spec.json instead of fetching the live spec.
+
+    Keeps tests deterministic when the upstream spec changes; upstream drift is
+    picked up by the OpenAPI Spec Watch workflow, which refreshes the file.
+    """
+
+    def _load_local_spec(self):
+        with open(self.local_fallback_path) as f:
+            return json.load(f)
+
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(OpenAPISchemaManager, "_load_spec", _load_local_spec)
+        yield
 
 
 @pytest.fixture
