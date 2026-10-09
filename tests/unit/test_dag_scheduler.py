@@ -54,6 +54,7 @@ class TestResourceTypeDependencies:
             "project_scores",
             "experiments",
             "logs",
+            "columns",
             "views",
             "project_automations",
         }
