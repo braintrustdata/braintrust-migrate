@@ -46,16 +46,16 @@ This tool provides migration capabilities for Braintrust organizations, handling
 
 ### Prerequisites
 
-- **Python 3.8+** (3.12+ recommended)
+- **Python 3.12+**
 - **API Keys** for source and destination Braintrust organizations
 - **Network Access** to Braintrust API endpoints
 
 ### Stable Install (Recommended)
 
-This project is not yet published on PyPI. Install a pinned release from GitHub:
+> **Note:** `braintrust-migrate` is not published on PyPI, so `pip install braintrust-migrate` will not work. Install a pinned release tag from GitHub instead:
 
 ```bash
-pip install "git+https://github.com/braintrustdata/braintrust-migrate.git@v0.4.1"
+pip install "git+https://github.com/braintrustdata/braintrust-migrate.git@v0.5.0"
 ```
 
 > Avoid installing directly from `main` in production workflows.
