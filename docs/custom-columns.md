@@ -2,10 +2,10 @@
 
 Copy custom Logs column names and SQL expressions between projects or organizations using the existing `braintrust-migrate` CLI. The tool reads the source directly; no JSON export or separate Python script is required.
 
-This feature requires a checkout or release containing `--resources columns`; it is not available in v0.4.1. For an unreleased checkout containing this change, install from the repository root using Python 3.12 or newer:
+This feature requires v0.5.0 or later (Python 3.12+):
 
 ```bash
-pip install -e .
+pip install "git+https://github.com/braintrustdata/braintrust-migrate.git@v0.5.0"
 ```
 
 ## Configure the source and destination

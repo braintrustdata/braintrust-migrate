@@ -44,8 +44,8 @@ git push origin vX.Y.Z
    - run tests
    - verify tag `vX.Y.Z` matches `pyproject.toml` version `X.Y.Z`
    - build package artifacts
-   - publish to PyPI
-   - create a GitHub Release
+   - publish to PyPI (not configured yet: the step fails with `invalid-publisher` until a PyPI trusted publisher is set up for this repo and `release.yml`)
+   - create a GitHub Release (until PyPI is configured, the job stops before this step, so create it manually with `gh release create vX.Y.Z --verify-tag --notes-file <changelog section>`)
 
 Create the tag only after the release commit is on `main`, so the tag points at an immutable revision whose `pyproject.toml` version and `CHANGELOG.md` entry already match `X.Y.Z`.
 
@@ -64,7 +64,7 @@ Create the tag only after the release commit is on `main`, so the tag points at 
 
 ## Pinning for Users
 
-PyPI pin:
+PyPI pin (once the package is published on PyPI):
 
 ```bash
 pip install braintrust-migrate==X.Y.Z
