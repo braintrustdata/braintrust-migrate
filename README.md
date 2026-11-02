@@ -6,7 +6,7 @@ A Python CLI & library for migrating Braintrust organizations with maximum fidel
 
 ## Overview
 
-This tool provides migration capabilities for Braintrust organizations, handling everything from AI provider credentials to project-level data. It works well for small and medium migrations, and it now has dedicated streaming paths for high-volume logs, experiment events, and dataset events.
+This tool provides migration capabilities for Braintrust organizations, handling everything from AI provider credentials to project-level data. It works well for small and medium migrations, and it now has dedicated streaming paths for high-volume logs, experiment events, and dataset events. It can also be used to migrate Braintrust organizations between US and EU data plane regions. 
 
 - **Organization administrators** migrating between environments (dev → staging → prod)
 - **Teams** consolidating multiple organizations
