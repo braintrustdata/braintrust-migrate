@@ -6,6 +6,10 @@ The format is based on Keep a Changelog and this project follows Semantic Versio
 
 ## [Unreleased]
 
+### Fixed
+
+- Stop dropping rows that share an id with a row in another dataset or experiment of the same project. Dataset and experiment events are fetched for several objects at once, and the resume-safety store that guards against re-inserting a row was keyed on the row id alone. Copies and versions of a dataset keep their row ids, so within a fetch group only the first dataset to hold a given id received its row; every later copy was counted as `skipped_seen` and never written. The store is now keyed on the containing object plus the row id. Seen-id files written by earlier versions hold bare ids, so on the first resume after upgrading a row fetched again is re-inserted rather than skipped, which is harmless because inserts are keyed by id.
+
 ## [0.5.0] - 2026-10-19
 
 ### Added

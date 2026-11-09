@@ -445,12 +445,31 @@ class StreamHooks(TypedDict, total=False):
     on_batch_error: Callable[[dict[str, Any]], None]
 
 
+def _seen_key(event: dict[str, Any]) -> str | None:
+    """Key a row by its containing object as well as its id.
+
+    Rows in different datasets or experiments can share an id (copies and
+    versions keep them), and one stream can cover several such objects, so the
+    id alone would drop every copy of a row after the first.
+    """
+    event_id = event.get("id")
+    if not (isinstance(event_id, str) and event_id):
+        return None
+    scope = (
+        event.get("dataset_id")
+        or event.get("experiment_id")
+        or event.get("project_id")
+        or ""
+    )
+    return f"{scope}|{event_id}"
+
+
 def _extract_ids(events: list[dict[str, Any]]) -> list[str]:
     ids: list[str] = []
     for e in events:
-        i = e.get("id")
-        if isinstance(i, str) and i:
-            ids.append(i)
+        key = _seen_key(e)
+        if key:
+            ids.append(key)
     return ids
 
 
@@ -651,15 +670,14 @@ async def stream_btql_sorted_events_buffered(
                 unseen = set(seen_db.filter_unseen(all_ids))
                 pending_skipped_seen += len(all_ids) - len(unseen)
                 insert_events_list = [
-                    event for event in insert_events_list if event.get("id") in unseen
+                    event for event in insert_events_list if _seen_key(event) in unseen
                 ]
 
         if pending_seen_ids:
             deduped_events: list[dict[str, Any]] = []
             pending_duplicates = 0
             for event in insert_events_list:
-                event_id = event.get("id")
-                if isinstance(event_id, str) and event_id in pending_seen_ids:
+                if _seen_key(event) in pending_seen_ids:
                     pending_duplicates += 1
                     continue
                 deduped_events.append(event)
