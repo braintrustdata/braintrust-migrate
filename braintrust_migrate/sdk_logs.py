@@ -40,6 +40,11 @@ class SDKRowWriter:
 
         logger = _HTTPBackgroundLogger(LazyValue(lambda: conn, use_mutex=True))
         logger.sync_flush = True
+        # Every write here ends in its own flush(), so the logger's publisher
+        # thread has nothing to do. Left to start on the first log(), it polls
+        # every 100ms while sync_flush is on and never exits, one thread per
+        # writer for the life of the process.
+        logger.started = True
         self._background_logger = logger
         self._lazy_value_cls = LazyValue
 
