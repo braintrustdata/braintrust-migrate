@@ -448,20 +448,15 @@ class StreamHooks(TypedDict, total=False):
 def _seen_key(event: dict[str, Any]) -> str | None:
     """Key a row by its containing object as well as its id.
 
-    Rows in different datasets or experiments can share an id (copies and
-    versions keep them), and one stream can cover several such objects, so the
-    id alone would drop every copy of a row after the first.
+    One stream can cover several datasets or experiments, and rows in
+    different objects can share an id, so the id alone would drop every copy
+    of a row after the first.
     """
     event_id = event.get("id")
     if not (isinstance(event_id, str) and event_id):
         return None
-    scope = (
-        event.get("dataset_id")
-        or event.get("experiment_id")
-        or event.get("project_id")
-        or ""
-    )
-    return f"{scope}|{event_id}"
+    scope = event.get("dataset_id") or event.get("experiment_id")
+    return f"{scope}|{event_id}" if scope else event_id
 
 
 def _extract_ids(events: list[dict[str, Any]]) -> list[str]:
