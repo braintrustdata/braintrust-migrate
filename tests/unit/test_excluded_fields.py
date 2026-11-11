@@ -62,6 +62,7 @@ class TestOpenAPIFieldInclusion:
             "function_type",
             "project_id",
             "name",
+            "environment_slugs",
         }
         assert allowed_fields == expected_allowed
 
