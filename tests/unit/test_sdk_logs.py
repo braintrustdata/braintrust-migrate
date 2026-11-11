@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sys
+import threading
 from types import ModuleType, SimpleNamespace
 from typing import Any
 
@@ -144,4 +145,31 @@ def test_sdk_dataset_writer_adds_dataset_id(monkeypatch) -> None:
             "input": "hello",
             "dataset_id": "dest-dataset-id",
         }
+    ]
+
+
+def test_writers_do_not_start_sdk_publisher_threads(monkeypatch) -> None:
+    """Uses the real SDK logger: its publisher thread starts on the first
+    log() and, with sync_flush on, polls until the process exits. A migration
+    creates a writer per dataset, experiment, and project log stream."""
+    from braintrust.logger import _HTTPBackgroundLogger
+
+    flushed: list[dict[str, Any]] = []
+
+    def _flush_without_http(self, batch_size=None) -> None:
+        flushed.extend(item.get() for item in self.queue.drain_all())
+
+    monkeypatch.setattr(_HTTPBackgroundLogger, "flush", _flush_without_http)
+    dest_client = SimpleNamespace(
+        org_config=SimpleNamespace(url="https://api.example.com", api_key="token")
+    )
+    writers = [SDKDatasetWriter(dest_client, f"dataset-{n}") for n in range(25)]
+
+    threads_before = set(threading.enumerate())
+    for writer in writers:
+        writer.write_rows_sync([{"id": "row1"}])
+
+    assert set(threading.enumerate()) - threads_before == set()
+    assert flushed == [
+        {"id": "row1", "dataset_id": f"dataset-{n}"} for n in range(len(writers))
     ]

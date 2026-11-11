@@ -6,6 +6,10 @@ The format is based on Keep a Changelog and this project follows Semantic Versio
 
 ## [Unreleased]
 
+### Fixed
+
+- Stop leaking one polling thread per migrated dataset, experiment, and project log stream. Each SDK-backed writer owns a Braintrust background logger, whose publisher thread starts on the first write and, with synchronous flushing on, wakes every 100ms for the life of the process. A run over a few thousand datasets ended with a few thousand threads contending for the interpreter lock (sustained multi-core CPU use and steadily slower writes). Writers already flush synchronously after every write, so the publisher thread is no longer started.
+
 ## [0.5.0] - 2026-10-19
 
 ### Added
