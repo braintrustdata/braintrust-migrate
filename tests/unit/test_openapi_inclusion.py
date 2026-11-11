@@ -125,6 +125,7 @@ class TestOpenAPIInclusion:
             "prompt_data",
             "tags",
             "function_type",
+            "environment_slugs",
         }
 
         assert allowed == expected_allowed
