@@ -434,6 +434,10 @@
         ],
         "description": "Whether to summarize the data. If false (or omitted), only the metadata will be returned."
       },
+      "ExperimentMetadata": {
+        "type": "string",
+        "description": "Filter experiments by metadata. Pass a JSON-serialized object, such as `{\"model\":\"gpt-5\",\"config\":{\"temperature\":0}}`. Only experiments whose metadata matches all specified filter keys and values are returned. Nested object values filter on nested keys. Array values are not supported. The object must contain at least one key; an empty object (`{}`) matches no experiments."
+      },
       "Slug": {
         "type": "string",
         "description": "Retrieve prompt with a specific slug"
@@ -873,6 +877,39 @@
               "description": "Path to the application's end-user identifier in metadata or span_attributes, for example [\"metadata\", \"customer_id\"]. This identifies an end user, not a session, request, organization, or the Braintrust user who created the project."
             }
           },
+          "pattern_alert_mention": {
+            "type": [
+              "object",
+              "null"
+            ],
+            "properties": {
+              "workspace_id": {
+                "type": "string",
+                "minLength": 1
+              },
+              "mention_user_id": {
+                "type": "string",
+                "pattern": "^[UW][A-Z0-9]+$",
+                "description": "Slack member ID of the user or agent to mention in a Pattern alert's thread to investigate the pattern."
+              },
+              "mention_handle": {
+                "type": "string",
+                "maxLength": 80,
+                "description": "Username shown for the selected user or agent. Mentions use mention_user_id."
+              },
+              "mention_prompt": {
+                "type": "string",
+                "maxLength": 2000,
+                "pattern": "\\{\\{pattern\\}\\}",
+                "description": "Message posted after the mention in a Pattern alert's thread. {{pattern}} is replaced with a link to the pattern. Defaults to \"Please investigate this pattern: {{pattern}}. Review the evidence, identify the root cause, and suggest a fix.\""
+              }
+            },
+            "required": [
+              "workspace_id",
+              "mention_user_id"
+            ],
+            "description": "Project-wide Slack user or agent and prompt for Pattern alert threads. Applies only to destinations in the selected workspace. Unset or null disables mentions."
+          },
           "pattern_alert_destinations": {
             "type": [
               "array",
@@ -893,6 +930,60 @@
                     "url": {
                       "type": "string",
                       "description": "The webhook URL to send the request to"
+                    },
+                    "headers": {
+                      "type": "array",
+                      "items": {
+                        "anyOf": [
+                          {
+                            "type": "object",
+                            "properties": {
+                              "name": {
+                                "type": "string",
+                                "minLength": 1,
+                                "maxLength": 256,
+                                "pattern": "^[!#$%&'*+.^_`|~0-9A-Za-z-]+$",
+                                "description": "The HTTP header name"
+                              },
+                              "value": {
+                                "type": "string",
+                                "maxLength": 8192,
+                                "pattern": "^[\\t\\x20-\\x7e\\x80-\\xff]*$",
+                                "description": "The HTTP header value"
+                              }
+                            },
+                            "required": [
+                              "name",
+                              "value"
+                            ],
+                            "additionalProperties": false
+                          },
+                          {
+                            "type": "object",
+                            "properties": {
+                              "name": {
+                                "type": "string",
+                                "minLength": 1,
+                                "maxLength": 256,
+                                "pattern": "^[!#$%&'*+.^_`|~0-9A-Za-z-]+$",
+                                "description": "The HTTP header name"
+                              },
+                              "secret_name": {
+                                "type": "string",
+                                "format": "uuid",
+                                "description": "The data-plane secret containing the header value, bound to the webhook URL it was saved for"
+                              }
+                            },
+                            "required": [
+                              "name",
+                              "secret_name"
+                            ],
+                            "additionalProperties": false
+                          }
+                        ]
+                      },
+                      "maxItems": 20,
+                      "description": "Custom HTTP headers to send with the webhook request"
                     },
                     "formatting_prompt": {
                       "type": "string",
@@ -983,6 +1074,39 @@
             },
             "maxItems": 20,
             "description": "Project-wide Slack, webhook, and PagerDuty destinations for new and reactivated Pattern alerts. An empty array disables alerts."
+          },
+          "pattern_alert_min_severity": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "enum": [
+              "high",
+              "medium",
+              "low",
+              null
+            ],
+            "description": "Lowest severity that sends Pattern alerts: `low`, `medium`, or `high`. New and reactivated Patterns below it don't send alerts, and raising an active Pattern's severity to it or above sends one. Patterns without a severity count as low. Informational Patterns follow `pattern_alert_informational` instead. Unset or null uses medium."
+          },
+          "pattern_alert_informational": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "Whether new and reactivated informational Patterns send alerts, independent of `pattern_alert_min_severity`. Unset or null sends them."
+          },
+          "pattern_excluded_categories": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 64
+            },
+            "maxItems": 64,
+            "description": "Patterns rubric categories this project turned off. Patterns doesn't look for or assign them."
           },
           "session_id_fields": {
             "type": [
@@ -1372,6 +1496,20 @@
                   "null"
                 ],
                 "description": "The model used for this example"
+              },
+              "requested_service_tier": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "The service tier requested for this LLM call"
+              },
+              "served_service_tier": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "The service tier that served this LLM call"
               }
             },
             "additionalProperties": {},
@@ -1743,6 +1881,20 @@
                   "null"
                 ],
                 "description": "The model used for this example"
+              },
+              "requested_service_tier": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "The service tier requested for this LLM call"
+              },
+              "served_service_tier": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "The service tier that served this LLM call"
               }
             },
             "additionalProperties": {},
@@ -2619,6 +2771,20 @@
                   "null"
                 ],
                 "description": "The model used for this example"
+              },
+              "requested_service_tier": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "The service tier requested for this LLM call"
+              },
+              "served_service_tier": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "The service tier that served this LLM call"
               }
             },
             "additionalProperties": {},
@@ -2930,6 +3096,20 @@
                   "null"
                 ],
                 "description": "The model used for this example"
+              },
+              "requested_service_tier": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "The service tier requested for this LLM call"
+              },
+              "served_service_tier": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "The service tier that served this LLM call"
               }
             },
             "additionalProperties": {},
@@ -3566,6 +3746,20 @@
                   "null"
                 ],
                 "description": "The model used for this example"
+              },
+              "requested_service_tier": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "The service tier requested for this LLM call"
+              },
+              "served_service_tier": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "The service tier that served this LLM call"
               }
             },
             "additionalProperties": {},
@@ -3766,6 +3960,20 @@
                   "null"
                 ],
                 "description": "The model used for this example"
+              },
+              "requested_service_tier": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "The service tier requested for this LLM call"
+              },
+              "served_service_tier": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "The service tier that served this LLM call"
               }
             },
             "additionalProperties": {},
@@ -5134,6 +5342,9 @@
                   "medium",
                   "high"
                 ]
+              },
+              "service_tier": {
+                "type": "string"
               }
             },
             "additionalProperties": {},
@@ -7078,6 +7289,60 @@
                       "type": "string",
                       "description": "The webhook URL to send the request to"
                     },
+                    "headers": {
+                      "type": "array",
+                      "items": {
+                        "anyOf": [
+                          {
+                            "type": "object",
+                            "properties": {
+                              "name": {
+                                "type": "string",
+                                "minLength": 1,
+                                "maxLength": 256,
+                                "pattern": "^[!#$%&'*+.^_`|~0-9A-Za-z-]+$",
+                                "description": "The HTTP header name"
+                              },
+                              "value": {
+                                "type": "string",
+                                "maxLength": 8192,
+                                "pattern": "^[\\t\\x20-\\x7e\\x80-\\xff]*$",
+                                "description": "The HTTP header value"
+                              }
+                            },
+                            "required": [
+                              "name",
+                              "value"
+                            ],
+                            "additionalProperties": false
+                          },
+                          {
+                            "type": "object",
+                            "properties": {
+                              "name": {
+                                "type": "string",
+                                "minLength": 1,
+                                "maxLength": 256,
+                                "pattern": "^[!#$%&'*+.^_`|~0-9A-Za-z-]+$",
+                                "description": "The HTTP header name"
+                              },
+                              "secret_name": {
+                                "type": "string",
+                                "format": "uuid",
+                                "description": "The data-plane secret containing the header value, bound to the webhook URL it was saved for"
+                              }
+                            },
+                            "required": [
+                              "name",
+                              "secret_name"
+                            ],
+                            "additionalProperties": false
+                          }
+                        ]
+                      },
+                      "maxItems": 20,
+                      "description": "Custom HTTP headers to send with the webhook request"
+                    },
                     "formatting_prompt": {
                       "type": "string",
                       "minLength": 1,
@@ -7638,6 +7903,60 @@
                             "type": "string",
                             "description": "The webhook URL to send the request to"
                           },
+                          "headers": {
+                            "type": "array",
+                            "items": {
+                              "anyOf": [
+                                {
+                                  "type": "object",
+                                  "properties": {
+                                    "name": {
+                                      "type": "string",
+                                      "minLength": 1,
+                                      "maxLength": 256,
+                                      "pattern": "^[!#$%&'*+.^_`|~0-9A-Za-z-]+$",
+                                      "description": "The HTTP header name"
+                                    },
+                                    "value": {
+                                      "type": "string",
+                                      "maxLength": 8192,
+                                      "pattern": "^[\\t\\x20-\\x7e\\x80-\\xff]*$",
+                                      "description": "The HTTP header value"
+                                    }
+                                  },
+                                  "required": [
+                                    "name",
+                                    "value"
+                                  ],
+                                  "additionalProperties": false
+                                },
+                                {
+                                  "type": "object",
+                                  "properties": {
+                                    "name": {
+                                      "type": "string",
+                                      "minLength": 1,
+                                      "maxLength": 256,
+                                      "pattern": "^[!#$%&'*+.^_`|~0-9A-Za-z-]+$",
+                                      "description": "The HTTP header name"
+                                    },
+                                    "secret_name": {
+                                      "type": "string",
+                                      "format": "uuid",
+                                      "description": "The data-plane secret containing the header value, bound to the webhook URL it was saved for"
+                                    }
+                                  },
+                                  "required": [
+                                    "name",
+                                    "secret_name"
+                                  ],
+                                  "additionalProperties": false
+                                }
+                              ]
+                            },
+                            "maxItems": 20,
+                            "description": "Custom HTTP headers to send with the webhook request"
+                          },
                           "formatting_prompt": {
                             "type": "string",
                             "minLength": 1,
@@ -8024,6 +8343,60 @@
                           "url": {
                             "type": "string",
                             "description": "The webhook URL to send the request to"
+                          },
+                          "headers": {
+                            "type": "array",
+                            "items": {
+                              "anyOf": [
+                                {
+                                  "type": "object",
+                                  "properties": {
+                                    "name": {
+                                      "type": "string",
+                                      "minLength": 1,
+                                      "maxLength": 256,
+                                      "pattern": "^[!#$%&'*+.^_`|~0-9A-Za-z-]+$",
+                                      "description": "The HTTP header name"
+                                    },
+                                    "value": {
+                                      "type": "string",
+                                      "maxLength": 8192,
+                                      "pattern": "^[\\t\\x20-\\x7e\\x80-\\xff]*$",
+                                      "description": "The HTTP header value"
+                                    }
+                                  },
+                                  "required": [
+                                    "name",
+                                    "value"
+                                  ],
+                                  "additionalProperties": false
+                                },
+                                {
+                                  "type": "object",
+                                  "properties": {
+                                    "name": {
+                                      "type": "string",
+                                      "minLength": 1,
+                                      "maxLength": 256,
+                                      "pattern": "^[!#$%&'*+.^_`|~0-9A-Za-z-]+$",
+                                      "description": "The HTTP header name"
+                                    },
+                                    "secret_name": {
+                                      "type": "string",
+                                      "format": "uuid",
+                                      "description": "The data-plane secret containing the header value, bound to the webhook URL it was saved for"
+                                    }
+                                  },
+                                  "required": [
+                                    "name",
+                                    "secret_name"
+                                  ],
+                                  "additionalProperties": false
+                                }
+                              ]
+                            },
+                            "maxItems": 20,
+                            "description": "Custom HTTP headers to send with the webhook request"
                           },
                           "formatting_prompt": {
                             "type": "string",
@@ -8213,6 +8586,60 @@
                             "type": "string",
                             "description": "The webhook URL to send the request to"
                           },
+                          "headers": {
+                            "type": "array",
+                            "items": {
+                              "anyOf": [
+                                {
+                                  "type": "object",
+                                  "properties": {
+                                    "name": {
+                                      "type": "string",
+                                      "minLength": 1,
+                                      "maxLength": 256,
+                                      "pattern": "^[!#$%&'*+.^_`|~0-9A-Za-z-]+$",
+                                      "description": "The HTTP header name"
+                                    },
+                                    "value": {
+                                      "type": "string",
+                                      "maxLength": 8192,
+                                      "pattern": "^[\\t\\x20-\\x7e\\x80-\\xff]*$",
+                                      "description": "The HTTP header value"
+                                    }
+                                  },
+                                  "required": [
+                                    "name",
+                                    "value"
+                                  ],
+                                  "additionalProperties": false
+                                },
+                                {
+                                  "type": "object",
+                                  "properties": {
+                                    "name": {
+                                      "type": "string",
+                                      "minLength": 1,
+                                      "maxLength": 256,
+                                      "pattern": "^[!#$%&'*+.^_`|~0-9A-Za-z-]+$",
+                                      "description": "The HTTP header name"
+                                    },
+                                    "secret_name": {
+                                      "type": "string",
+                                      "format": "uuid",
+                                      "description": "The data-plane secret containing the header value, bound to the webhook URL it was saved for"
+                                    }
+                                  },
+                                  "required": [
+                                    "name",
+                                    "secret_name"
+                                  ],
+                                  "additionalProperties": false
+                                }
+                              ]
+                            },
+                            "maxItems": 20,
+                            "description": "Custom HTTP headers to send with the webhook request"
+                          },
                           "formatting_prompt": {
                             "type": "string",
                             "minLength": 1,
@@ -8599,6 +9026,60 @@
                           "url": {
                             "type": "string",
                             "description": "The webhook URL to send the request to"
+                          },
+                          "headers": {
+                            "type": "array",
+                            "items": {
+                              "anyOf": [
+                                {
+                                  "type": "object",
+                                  "properties": {
+                                    "name": {
+                                      "type": "string",
+                                      "minLength": 1,
+                                      "maxLength": 256,
+                                      "pattern": "^[!#$%&'*+.^_`|~0-9A-Za-z-]+$",
+                                      "description": "The HTTP header name"
+                                    },
+                                    "value": {
+                                      "type": "string",
+                                      "maxLength": 8192,
+                                      "pattern": "^[\\t\\x20-\\x7e\\x80-\\xff]*$",
+                                      "description": "The HTTP header value"
+                                    }
+                                  },
+                                  "required": [
+                                    "name",
+                                    "value"
+                                  ],
+                                  "additionalProperties": false
+                                },
+                                {
+                                  "type": "object",
+                                  "properties": {
+                                    "name": {
+                                      "type": "string",
+                                      "minLength": 1,
+                                      "maxLength": 256,
+                                      "pattern": "^[!#$%&'*+.^_`|~0-9A-Za-z-]+$",
+                                      "description": "The HTTP header name"
+                                    },
+                                    "secret_name": {
+                                      "type": "string",
+                                      "format": "uuid",
+                                      "description": "The data-plane secret containing the header value, bound to the webhook URL it was saved for"
+                                    }
+                                  },
+                                  "required": [
+                                    "name",
+                                    "secret_name"
+                                  ],
+                                  "additionalProperties": false
+                                }
+                              ]
+                            },
+                            "maxItems": 20,
+                            "description": "Custom HTTP headers to send with the webhook request"
                           },
                           "formatting_prompt": {
                             "type": "string",
@@ -8770,6 +9251,60 @@
                             "type": "string",
                             "description": "The webhook URL to send the request to"
                           },
+                          "headers": {
+                            "type": "array",
+                            "items": {
+                              "anyOf": [
+                                {
+                                  "type": "object",
+                                  "properties": {
+                                    "name": {
+                                      "type": "string",
+                                      "minLength": 1,
+                                      "maxLength": 256,
+                                      "pattern": "^[!#$%&'*+.^_`|~0-9A-Za-z-]+$",
+                                      "description": "The HTTP header name"
+                                    },
+                                    "value": {
+                                      "type": "string",
+                                      "maxLength": 8192,
+                                      "pattern": "^[\\t\\x20-\\x7e\\x80-\\xff]*$",
+                                      "description": "The HTTP header value"
+                                    }
+                                  },
+                                  "required": [
+                                    "name",
+                                    "value"
+                                  ],
+                                  "additionalProperties": false
+                                },
+                                {
+                                  "type": "object",
+                                  "properties": {
+                                    "name": {
+                                      "type": "string",
+                                      "minLength": 1,
+                                      "maxLength": 256,
+                                      "pattern": "^[!#$%&'*+.^_`|~0-9A-Za-z-]+$",
+                                      "description": "The HTTP header name"
+                                    },
+                                    "secret_name": {
+                                      "type": "string",
+                                      "format": "uuid",
+                                      "description": "The data-plane secret containing the header value, bound to the webhook URL it was saved for"
+                                    }
+                                  },
+                                  "required": [
+                                    "name",
+                                    "secret_name"
+                                  ],
+                                  "additionalProperties": false
+                                }
+                              ]
+                            },
+                            "maxItems": 20,
+                            "description": "Custom HTTP headers to send with the webhook request"
+                          },
                           "formatting_prompt": {
                             "type": "string",
                             "minLength": 1,
@@ -9156,6 +9691,60 @@
                           "url": {
                             "type": "string",
                             "description": "The webhook URL to send the request to"
+                          },
+                          "headers": {
+                            "type": "array",
+                            "items": {
+                              "anyOf": [
+                                {
+                                  "type": "object",
+                                  "properties": {
+                                    "name": {
+                                      "type": "string",
+                                      "minLength": 1,
+                                      "maxLength": 256,
+                                      "pattern": "^[!#$%&'*+.^_`|~0-9A-Za-z-]+$",
+                                      "description": "The HTTP header name"
+                                    },
+                                    "value": {
+                                      "type": "string",
+                                      "maxLength": 8192,
+                                      "pattern": "^[\\t\\x20-\\x7e\\x80-\\xff]*$",
+                                      "description": "The HTTP header value"
+                                    }
+                                  },
+                                  "required": [
+                                    "name",
+                                    "value"
+                                  ],
+                                  "additionalProperties": false
+                                },
+                                {
+                                  "type": "object",
+                                  "properties": {
+                                    "name": {
+                                      "type": "string",
+                                      "minLength": 1,
+                                      "maxLength": 256,
+                                      "pattern": "^[!#$%&'*+.^_`|~0-9A-Za-z-]+$",
+                                      "description": "The HTTP header name"
+                                    },
+                                    "secret_name": {
+                                      "type": "string",
+                                      "format": "uuid",
+                                      "description": "The data-plane secret containing the header value, bound to the webhook URL it was saved for"
+                                    }
+                                  },
+                                  "required": [
+                                    "name",
+                                    "secret_name"
+                                  ],
+                                  "additionalProperties": false
+                                }
+                              ]
+                            },
+                            "maxItems": 20,
+                            "description": "Custom HTTP headers to send with the webhook request"
                           },
                           "formatting_prompt": {
                             "type": "string",
@@ -11451,7 +12040,7 @@
               "type": {
                 "type": "string",
                 "enum": [
-                  "simulation"
+                  "conversation"
                 ]
               },
               "config": {
@@ -11674,7 +12263,7 @@
             ],
             "additionalProperties": false,
             "description": "A task function that runs a conversation between an agent and a simulated user.",
-            "title": "simulation"
+            "title": "conversation"
           }
         ]
       },
@@ -12146,7 +12735,7 @@
               "type": {
                 "type": "string",
                 "enum": [
-                  "simulation"
+                  "conversation"
                 ]
               },
               "config": {
@@ -12369,7 +12958,7 @@
             ],
             "additionalProperties": false,
             "description": "A task function that runs a conversation between an agent and a simulated user.",
-            "title": "simulation"
+            "title": "conversation"
           },
           {
             "type": "null"
@@ -13718,6 +14307,14 @@
             "format": "uuid",
             "description": "Unique identifier for the organization"
           },
+          "last_used_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time",
+            "description": "Approximate time this credential was last used to authenticate. Updates are limited to once every 10 minutes and may be delayed by authorization caches. If null, no usage has been recorded."
+          },
           "expires_at": {
             "type": [
               "string",
@@ -13786,6 +14383,14 @@
             ],
             "format": "uuid",
             "description": "Unique identifier for the organization"
+          },
+          "last_used_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time",
+            "description": "Approximate time this credential was last used to authenticate. Updates are limited to once every 10 minutes and may be delayed by authorization caches. If null, no usage has been recorded."
           },
           "expires_at": {
             "type": [
@@ -13860,6 +14465,14 @@
             ],
             "format": "uuid",
             "description": "Unique identifier for the organization"
+          },
+          "last_used_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time",
+            "description": "Approximate time this credential was last used to authenticate. Updates are limited to once every 10 minutes and may be delayed by authorization caches. If null, no usage has been recorded."
           },
           "expires_at": {
             "type": [
@@ -16064,6 +16677,15 @@
         "name": "summarize_data",
         "in": "query"
       },
+      "ExperimentMetadata": {
+        "schema": {
+          "$ref": "#/components/schemas/ExperimentMetadata"
+        },
+        "required": false,
+        "description": "Filter experiments by metadata. Pass a JSON-serialized object, such as `{\"model\":\"gpt-5\",\"config\":{\"temperature\":0}}`. Only experiments whose metadata matches all specified filter keys and values are returned. Nested object values filter on nested keys. Array values are not supported. The object must contain at least one key; an empty object (`{}`) matches no experiments.",
+        "name": "metadata",
+        "in": "query"
+      },
       "Slug": {
         "schema": {
           "$ref": "#/components/schemas/Slug"
@@ -17420,6 +18042,9 @@
           },
           {
             "$ref": "#/components/parameters/ProjectIdQuery"
+          },
+          {
+            "$ref": "#/components/parameters/ExperimentMetadata"
           },
           {
             "$ref": "#/components/parameters/OrgName"
